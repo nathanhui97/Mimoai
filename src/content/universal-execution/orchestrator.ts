@@ -21,6 +21,7 @@ import { executeTextInput } from './action-primitives/text-input';
 import { isDropdownPattern, isSimpleClickPattern, isTextInputPattern } from './component-detector';
 import { aiConfig } from '../../lib/ai-config';
 import { AIVisualClickService, type WorkflowContext } from '../../lib/ai-visual-click';
+import { FeatureFlags } from '../../lib/feature-flags';
 
 // ============================================================================
 // Main Orchestrator
@@ -206,6 +207,18 @@ async function executeStep(
       }
 
       // ===================================================================
+      // EXECUTION STRATEGY SELECTION (Based on Recording-Time Analysis)
+      // ===================================================================
+      const elementAnalysis = step.metadata?.elementAnalysis as any;
+      const executionStrategy = elementAnalysis?.executionStrategy || 'AI_RECOMMENDED';
+      
+      console.log(`[UniversalOrchestrator] 🎯 Execution Strategy: ${executionStrategy}`);
+      if (elementAnalysis) {
+        console.log(`[UniversalOrchestrator]    Confidence: ${elementAnalysis.confidence}/100`);
+        console.log(`[UniversalOrchestrator]    Reasons: ${elementAnalysis.reasons.slice(0, 3).join(', ')}`);
+      }
+
+      // ===================================================================
       // SMART PRIORITY: Check if we have annotated screenshot
       // If YES → Try AI Visual Click FIRST (95%+ accuracy)
       // If NO → Use standard selectors first
@@ -217,8 +230,14 @@ async function executeStep(
       
       let resolution: any = null;
       
-      // PRIORITY PATH: AI Visual Click First (if we have annotated screenshot)
-      if (hasAnnotatedScreenshot && aiConfig.isEnabled()) {
+      // PRIORITY PATH: AI Visual Click First (if required OR if we have annotated screenshot)
+      // Gate behind feature flag
+      const shouldUseAI = FeatureFlags.VISION_CLICKER && (
+        executionStrategy === 'AI_REQUIRED' || 
+        (executionStrategy === 'AI_RECOMMENDED' && hasAnnotatedScreenshot)
+      );
+      
+      if (shouldUseAI && aiConfig.isEnabled()) {
         console.log(`[UniversalOrchestrator] 🎯 Trying AI Visual Click FIRST (annotated screenshot available)...`);
         console.log(`[UniversalOrchestrator] 📍 Current URL: ${window.location.href}`);
         console.log(`[UniversalOrchestrator] 📍 Recorded URL: ${step.metadata?.url || 'unknown'}`);
@@ -319,10 +338,13 @@ async function executeStep(
       }
       
       // FALLBACK PATH: Standard selector resolution
-      console.log(`[UniversalOrchestrator] Using standard selector resolution...`);
+      // For SIMPLE strategy, use fast timeout (2s instead of 10s)
+      const selectorTimeout = executionStrategy === 'SIMPLE' ? 2000 : options.timeout;
+      
+      console.log(`[UniversalOrchestrator] Using standard selector resolution (timeout: ${selectorTimeout}ms)...`);
       resolution = domPath.boundaryType !== 'none'
-        ? resolveAcrossBoundaries(domPath, pattern.data.target, { timeout: options.timeout })
-        : await resolveElement(pattern.data.target, { timeout: options.timeout });
+        ? resolveAcrossBoundaries(domPath, pattern.data.target, { timeout: selectorTimeout })
+        : await resolveElement(pattern.data.target, { timeout: selectorTimeout });
 
       // Check for zero-dimension elements (Salesforce Lightning issue)
       if (resolution.status === 'found') {
@@ -356,8 +378,16 @@ async function executeStep(
       }
 
       // Try AI Visual Click as FALLBACK if element not found AND we didn't already try it as primary
-      if (resolution.status !== 'found' && aiConfig.isEnabled() && !hasAnnotatedScreenshot) {
-        console.log(`[UniversalOrchestrator] 🔍 Trying AI Visual Click as fallback (no annotated screenshot)...`);
+      // Skip AI fallback for SIMPLE strategy (fast path only)
+      // Gate behind feature flag
+      const shouldTryAIFallback = FeatureFlags.VISION_CLICKER && 
+                                   executionStrategy !== 'SIMPLE' && 
+                                   resolution.status !== 'found' && 
+                                   aiConfig.isEnabled() && 
+                                   !hasAnnotatedScreenshot;
+      
+      if (shouldTryAIFallback) {
+        console.log(`[UniversalOrchestrator] 🔍 Trying AI Visual Click as fallback (strategy: ${executionStrategy})...`);
         
         try {
           const visualTarget = AIVisualClickService.targetFromSignature(
@@ -530,6 +560,88 @@ async function executeStep(
       };
     }
 
+    case 'SCROLL': {
+      // Handle scroll step - replay the scroll from recording
+      const viewport = step.metadata?.viewport as any;
+      
+      try {
+        // Check if this is a container scroll or window scroll
+        if (viewport?.elementScrollContainer) {
+          // Container scroll - find the container and scroll it
+          const containerInfo = viewport.elementScrollContainer;
+          const containerSelector = containerInfo.selector;
+          const scrollTop = containerInfo.scrollTop || 0;
+          const scrollLeft = containerInfo.scrollLeft || 0;
+          
+          console.log(`[UniversalOrchestrator] 📜 Replaying container scroll: ${containerSelector} to top=${scrollTop}, left=${scrollLeft}`);
+          
+          // Try to find the container
+          let container: Element | null = null;
+          try {
+            container = document.querySelector(containerSelector);
+          } catch (err) {
+            // Selector might be invalid, try fallback selectors from payload
+            const fallbackSelectors = (step as any).pattern?.data?.fallbackSelectors || [];
+            for (const selector of fallbackSelectors) {
+              try {
+                container = document.querySelector(selector);
+                if (container) break;
+              } catch (e) {
+                // Continue to next selector
+              }
+            }
+          }
+          
+          if (!container) {
+            console.warn(`[UniversalOrchestrator] Container not found: ${containerSelector}`);
+            return {
+              success: false,
+              elapsedMs: Date.now() - startTime,
+              error: `Scroll container not found: ${containerSelector}`,
+            };
+          }
+          
+          // Scroll the container
+          container.scrollTop = scrollTop;
+          container.scrollLeft = scrollLeft;
+          
+          // Wait for scroll to complete
+          await sleep(300);
+          
+          return {
+            success: true,
+            elapsedMs: Date.now() - startTime,
+          };
+        } else {
+          // Window scroll
+          const scrollX = viewport?.scrollX || 0;
+          const scrollY = viewport?.scrollY || 0;
+          
+          console.log(`[UniversalOrchestrator] 📜 Replaying window scroll to x=${scrollX}, y=${scrollY}`);
+          
+          window.scrollTo({
+            top: scrollY,
+            left: scrollX,
+            behavior: 'smooth',
+          });
+          
+          // Wait for scroll to complete
+          await sleep(500);
+          
+          return {
+            success: true,
+            elapsedMs: Date.now() - startTime,
+          };
+        }
+      } catch (error) {
+        return {
+          success: false,
+          elapsedMs: Date.now() - startTime,
+          error: error instanceof Error ? error.message : 'Scroll execution failed',
+        };
+      }
+    }
+
     default:
       return {
         success: false,
@@ -643,6 +755,16 @@ export function convertLegacyStep(
         inputType: payload.inputDetails?.type || 'text',
       },
     };
+  } else if (legacyStep.type === 'SCROLL') {
+    // Handle scroll steps - store the scroll info in pattern data
+    pattern = {
+      type: 'SCROLL',
+      data: {
+        selector: payload.selector || 'body',
+        fallbackSelectors: payload.fallbackSelectors || ['body', 'html'],
+        viewport: payload.viewport,
+      },
+    } as any; // Cast as any since SCROLL is not a standard ComponentPattern type
   } else if (legacyStep.type === 'CLICK' && payload.elementRole === 'combobox') {
     // This might be a dropdown trigger
     pattern = {

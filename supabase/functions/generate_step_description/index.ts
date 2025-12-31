@@ -31,7 +31,7 @@ interface StepDescriptionPayload {
       };
       context?: {
         container?: { text?: string; type?: string };
-        parent?: { text?: string };
+        parent?: { text?: string; attributes?: { role?: string } };
         buttonContext?: { label?: string; section?: string };
         decisionSpace?: {
           type: string;
@@ -39,7 +39,17 @@ interface StepDescriptionPayload {
           selectedIndex?: number;
           selectedText?: string;
         };
+        siblings?: { before?: string[]; after?: string[] };
+        surroundingText?: string;
       };
+      aiEvidence?: {
+        semanticAnchors?: {
+          textLabel?: string;
+          ariaLabel?: string;
+          nearbyText?: string[];
+        };
+      };
+      disambiguators?: string[];
     };
   };
 }
@@ -115,6 +125,11 @@ serve(async (req) => {
     console.log('Label:', payload.step.payload.label);
     console.log('Container context:', payload.step.payload.context?.container?.text || 'NONE');
     console.log('Container type:', payload.step.payload.context?.container?.type || 'NONE');
+    console.log('Parent text:', payload.step.payload.context?.parent?.text || 'NONE');
+    console.log('Aria label:', payload.step.payload.aiEvidence?.semanticAnchors?.ariaLabel || 'NONE');
+    console.log('Text label:', payload.step.payload.aiEvidence?.semanticAnchors?.textLabel || 'NONE');
+    console.log('Nearby text:', payload.step.payload.aiEvidence?.semanticAnchors?.nearbyText || 'NONE');
+    console.log('Disambiguators:', payload.step.payload.disambiguators || 'NONE');
     
     // Build prompt from step
     const prompt = buildPrompt(payload);
@@ -319,6 +334,28 @@ function buildPrompt(payload: StepDescriptionPayload): string {
   }
   
   prompt += `Step Type: ${step.type}\n\n`;
+  
+  // PRIMARY ELEMENT IDENTIFICATION from recorded data
+  // These are the MOST RELIABLE sources for what element was clicked
+  const parentText = step.payload.context?.parent?.text;
+  const ariaLabel = step.payload.aiEvidence?.semanticAnchors?.ariaLabel;
+  const textLabel = step.payload.aiEvidence?.semanticAnchors?.textLabel;
+  const nearbyText = step.payload.aiEvidence?.semanticAnchors?.nearbyText;
+  const disambiguators = step.payload.disambiguators;
+  const parentRole = step.payload.context?.parent?.attributes?.role;
+  
+  if (parentText || ariaLabel || textLabel) {
+    prompt += `\n🎯 ACTUAL ELEMENT CLICKED (from recording):\n`;
+    if (ariaLabel) prompt += `  - Aria Label: "${ariaLabel}"\n`;
+    if (textLabel) prompt += `  - Text Label: "${textLabel}"\n`;
+    if (parentText) prompt += `  - Parent Text: "${parentText}"\n`;
+    if (parentRole) prompt += `  - Parent Role: "${parentRole}"\n`;
+    if (nearbyText?.length) prompt += `  - Nearby Text: ${nearbyText.slice(0, 3).join(', ')}\n`;
+    if (disambiguators?.length) prompt += `  - Disambiguators: ${disambiguators.slice(0, 3).join(', ')}\n`;
+    prompt += `\n⚠️ IMPORTANT: Use the ACTUAL ELEMENT info above instead of making up element names!\n`;
+    prompt += `If parent text says "Show Navigation Menu", describe it as "Click navigation menu dropdown"\n`;
+    prompt += `If aria label says "Search", describe it as "Click search button"\n\n`;
+  }
   
   // Text context is SECONDARY (supplementary information)
   prompt += `Supplementary Text Context (use only if visual snapshot is unclear):\n`;
@@ -552,6 +589,36 @@ function parseGeminiResponse(geminiData: any, payload: StepDescriptionPayload): 
       }
       
       console.log('✅ Generated fallback description:', description);
+    }
+    
+    // ADDITIONAL VALIDATION: Check if description matches recorded element data
+    // This prevents AI from hallucinating completely wrong descriptions
+    const parentText = payload.step.payload.context?.parent?.text;
+    const ariaLabel = payload.step.payload.aiEvidence?.semanticAnchors?.ariaLabel;
+    const textLabel = payload.step.payload.aiEvidence?.semanticAnchors?.textLabel;
+    
+    // Get the most reliable recorded text
+    const recordedText = ariaLabel || textLabel || parentText;
+    
+    if (recordedText && payload.step.type === 'CLICK') {
+      const descLower = description.toLowerCase();
+      const recordedLower = recordedText.toLowerCase();
+      
+      // Check if description contains at least the first 10 chars of recorded text
+      const recordedSubstring = recordedLower.substring(0, Math.min(10, recordedLower.length));
+      
+      if (!descLower.includes(recordedSubstring) && recordedText.length >= 3) {
+        console.warn(`⚠️ Description "${description}" doesn't match recorded element "${recordedText}"`);
+        console.warn(`⚠️ Using recorded text instead`);
+        
+        // Use recorded text directly with proper formatting
+        const containerText = payload.step.payload.context?.container?.text;
+        description = containerText && containerText.length <= 40
+          ? `Click "${recordedText}" in ${containerText}`
+          : `Click on "${recordedText}"`;
+        
+        console.log('✅ Corrected description:', description);
+      }
     }
     
     const result: StepDescriptionResult = {

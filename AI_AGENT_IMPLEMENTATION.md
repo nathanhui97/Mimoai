@@ -222,3 +222,5 @@ Step 5: AI observes saved page
 - `src/content/content-script.ts` - Added EXECUTE_WORKFLOW_AGENT handler
 - `src/types/messages.ts` - Added new message types
 
+
+

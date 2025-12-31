@@ -21,6 +21,7 @@ interface ExtensionStore extends ExtensionStateData {
   setLastPingTime: (timestamp: number | null) => void;
   addWorkflowStep: (step: WorkflowStep) => void;
   updateWorkflowStep: (stepId: string, step: WorkflowStep) => void;
+  setWorkflowSteps: (steps: WorkflowStep[]) => void;
   clearWorkflowSteps: () => void;
   loadWorkflow: (workflow: SavedWorkflow) => void;
   setSavedWorkflows: (workflows: SavedWorkflow[]) => void;
@@ -101,6 +102,10 @@ export const useExtensionStore = create<ExtensionStore>((set) => ({
       }
       return state; // Step not found, no update
     });
+  },
+
+  setWorkflowSteps: (steps: WorkflowStep[]) => {
+    set({ workflowSteps: steps });
   },
 
   clearWorkflowSteps: () => {

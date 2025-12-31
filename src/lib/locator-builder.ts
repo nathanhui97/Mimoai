@@ -20,6 +20,8 @@ import {
   hasDynamicParts,
   isLikelyDynamicText,
 } from '../types/locator';
+import { computeAccessibleName } from './accessible-name';
+import { FeatureFlags } from './feature-flags';
 import type { Scope } from '../types/scope';
 import { 
   createPageScope, 
@@ -41,16 +43,23 @@ export function buildLocatorBundle(
   
   const bundle = createEmptyBundle(tagName, role);
   
-  // Build all locator strategies
+  // Build all locator strategies in PRIORITY ORDER
+  // 1. testid (highest priority)
+  // 2. role + accessible name
+  // 3. aria-label
+  // 4. text content
+  // 5. CSS selectors
+  // 6. XPath (only if enabled)
+  // 7. position (last resort)
   const positionLocator = buildPositionLocator(element);
   bundle.strategies = [
-    ...buildCSSLocators(element, doc),
-    ...buildTextLocators(element),
-    ...buildAriaLocators(element),
-    ...buildRoleLocators(element),
-    ...buildTestIdLocators(element, doc),
-    ...buildXPathLocators(element, doc),
-    ...(positionLocator ? [positionLocator] : []),
+    ...buildTestIdLocators(element, doc),      // Priority 1
+    ...buildRoleLocators(element),              // Priority 2 (uses full accessible name)
+    ...buildAriaLocators(element),              // Priority 3
+    ...buildTextLocators(element),              // Priority 4
+    ...buildCSSLocators(element, doc),          // Priority 5
+    ...(FeatureFlags.XPATH_FALLBACK ? buildXPathLocators(element, doc) : []),  // Priority 6 (gated)
+    ...(positionLocator ? [positionLocator] : []),  // Priority 7 (last resort)
   ];
   
   // Build disambiguators from nearby text
@@ -216,6 +225,7 @@ function buildAriaLocators(element: Element): LocatorStrategy[] {
 
 /**
  * Build role-based locators
+ * Uses full accessible name computation (aria-labelledby, aria-label, label[for], etc.)
  */
 function buildRoleLocators(element: Element): LocatorStrategy[] {
   const strategies: LocatorStrategy[] = [];
@@ -223,10 +233,10 @@ function buildRoleLocators(element: Element): LocatorStrategy[] {
   
   const role = element.getAttribute('role');
   if (role) {
-    const accessibleName = 
-      element.getAttribute('aria-label') || 
-      element.textContent?.trim().slice(0, 50) || 
-      '';
+    // Use FULL accessible name computation (not just aria-label)
+    const accessibleName = computeAccessibleName(element) || 
+                           element.textContent?.trim().slice(0, 50) || 
+                           '';
     
     strategies.push(createRoleLocator(
       role,

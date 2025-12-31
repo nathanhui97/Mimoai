@@ -63,6 +63,10 @@ npx supabase functions deploy detect_variables
 echo "Deploying visual_click function..."
 npx supabase functions deploy visual_click
 
+# Deploy dom_agent function (3-tier agent brain)
+echo "Deploying dom_agent function..."
+npx supabase functions deploy dom_agent
+
 echo "✅ Deployment complete!"
 echo ""
 echo "Deployed functions:"
@@ -70,7 +74,8 @@ echo "  - recover_element"
 echo "  - validate_selector"
 echo "  - generate_step_description"
 echo "  - detect_variables"
-echo "  - visual_click (NEW - AI Visual Click)"
+echo "  - visual_click (AI Visual Click)"
+echo "  - dom_agent (NEW - 3-tier agent brain)"
 echo ""
 echo "If deployment fails, make sure you're logged in:"
 echo "  npx supabase login"

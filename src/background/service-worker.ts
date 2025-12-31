@@ -400,6 +400,16 @@ chrome.runtime.onMessage.addListener(
       return true; // Keep channel open for async
     }
 
+    // Handle GET_FRAME_ID request from content script
+    if (message.type === 'GET_FRAME_ID') {
+      const frameId = sender.frameId ?? 0; // Default to 0 (main frame) if not available
+      sendResponse({
+        success: true,
+        frameId: frameId,
+      });
+      return false;
+    }
+
     // Handle START_RECORDING - coordinate multi-tab recording
     if (message.type === 'START_RECORDING') {
       (async () => {

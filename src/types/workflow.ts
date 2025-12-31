@@ -286,6 +286,7 @@ export interface WorkflowStepPayload {
   scope?: Scope;                           // Container scope (modal, table row, widget, etc.)
   suggestedCondition?: SuggestedCondition; // Auto-detected success condition
   disambiguators?: string[];               // Nearby text for filtering ambiguous matches
+  expectedOutcomes?: import('../types/universal-types').ExpectedOutcome[]; // Auto-generated outcomes from before/after diffing
   
   // Locator quality metadata
   locatorQuality?: {
@@ -294,6 +295,15 @@ export interface WorkflowStepPayload {
     hasDynamicParts: boolean;        // Selector contains generated IDs or dynamic parts
     strategiesAvailable: number;      // How many locator strategies were found
     confidenceScore: number;          // 0-1 overall confidence in element finding
+  };
+  
+  // Element analysis for execution strategy optimization
+  elementAnalysis?: {
+    executionStrategy: 'SIMPLE' | 'AI_RECOMMENDED' | 'AI_REQUIRED';
+    confidence: number; // 0-100
+    reasons: string[];
+    bestSelector?: string;
+    fallbackSelectors?: string[];
   };
 }
 
@@ -319,10 +329,28 @@ export interface WorkflowIntent {
   policy?: ExecutionPolicy; // Tool-use pattern for adaptive execution
 }
 
+/** Natural language context for better AI agent understanding */
+export interface NaturalLanguageContext {
+  /** What the user is trying to accomplish with this step */
+  intent: string;
+  /** What must be true before this step can execute */
+  precondition: string;
+  /** What should happen after this step succeeds */
+  expectedOutcome: string;
+  /** Indices of steps this depends on (e.g., [0, 1] means depends on steps 0 and 1) */
+  dependencies: number[];
+  /** Alternative ways to describe this step for matching */
+  alternateDescriptions?: string[];
+  /** Flag indicating the user manually edited this instruction */
+  userEdited?: boolean;
+}
+
 export interface WorkflowStep {
   type: WorkflowStepType;
   payload: WorkflowStepPayload | TabSwitchPayload; // TabSwitchPayload for TAB_SWITCH steps
   description?: string; // AI-generated natural language description
+  /** Natural language translation for AI agent (added after recording stops) */
+  naturalLanguage?: NaturalLanguageContext;
 }
 
 /**

@@ -3,6 +3,9 @@
  * 
  * Handles text input across different input types:
  * native inputs, textareas, contenteditable, React controlled.
+ * 
+ * Uses FAST typing by default (direct value set + events).
+ * Character-by-character typing only when HUMAN_TYPING_DEFAULT flag is enabled.
  */
 
 import type {

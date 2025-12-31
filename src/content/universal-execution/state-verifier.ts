@@ -561,3 +561,413 @@ export async function verifyDropdownClosed(
   return false;
 }
 
+// ============================================================================
+// Semantic Page Signals Capture (for auto-generating outcomes)
+// ============================================================================
+
+/**
+ * Modal fingerprint - semantic, not selector-based
+ */
+export interface ModalFingerprint {
+  role: string;              // 'dialog' | 'alertdialog'
+  headingText?: string;      // First h1/h2 text
+  ariaLabel?: string;        // aria-label or aria-labelledby resolved text
+  sizeBucket: 'small' | 'medium' | 'large' | 'fullscreen';
+}
+
+/**
+ * Toast/notification fingerprint - semantic, not selector-based
+ */
+export interface ToastFingerprint {
+  role: string;              // 'status' | 'alert'
+  textSnippet: string;       // First 50 chars
+  positionBucket: 'top' | 'bottom' | 'center';
+}
+
+/**
+ * Region fingerprint for detecting DOM changes near target
+ */
+export interface RegionFingerprint {
+  containerSelector: string; // Scope container near target
+  textHash: string;          // Hash of text content
+  childCount: number;
+}
+
+/**
+ * Page signals captured before/after action
+ * Uses semantic fingerprints, NOT brittle selectors
+ */
+export interface PageSignals {
+  url: string;
+  title: string;
+  modals: ModalFingerprint[];
+  toasts: ToastFingerprint[];
+  regionFingerprints: RegionFingerprint[];
+  spinnerCount: number;
+  tableRowCounts: Map<string, number>;
+}
+
+/**
+ * Capture semantic page signals for before/after diffing
+ * 
+ * @param nearElement - Optional element to capture region fingerprints near
+ * @returns PageSignals with semantic fingerprints
+ */
+export function capturePageSignals(nearElement?: Element): PageSignals {
+  return {
+    url: window.location.href,
+    title: document.title,
+    modals: captureModalFingerprints(),
+    toasts: captureToastFingerprints(),
+    regionFingerprints: nearElement ? captureRegionFingerprints(nearElement) : [],
+    spinnerCount: countVisibleSpinners(),
+    tableRowCounts: captureTableRowCounts(),
+  };
+}
+
+/**
+ * Capture modal/dialog fingerprints
+ */
+function captureModalFingerprints(): ModalFingerprint[] {
+  const fingerprints: ModalFingerprint[] = [];
+  
+  const modalSelectors = [
+    '[role="dialog"]',
+    '[role="alertdialog"]',
+    '.modal',
+    '[class*="modal"]',
+    '[class*="Modal"]',
+    '.MuiDialog-root',
+  ];
+  
+  const modals = document.querySelectorAll(modalSelectors.join(', '));
+  
+  for (const modal of modals) {
+    if (!isVisible(modal)) continue;
+    
+    // Get heading text
+    const heading = modal.querySelector('h1, h2, h3, h4, [class*="title"], [class*="Title"], [class*="header"], [class*="Header"]');
+    const headingText = heading?.textContent?.trim() || undefined;
+    
+    // Get aria-label or aria-labelledby
+    const ariaLabel = modal.getAttribute('aria-label') || undefined;
+    const ariaLabelledBy = modal.getAttribute('aria-labelledby');
+    let resolvedAriaLabel = ariaLabel;
+    if (!resolvedAriaLabel && ariaLabelledBy) {
+      const labelEl = document.getElementById(ariaLabelledBy);
+      resolvedAriaLabel = labelEl?.textContent?.trim() || undefined;
+    }
+    
+    // Determine size bucket
+    const rect = modal.getBoundingClientRect();
+    const viewportArea = window.innerWidth * window.innerHeight;
+    const modalArea = rect.width * rect.height;
+    const modalPercentage = (modalArea / viewportArea) * 100;
+    
+    let sizeBucket: ModalFingerprint['sizeBucket'];
+    if (modalPercentage >= 80) {
+      sizeBucket = 'fullscreen';
+    } else if (modalPercentage >= 50) {
+      sizeBucket = 'large';
+    } else if (modalPercentage >= 20) {
+      sizeBucket = 'medium';
+    } else {
+      sizeBucket = 'small';
+    }
+    
+    fingerprints.push({
+      role: modal.getAttribute('role') || 'dialog',
+      headingText,
+      ariaLabel: resolvedAriaLabel,
+      sizeBucket,
+    });
+  }
+  
+  return fingerprints;
+}
+
+/**
+ * Capture toast/notification fingerprints
+ */
+function captureToastFingerprints(): ToastFingerprint[] {
+  const fingerprints: ToastFingerprint[] = [];
+  
+  const toastSelectors = [
+    '[role="status"]',
+    '[role="alert"]',
+    '.toast',
+    '.notification',
+    '[class*="toast"]',
+    '[class*="Toast"]',
+    '[class*="notification"]',
+    '[class*="Notification"]',
+    '.MuiSnackbar-root',
+    '.ant-message',
+  ];
+  
+  const toasts = document.querySelectorAll(toastSelectors.join(', '));
+  
+  for (const toast of toasts) {
+    if (!isVisible(toast)) continue;
+    
+    // Get text snippet (first 50 chars)
+    const text = toast.textContent?.trim() || '';
+    const textSnippet = text.slice(0, 50);
+    if (!textSnippet) continue;
+    
+    // Determine position bucket
+    const rect = toast.getBoundingClientRect();
+    const viewportHeight = window.innerHeight;
+    let positionBucket: ToastFingerprint['positionBucket'];
+    
+    if (rect.top < viewportHeight / 3) {
+      positionBucket = 'top';
+    } else if (rect.top > (viewportHeight * 2) / 3) {
+      positionBucket = 'bottom';
+    } else {
+      positionBucket = 'center';
+    }
+    
+    fingerprints.push({
+      role: toast.getAttribute('role') || 'status',
+      textSnippet,
+      positionBucket,
+    });
+  }
+  
+  return fingerprints;
+}
+
+/**
+ * Capture region fingerprints near target element (1-3 containers)
+ */
+function captureRegionFingerprints(nearElement: Element): RegionFingerprint[] {
+  const fingerprints: RegionFingerprint[] = [];
+  
+  // Find up to 3 container elements
+  let current: Element | null = nearElement.parentElement;
+  let checked = 0;
+  const maxContainers = 3;
+  
+  while (current && checked < maxContainers) {
+    // Skip body/html
+    if (current.tagName === 'BODY' || current.tagName === 'HTML') {
+      current = current.parentElement;
+      continue;
+    }
+    
+    // Look for meaningful containers (sections, articles, divs with role, etc.)
+    const role = current.getAttribute('role');
+    const hasId = !!current.id;
+    const hasClass = current.classList.length > 0;
+    
+    if (role || hasId || hasClass) {
+      try {
+        // Generate a simple selector
+        let selector = current.tagName.toLowerCase();
+        if (current.id) {
+          selector = `#${current.id}`;
+        } else if (role) {
+          selector = `[role="${role}"]`;
+        } else if (current.classList.length > 0) {
+          selector = `.${Array.from(current.classList).slice(0, 2).join('.')}`;
+        }
+        
+        // Hash text content
+        const textContent = current.textContent?.trim() || '';
+        const textHash = simpleHash(textContent.slice(0, 200)); // Hash first 200 chars
+        
+        fingerprints.push({
+          containerSelector: selector,
+          textHash,
+          childCount: current.children.length,
+        });
+        
+        checked++;
+      } catch (e) {
+        // Skip this container
+      }
+    }
+    
+    current = current.parentElement;
+  }
+  
+  return fingerprints;
+}
+
+/**
+ * Count visible spinners/loaders
+ */
+function countVisibleSpinners(): number {
+  const spinnerSelectors = [
+    '.loading',
+    '.loader',
+    '.spinner',
+    '[class*="loading"]',
+    '[class*="spinner"]',
+    '[class*="loader"]',
+    '[role="progressbar"]',
+    '.MuiCircularProgress-root',
+    '.sk-spinner',
+    '.ant-spin',
+  ];
+  
+  const spinners = document.querySelectorAll(spinnerSelectors.join(', '));
+  let count = 0;
+  
+  for (const spinner of spinners) {
+    if (isVisible(spinner)) {
+      count++;
+    }
+  }
+  
+  return count;
+}
+
+/**
+ * Capture row counts for visible tables
+ */
+function captureTableRowCounts(): Map<string, number> {
+  const counts = new Map<string, number>();
+  
+  const tables = document.querySelectorAll('table, [role="table"], [role="grid"]');
+  
+  for (let i = 0; i < tables.length; i++) {
+    const table = tables[i];
+    if (!isVisible(table)) continue;
+    
+    const rows = table.querySelectorAll('tr, [role="row"]');
+    const visibleRows = Array.from(rows).filter(row => isVisible(row));
+    
+    // Use table index as key
+    counts.set(`table-${i}`, visibleRows.length);
+  }
+  
+  return counts;
+}
+
+/**
+ * Simple string hash function
+ */
+function simpleHash(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return hash.toString(36);
+}
+
+/**
+ * Generate expected outcomes by diffing before/after page signals
+ * 
+ * @param before - Page signals captured before action
+ * @param after - Page signals captured after action
+ * @returns Array of ExpectedOutcome that can be verified
+ */
+export function generateOutcomesFromDiff(
+  before: PageSignals,
+  after: PageSignals
+): ExpectedOutcome[] {
+  const outcomes: ExpectedOutcome[] = [];
+  
+  // 1. URL changed
+  if (before.url !== after.url) {
+    outcomes.push({
+      type: 'url_contains',
+      value: new URL(after.url).pathname, // Just the path
+    });
+  }
+  
+  // 2. Title changed
+  if (before.title !== after.title) {
+    outcomes.push({
+      type: 'text_appears',
+      text: after.title.slice(0, 50), // First 50 chars
+    });
+  }
+  
+  // 3. Modal appeared
+  if (after.modals.length > before.modals.length) {
+    const newModal = after.modals[after.modals.length - 1];
+    if (newModal.headingText) {
+      outcomes.push({
+        type: 'text_appears',
+        text: newModal.headingText,
+      });
+    }
+    // Generic modal visible check
+    outcomes.push({
+      type: 'element_visible',
+      selector: '[role="dialog"], [role="alertdialog"]',
+    });
+  }
+  
+  // 4. Modal disappeared
+  if (before.modals.length > after.modals.length) {
+    outcomes.push({
+      type: 'element_gone',
+      selector: '[role="dialog"], [role="alertdialog"]',
+    });
+  }
+  
+  // 5. Toast appeared
+  if (after.toasts.length > before.toasts.length) {
+    const newToast = after.toasts[after.toasts.length - 1];
+    if (newToast.textSnippet) {
+      outcomes.push({
+        type: 'text_appears',
+        text: newToast.textSnippet,
+      });
+    }
+  }
+  
+  // 6. Spinner count changed (e.g., spinner appeared then disappeared)
+  if (before.spinnerCount !== after.spinnerCount) {
+    if (after.spinnerCount === 0 && before.spinnerCount > 0) {
+      // Spinners disappeared - good outcome
+      outcomes.push({
+        type: 'element_gone',
+        selector: '[class*="spinner"], [class*="loading"]',
+      });
+    }
+  }
+  
+  // 7. Table row count changed
+  for (const [tableKey, beforeCount] of before.tableRowCounts) {
+    const afterCount = after.tableRowCounts.get(tableKey);
+    if (afterCount !== undefined && afterCount !== beforeCount) {
+      // Don't add specific outcome for table rows (too brittle)
+      // Just log it for debugging
+      console.log(`[PageSignals] Table ${tableKey} rows changed: ${beforeCount} → ${afterCount}`);
+    }
+  }
+  
+  // 8. Region changed (DOM changed near target)
+  for (const beforeRegion of before.regionFingerprints) {
+    const afterRegion = after.regionFingerprints.find(
+      r => r.containerSelector === beforeRegion.containerSelector
+    );
+    if (afterRegion) {
+      if (beforeRegion.textHash !== afterRegion.textHash || 
+          beforeRegion.childCount !== afterRegion.childCount) {
+        // Region changed - generic "DOM changed" outcome
+        outcomes.push({
+          type: 'any_state_change',
+        });
+        break; // Only add once
+      }
+    }
+  }
+  
+  // If no specific outcomes detected, add a generic "DOM stable" check
+  if (outcomes.length === 0) {
+    outcomes.push({
+      type: 'any_state_change',
+    });
+  }
+  
+  return outcomes;
+}
+

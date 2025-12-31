@@ -31,6 +31,7 @@ try {
 // This ensures we can respond to PING even if imports fail
 let isReady = false;
 let recordingManager: any = null;
+let currentFrameId: number = 0; // Will be set after initialization
 
 // Now do imports
 import type { ExtensionMessage, MessageResponse, PongMessage } from '../types/messages';
@@ -39,14 +40,36 @@ import { AIWorkflowAnalyzer } from './ai-workflow-analyzer';
 import { PatternDetector } from './pattern-detector';
 import { AIDataBuilder } from './ai-data-builder';
 import { VisualSnapshotService } from './visual-snapshot';
+import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 // Universal Execution Engine - the new reliable execution engine
 import { executeWorkflow as executeUniversalWorkflow, convertLegacyStep } from './universal-execution';
 
+// Request frameId from background script on initialization
+(async () => {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_FRAME_ID' });
+    if (response && typeof response.frameId === 'number') {
+      currentFrameId = response.frameId;
+      console.log(`🖼️ GhostWriter: Frame ID set to ${currentFrameId} (0 = main frame)`);
+    }
+  } catch (error) {
+    console.warn('GhostWriter: Could not get frameId from background:', error);
+    // Default to 0 (main frame)
+    currentFrameId = 0;
+  }
+})();
+
 // Check for saved agent state after navigation and resume if needed
 (async () => {
   try {
+    // ONLY resume in main frame (frameId === 0) - not in iframes
+    if (currentFrameId !== 0) {
+      console.log('[Content] Skipping agent resumption in iframe (frameId:', currentFrameId, ')');
+      return;
+    }
+    
     const result = await chrome.storage.local.get(['agentState']);
     const savedState = result.agentState as any;
     if (savedState && savedState.status === 'running') {
@@ -290,10 +313,30 @@ function handleFullMessage(
           return false;
         }
 
-        // Analyze workflow asynchronously
+        // Analyze workflow asynchronously (if enabled)
         (async () => {
           try {
             const steps = message.payload.steps as WorkflowStep[];
+            
+            if (!FeatureFlags.AI_WORKFLOW_ANALYZER) {
+              // Feature disabled - return basic pattern detection only
+              console.log('GhostWriter: AI Workflow Analyzer disabled');
+              const pattern = PatternDetector.detectPattern(steps);
+              chrome.runtime.sendMessage({
+                type: 'ANALYZE_WORKFLOW_RESPONSE',
+                payload: { 
+                  intent: {
+                    description: 'Workflow recorded',
+                    category: 'general',
+                    subGoals: [],
+                    expectedOutcome: 'Workflow completed',
+                    confidence: 0.5,
+                  },
+                  pattern,
+                },
+              });
+              return;
+            }
             
             // Detect pattern first
             const pattern = PatternDetector.detectPattern(steps);
@@ -444,6 +487,15 @@ function handleFullMessage(
 
       case 'EXECUTE_WORKFLOW_AGENT': {
         // AI Agent execution - observe-act loop
+        // Check if AI Agent is enabled
+        if (!FeatureFlags.AI_AGENT_LOOP) {
+          sendResponse({
+            success: false,
+            error: 'AI Agent execution is disabled. Use selector mode instead.',
+          });
+          return false;
+        }
+        
         if (!message.payload?.workflow) {
           sendResponse({
             success: false,

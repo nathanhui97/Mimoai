@@ -55,3 +55,5 @@ Parsed object: { ... }
 This will show us exactly what Gemini is returning and whether it's finding the button correctly!
 
 
+
+

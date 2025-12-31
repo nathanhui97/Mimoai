@@ -177,7 +177,8 @@ export type ComponentPatternType =
   | 'MODAL_TRIGGER'       // Opens a modal
   | 'INLINE_EDIT'         // Click-to-edit text
   | 'SLIDER'              // Range slider
-  | 'FILE_UPLOAD';        // File input
+  | 'FILE_UPLOAD'         // File input
+  | 'SCROLL';             // Scroll action (page or container)
 
 /**
  * Detected component library
@@ -317,7 +318,8 @@ export type ComponentPattern =
   | { type: 'TEXT_INPUT'; data: TextInputPatternData }
   | { type: 'TOGGLE'; data: SimpleClickPatternData }
   | { type: 'TAB_SELECT'; data: SimpleClickPatternData }
-  | { type: 'MODAL_TRIGGER'; data: SimpleClickPatternData };
+  | { type: 'MODAL_TRIGGER'; data: SimpleClickPatternData }
+  | { type: 'SCROLL'; data: any }; // Scroll pattern with viewport info
 
 // ============================================================================
 // Interactability
@@ -593,6 +595,14 @@ export interface UniversalStep {
       clickPoint?: { x: number; y: number };
       /** Action type for marker styling */
       actionType?: 'click' | 'double-click' | 'type' | 'select' | 'scroll';
+    };
+    /** Element analysis for execution strategy optimization */
+    elementAnalysis?: {
+      executionStrategy: 'SIMPLE' | 'AI_RECOMMENDED' | 'AI_REQUIRED';
+      confidence: number;
+      reasons: string[];
+      bestSelector?: string;
+      fallbackSelectors?: string[];
     };
   };
 }

@@ -39,6 +39,7 @@ export type MessageType =
   | 'REFRESH_PAGE'
   | 'GET_ZOOM'
   | 'SET_ZOOM'
+  | 'GET_FRAME_ID'
   | 'TAB_SWITCHED'
   | 'START_RECORDING_IN_TAB'
   | 'STOP_RECORDING_IN_TAB'
@@ -62,6 +63,7 @@ export interface MessageResponse {
   success: boolean;
   data?: any;
   error?: string;
+  frameId?: number; // For GET_FRAME_ID response
 }
 
 /**
@@ -261,6 +263,14 @@ export interface SetZoomMessage extends ExtensionMessage {
     zoomFactor: number;
     tabId?: number;
   };
+}
+
+/**
+ * GET_FRAME_ID message - request frame ID from service worker
+ */
+export interface GetFrameIdMessage extends ExtensionMessage {
+  type: 'GET_FRAME_ID';
+  payload?: {};
 }
 
 /**

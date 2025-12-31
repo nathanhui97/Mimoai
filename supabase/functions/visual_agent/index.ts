@@ -10,7 +10,7 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 
-const VERSION = 'v1.0.0';
+const VERSION = 'v2.0.0-true-vision';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
@@ -25,6 +25,8 @@ interface AgentHint {
   description: string;
   actionType: 'click' | 'type' | 'navigate' | 'other';
   targetText?: string;
+  targetPlaceholder?: string; // For input fields
+  targetSelector?: string; // CSS selector
   value?: string;
   completed: boolean;
 }
@@ -84,8 +86,10 @@ interface SemanticTarget {
 interface AgentResponse {
   action: 'click' | 'type' | 'scroll' | 'navigate' | 'wait' | 'done' | 'fail';
   params: {
-    // For semantic click
-    target?: SemanticTarget;
+    // For TRUE VISION click (pixel coordinates)
+    x?: number;
+    y?: number;
+    description?: string; // What AI saw (for logging)
     // For type
     text?: string;
     // For scroll
@@ -220,6 +224,17 @@ function buildAgentPrompt(payload: AgentRequest): string {
     const status = hint.completed ? '✓' : (i === currentHintIndex ? '→' : '○');
     const isCurrent = i === currentHintIndex ? ' **<-- CURRENT**' : '';
     parts.push(`${status} Step ${hint.stepNumber}: ${hint.description}${isCurrent}`);
+    
+    // Show target info for the current step
+    if (i === currentHintIndex) {
+      if (hint.targetPlaceholder) {
+        parts.push(`   → Use placeholder: "${hint.targetPlaceholder}" to find this input`);
+      }
+      if (hint.targetText && !hint.targetPlaceholder) {
+        parts.push(`   → Look for text: "${hint.targetText}"`);
+      }
+    }
+    
     if (hint.actionType === 'type' && hint.value) {
       parts.push(`   Value to type: "${hint.value}"`);
     }
@@ -270,49 +285,73 @@ function buildAgentPrompt(payload: AgentRequest): string {
     parts.push('2. Compare with reference screenshot (IMAGE 2) which shows what the user saw during recording');
   }
   parts.push('3. Identify what action to take based on the current hint');
-  parts.push('4. If the hint is a CLICK: Describe the target element semantically (text, role, region)');
-  parts.push('5. If the hint is TYPE: Make sure an input is focused, then return type action');
+  parts.push('4. If the hint is a CLICK: Look at the screenshot and return EXACT PIXEL COORDINATES where you see the element');
+  parts.push('5. If the hint is TYPE: Click at the input field coordinates first, then type the text');
   parts.push('6. If all hints are completed: Return done()');
   parts.push('7. If stuck or element not visible: Return wait() or scroll() to reveal it');
   parts.push('');
 
   // Special guidance
-  parts.push('## Important Notes');
-  parts.push('- Describe elements by their VISIBLE TEXT and ROLE, not coordinates');
-  parts.push('- Specify the region (header, sidebar, modal, main) to narrow down the search');
+  parts.push('## Important Notes - TRUE VISION MODE');
+  parts.push('- You are clicking like a HUMAN - look at the screenshot and tell me WHERE to click');
+  parts.push('- Return EXACT PIXEL COORDINATES: {"x": 749, "y": 525}');
+  parts.push('- The top-left corner of the screenshot is (0, 0)');
+  parts.push('- X increases going RIGHT, Y increases going DOWN');
+  parts.push('- Click in the CENTER of buttons/elements for best results');
+  parts.push('- For INPUT FIELDS: Return coordinates of the input box, then we will type');
   parts.push('- If a modal or popup blocks the target, handle it first');
-  parts.push('- Before typing, ensure an input field is focused (may need to click first)');
-  parts.push('- If element is below the fold, scroll down first');
   parts.push('- Salesforce/Lightning apps may have loading spinners - wait if page is loading');
+  parts.push('');
+  parts.push('## CRITICAL: Do Not Skip Steps');
+  parts.push('- ALWAYS follow the workflow hints IN ORDER. Do NOT skip steps.');
+  parts.push('- If an element from the current hint is NOT visible on screen:');
+  parts.push('  1. FIRST: Try scrolling down with {"action":"scroll","params":{"direction":"down","amount":300}}');
+  parts.push('  2. SECOND: Try scrolling up if you might have scrolled past it');
+  parts.push('  3. ONLY after scrolling multiple times and still not finding it, then fail()');
+  parts.push('- NEVER skip to a later step (like clicking Continue) just because the current element is not visible');
+  parts.push('- The recorded steps are the user\'s exact workflow. Execute them in order.');
   parts.push('');
 
   // Response format
-  parts.push('## Response Format');
-  parts.push('Return ONLY valid JSON. For CLICK actions, use semantic targeting:');
+  parts.push('## Response Format - PIXEL COORDINATES');
+  parts.push('Return ONLY valid JSON. For CLICK actions, return pixel coordinates:');
   parts.push('```json');
   parts.push('{');
   parts.push('  "action": "click",');
   parts.push('  "params": {');
-  parts.push('    "target": {');
-  parts.push('      "text": "New",');
-  parts.push('      "role": "button",');
-  parts.push('      "region": "header"');
-  parts.push('    }');
+  parts.push('    "x": 749,');
+  parts.push('    "y": 525,');
+  parts.push('    "description": "BOGO button in dropdown"');
   parts.push('  },');
-  parts.push('  "reasoning": "Clicking the New button in the header to create a new account",');
+  parts.push('  "reasoning": "I see the BOGO button in the dropdown at these coordinates",');
   parts.push('  "confidence": 0.95,');
-  parts.push('  "hintStepIndex": 0');
+  parts.push('  "hintStepIndex": 1');
   parts.push('}');
   parts.push('```');
   parts.push('');
-  parts.push('For type action:');
+  parts.push('For clicking an INPUT field before typing:');
+  parts.push('```json');
+  parts.push('{');
+  parts.push('  "action": "click",');
+  parts.push('  "params": {');
+  parts.push('    "x": 362,');
+  parts.push('    "y": 486,');
+  parts.push('    "description": "Budget Amount input field"');
+  parts.push('  },');
+  parts.push('  "reasoning": "Clicking the budget input field to focus it before typing",');
+  parts.push('  "confidence": 0.9,');
+  parts.push('  "hintStepIndex": 2');
+  parts.push('}');
+  parts.push('```');
+  parts.push('');
+  parts.push('For type action (after clicking input):');
   parts.push('```json');
   parts.push('{');
   parts.push('  "action": "type",');
-  parts.push('  "params": { "text": "Hello World" },');
-  parts.push('  "reasoning": "Typing into the focused Account Name field",');
+  parts.push('  "params": { "text": "1000" },');
+  parts.push('  "reasoning": "Typing budget amount into focused field",');
   parts.push('  "confidence": 0.9,');
-  parts.push('  "hintStepIndex": 1');
+  parts.push('  "hintStepIndex": 3');
   parts.push('}');
   parts.push('```');
   parts.push('');
@@ -401,39 +440,9 @@ function buildGeminiRequest(prompt: string, payload: AgentRequest): any {
           params: {
             type: 'object',
             properties: {
-              target: {
-                type: 'object',
-                properties: {
-                  text: { type: 'string' },
-                  textMatch: { 
-                    type: 'string',
-                    enum: ['exact', 'contains', 'startsWith', 'endsWith', 'fuzzy']
-                  },
-                  role: { type: 'string' },
-                  tagName: { type: 'string' },
-                  ariaLabel: { type: 'string' },
-                  testId: { type: 'string' },
-                  title: { type: 'string' },
-                  placeholder: { type: 'string' },
-                  name: { type: 'string' },
-                  nearbyText: { 
-                    type: 'array',
-                    items: { type: 'string' }
-                  },
-                  region: { type: 'string' },
-                  parentText: { type: 'string' },
-                  index: { type: 'number' },
-                  className: { type: 'string' },
-                  waitTimeout: { type: 'number' },
-                  fallbackCoordinates: {
-                    type: 'object',
-                    properties: {
-                      x: { type: 'number' },
-                      y: { type: 'number' }
-                    }
-                  }
-                }
-              },
+              x: { type: 'number' },
+              y: { type: 'number' },
+              description: { type: 'string' },
               text: { type: 'string' },
               direction: { type: 'string' },
               amount: { type: 'number' },
@@ -451,25 +460,27 @@ function buildGeminiRequest(prompt: string, payload: AgentRequest): any {
     },
     systemInstruction: {
       parts: [{
-        text: `You are a web automation AI agent. You must ALWAYS respond with valid JSON only.
+        text: `You are a web automation AI agent with TRUE VISION. You must ALWAYS respond with valid JSON only.
 
 CRITICAL: Your response must be ONLY a JSON object. No markdown, no code blocks, no explanations.
 
-For CLICK actions, describe the target element semantically (text, role, region), NOT by coordinates.
+For CLICK actions, return EXACT PIXEL COORDINATES where you see the element in the screenshot.
+Top-left corner is (0, 0). X increases going right, Y increases going down.
+Click in the CENTER of buttons/elements.
 
 Required JSON format:
 {
   "action": "click" | "type" | "scroll" | "navigate" | "wait" | "done" | "fail",
-  "params": { ... },
+  "params": { "x": number, "y": number, "description": string } for clicks,
   "reasoning": "string",
   "confidence": 0.0-1.0,
-  "hintStepIndex": number (optional)
+  "hintStepIndex": number
 }
 
 Examples:
-{"action":"click","params":{"target":{"text":"New","role":"button","region":"header"}},"reasoning":"Clicking New button in header","confidence":0.9,"hintStepIndex":0}
-{"action":"type","params":{"text":"Hello"},"reasoning":"Typing into field","confidence":0.85,"hintStepIndex":1}
-{"action":"navigate","params":{"url":"https://example.com"},"reasoning":"Direct navigation","confidence":1.0,"hintStepIndex":0}
+{"action":"click","params":{"x":749,"y":525,"description":"BOGO button"},"reasoning":"I see BOGO button at these coordinates","confidence":0.9,"hintStepIndex":1}
+{"action":"type","params":{"text":"Hello"},"reasoning":"Typing into focused field","confidence":0.85,"hintStepIndex":2}
+{"action":"scroll","params":{"direction":"down","amount":300},"reasoning":"Element below fold","confidence":0.9,"hintStepIndex":3}
 {"action":"done","params":{},"reasoning":"All steps complete","confidence":1.0}`
       }]
     }
@@ -514,11 +525,36 @@ function parseAgentResponse(geminiData: any, payload: AgentRequest): AgentRespon
       return createFailResponse('No valid JSON in AI response. AI returned plain text instead of JSON.');
     }
 
-    const jsonStr = jsonMatch[1] || jsonMatch[0];
-    console.log('Extracted JSON string:', jsonStr.substring(0, 300));
+    let jsonStr = jsonMatch[1] || jsonMatch[0];
+    console.log('Extracted JSON string (raw):', jsonStr);
+    console.log('Extracted JSON length:', jsonStr.length);
+    
+    // Fix incomplete JSON from Gemini
+    if (!jsonStr.trim().endsWith('}')) {
+      console.log('JSON appears incomplete, attempting to fix...');
+      
+      // Count braces
+      const openBraces = (jsonStr.match(/\{/g) || []).length;
+      const closeBraces = (jsonStr.match(/\}/g) || []).length;
+      
+      // If reasoning field is incomplete, truncate and add defaults
+      const reasoningMatch = jsonStr.match(/"reasoning":"([^"]*)/);
+      if (reasoningMatch && !jsonStr.match(/"reasoning":"[^"]*"/)) {
+        // Reasoning started but no closing quote
+        const beforeReasoning = jsonStr.substring(0, jsonStr.lastIndexOf('"reasoning":'));
+        jsonStr = beforeReasoning + '"reasoning":"Executing workflow step","confidence":0.8,"hintStepIndex":0}';
+        console.log('Fixed incomplete reasoning field');
+      } else if (openBraces > closeBraces) {
+        // Just missing closing braces
+        jsonStr += '}'.repeat(openBraces - closeBraces);
+        console.log('Added', openBraces - closeBraces, 'closing braces');
+      }
+    }
+    
+    console.log('Fixed JSON:', jsonStr);
     
     const parsed = JSON.parse(jsonStr);
-    console.log('Parsed object:', JSON.stringify(parsed, null, 2));
+    console.log('Parsed action:', parsed.action);
 
     // Validate action
     const validActions = ['click', 'type', 'scroll', 'navigate', 'wait', 'done', 'fail'];
@@ -527,17 +563,17 @@ function parseAgentResponse(geminiData: any, payload: AgentRequest): AgentRespon
       return createFailResponse(`Invalid action: ${parsed.action}`);
     }
 
-    // Validate click action has target (semantic) or coordinates (fallback)
+    // Validate click action has coordinates (TRUE VISION mode)
     if (parsed.action === 'click') {
-      const hasTarget = parsed.params?.target && typeof parsed.params.target === 'object';
-      const hasCoordinates = typeof parsed.params?.x === 'number' && typeof parsed.params?.y === 'number';
+      const x = parsed.params?.x;
+      const y = parsed.params?.y;
       
-      if (!hasTarget && !hasCoordinates) {
-        console.error('Invalid click action - needs target or coordinates:', parsed.params);
-        return createFailResponse('Click action missing semantic target or coordinates');
+      if (typeof x !== 'number' || typeof y !== 'number') {
+        console.error('Invalid click action - TRUE VISION requires pixel coordinates:', parsed.params);
+        return createFailResponse('Click action missing x, y coordinates');
       }
       
-      console.log('Click action validated:', hasTarget ? 'has semantic target' : 'has coordinates');
+      console.log(`Click action validated: coordinates (${x}, ${y})`);
     }
 
     // Validate type text
@@ -558,7 +594,15 @@ function parseAgentResponse(geminiData: any, payload: AgentRequest): AgentRespon
     };
   } catch (error) {
     console.error('Error parsing response:', error);
-    return createFailResponse('Failed to parse AI response');
+    console.error('Error details:', error instanceof Error ? error.message : String(error));
+    // Try to log what we were trying to parse
+    try {
+      const text = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      console.error('Gemini raw text that failed to parse:', text);
+    } catch (e) {
+      console.error('Could not extract raw text for debugging');
+    }
+    return createFailResponse(`Failed to parse AI response: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 

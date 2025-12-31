@@ -1,9 +1,15 @@
 /**
- * RecoveryEngine - Deterministic recovery actions
+ * RecoveryEngine - Deterministic recovery actions (SIMPLIFIED)
  * 
  * When element resolution or verification fails, this engine executes
  * recovery actions to fix the state. No time-based delays - all actions
  * are deterministic and state-based.
+ * 
+ * Simplified to 4 essential actions:
+ * 1. WAIT_FOR_STABILITY - DOM/network/spinner quiet
+ * 2. DISMISS_POPUPS - Safe dismiss (close/cancel only, NOT delete/confirm)
+ * 3. SCROLL_INTO_VIEW - Smart scroll with offset
+ * 4. RETRY_LOOSER_MATCH - Lower matching thresholds
  */
 
 import type { Intent } from '../types/intent';
@@ -11,22 +17,37 @@ import type { LocatorBundle } from '../types/locator';
 import { StateWaitEngine } from './state-wait-engine';
 
 /**
- * Types of recovery actions
+ * Structured scroll recovery directive from LLM
+ */
+export interface ScrollRecoveryDirective {
+  kind: 'SCROLL_AND_RETRY';
+  containerSelector?: string;       // CSS selector for scroll container
+  containerHint?: string;           // Fallback: "Accounts table", "Main content"
+  untilTextVisible?: string;        // Stop when this text appears
+  maxScrolls: number;               // Default 10
+  scrollDirection: 'down' | 'up';   // Default 'down'
+  pixelsPerScroll: number;          // Default 300
+}
+
+/**
+ * Structured dismiss recovery directive from LLM
+ */
+export interface DismissRecoveryDirective {
+  kind: 'DISMISS_POPUP';
+  popupHint?: string;               // "Cookie banner", "Notification"
+  dismissMethod?: 'escape' | 'click_outside' | 'close_button';  // Default 'escape'
+}
+
+/**
+ * Types of recovery actions (SIMPLIFIED - only 4 essential actions)
  */
 export type RecoveryAction =
-  | { kind: 'SCROLL_TARGET_INTO_VIEW'; target: string }
-  | { kind: 'SCROLL_TO_TOP' }
-  | { kind: 'SCROLL_TO_BOTTOM' }
-  | { kind: 'DISMISS_COMMON_POPUPS' }
-  | { kind: 'WAIT_FOR_PAGE_READY' }
-  | { kind: 'SWITCH_TO_FRAME'; selector: string }
-  | { kind: 'SWITCH_TO_MAIN_FRAME' }
-  | { kind: 'REFRESH_ELEMENT_REFERENCES' }
-  | { kind: 'RETRY_WITH_LOOSER_MATCH' }
-  | { kind: 'CLICK_AWAY' }
-  | { kind: 'PRESS_ESCAPE' }
-  | { kind: 'FOCUS_BODY' }
-  | { kind: 'ASK_USER'; message: string };
+  | { kind: 'WAIT_FOR_STABILITY' }              // Network + DOM quiet + spinners gone
+  | { kind: 'DISMISS_POPUPS' }                  // Escape + SAFE close buttons only
+  | { kind: 'SCROLL_INTO_VIEW'; target: string } // Smart scroll into view
+  | { kind: 'RETRY_LOOSER_MATCH' }              // Lower thresholds within scope
+  | ScrollRecoveryDirective                     // Structured scroll from LLM
+  | DismissRecoveryDirective;                   // Structured dismiss from LLM
 
 /**
  * Recovery strategy configuration
@@ -75,54 +96,33 @@ export interface RecoveryResult {
  */
 export class RecoveryEngine {
   /**
-   * Execute a single recovery action
+   * Execute a single recovery action (SIMPLIFIED - only 4 actions)
    */
   static async executeRecovery(
     action: RecoveryAction,
-    context: RecoveryContext
+    _context: RecoveryContext
   ): Promise<RecoveryResult> {
     const startTime = Date.now();
     
     try {
       switch (action.kind) {
-        case 'SCROLL_TARGET_INTO_VIEW':
+        case 'WAIT_FOR_STABILITY':
+          return await this.waitForStability(startTime);
+          
+        case 'DISMISS_POPUPS':
+          return await this.dismissPopupsSafe(startTime);
+        
+        case 'DISMISS_POPUP':
+          return await this.dismissPopupStructured(action, startTime);
+          
+        case 'SCROLL_INTO_VIEW':
           return await this.scrollTargetIntoView(action.target, startTime);
+        
+        case 'SCROLL_AND_RETRY':
+          return await this.executeScrollRecovery(action, startTime);
           
-        case 'SCROLL_TO_TOP':
-          return await this.scrollToTop(startTime);
-          
-        case 'SCROLL_TO_BOTTOM':
-          return await this.scrollToBottom(startTime);
-          
-        case 'DISMISS_COMMON_POPUPS':
-          return await this.dismissCommonPopups(startTime);
-          
-        case 'WAIT_FOR_PAGE_READY':
-          return await this.waitForPageReady(startTime);
-          
-        case 'SWITCH_TO_FRAME':
-          return await this.switchToFrame(action.selector, startTime);
-          
-        case 'SWITCH_TO_MAIN_FRAME':
-          return await this.switchToMainFrame(startTime);
-          
-        case 'REFRESH_ELEMENT_REFERENCES':
-          return await this.refreshElementReferences(startTime);
-          
-        case 'RETRY_WITH_LOOSER_MATCH':
+        case 'RETRY_LOOSER_MATCH':
           return this.retryWithLooserMatch(startTime);
-          
-        case 'CLICK_AWAY':
-          return await this.clickAway(startTime);
-          
-        case 'PRESS_ESCAPE':
-          return await this.pressEscape(startTime);
-          
-        case 'FOCUS_BODY':
-          return await this.focusBody(startTime);
-          
-        case 'ASK_USER':
-          return await this.askUser(action.message, context, startTime);
           
         default:
           return {
@@ -167,10 +167,7 @@ export class RecoveryEngine {
           return results;
         }
         
-        if (action.kind === 'ASK_USER' && !result.success) {
-          // User declined to continue
-          return results;
-        }
+        // No more ASK_USER action in simplified version
       }
     }
     
@@ -178,7 +175,7 @@ export class RecoveryEngine {
   }
   
   /**
-   * Get default recovery strategy for an intent
+   * Get default recovery strategy for an intent (SIMPLIFIED)
    */
   static getDefaultRecoveryForIntent(intent: Intent): RecoveryStrategy {
     switch (intent.kind) {
@@ -187,10 +184,10 @@ export class RecoveryEngine {
         return {
           maxAttempts: 2,
           actions: [
-            { kind: 'DISMISS_COMMON_POPUPS' },
-            { kind: 'SCROLL_TARGET_INTO_VIEW', target: '' }, // Will be filled in
-            { kind: 'WAIT_FOR_PAGE_READY' },
-            { kind: 'RETRY_WITH_LOOSER_MATCH' },
+            { kind: 'DISMISS_POPUPS' },
+            { kind: 'WAIT_FOR_STABILITY' },
+            { kind: 'SCROLL_INTO_VIEW', target: '' }, // Will be filled in
+            { kind: 'RETRY_LOOSER_MATCH' },
           ],
         };
         
@@ -198,10 +195,9 @@ export class RecoveryEngine {
         return {
           maxAttempts: 2,
           actions: [
-            { kind: 'FOCUS_BODY' },
-            { kind: 'PRESS_ESCAPE' }, // Close any dropdowns
-            { kind: 'WAIT_FOR_PAGE_READY' },
-            { kind: 'SCROLL_TARGET_INTO_VIEW', target: '' },
+            { kind: 'DISMISS_POPUPS' },          // Closes dropdowns
+            { kind: 'WAIT_FOR_STABILITY' },
+            { kind: 'SCROLL_INTO_VIEW', target: '' },
           ],
         };
         
@@ -209,9 +205,9 @@ export class RecoveryEngine {
         return {
           maxAttempts: 2,
           actions: [
-            { kind: 'WAIT_FOR_PAGE_READY' },
-            { kind: 'SCROLL_TARGET_INTO_VIEW', target: '' },
-            { kind: 'RETRY_WITH_LOOSER_MATCH' },
+            { kind: 'WAIT_FOR_STABILITY' },
+            { kind: 'SCROLL_INTO_VIEW', target: '' },
+            { kind: 'RETRY_LOOSER_MATCH' },
           ],
         };
         
@@ -219,7 +215,7 @@ export class RecoveryEngine {
         return {
           maxAttempts: 1,
           actions: [
-            { kind: 'WAIT_FOR_PAGE_READY' },
+            { kind: 'WAIT_FOR_STABILITY' },
           ],
         };
         
@@ -227,9 +223,9 @@ export class RecoveryEngine {
         return {
           maxAttempts: 2,
           actions: [
-            { kind: 'SCROLL_TARGET_INTO_VIEW', target: '' },
-            { kind: 'WAIT_FOR_PAGE_READY' },
-            { kind: 'DISMISS_COMMON_POPUPS' },
+            { kind: 'SCROLL_INTO_VIEW', target: '' },
+            { kind: 'WAIT_FOR_STABILITY' },
+            { kind: 'DISMISS_POPUPS' },
           ],
         };
         
@@ -237,19 +233,144 @@ export class RecoveryEngine {
         return {
           maxAttempts: 1,
           actions: [
-            { kind: 'WAIT_FOR_PAGE_READY' },
+            { kind: 'WAIT_FOR_STABILITY' },
           ],
         };
     }
   }
   
-  // ============ Recovery action implementations ============
+  // ============ Recovery action implementations (SIMPLIFIED) ============
+  
+  /**
+   * Wait for stability (DOM + network + spinners)
+   */
+  private static async waitForStability(startTime: number): Promise<RecoveryResult> {
+    const action: RecoveryAction = { kind: 'WAIT_FOR_STABILITY' };
+    
+    const result = await StateWaitEngine.waitForStability({
+      domQuietMs: 400,
+      networkQuietMs: 600,
+      maxWaitMs: 5000,
+      checkSpinners: true,
+    });
+    
+    return {
+      success: result.success,
+      action,
+      elapsedMs: Date.now() - startTime,
+      message: result.success ? 'Page is stable' : 'Stability timeout (partial success)',
+      shouldRetry: true, // Always retry after stability wait
+    };
+  }
+  
+  /**
+   * Dismiss popups SAFELY (close/cancel/dismiss only, NEVER delete/confirm/save)
+   */
+  private static async dismissPopupsSafe(startTime: number): Promise<RecoveryResult> {
+    const action: RecoveryAction = { kind: 'DISMISS_POPUPS' };
+    let dismissed = 0;
+    
+    // 1. Press Escape first (safest method)
+    try {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      await this.sleep(100);
+    } catch (e) {
+      console.warn('[Recovery] Error pressing Escape:', e);
+    }
+    
+    // 2. Safe dismiss patterns (whitelist)
+    const SAFE_DISMISS_PATTERNS = [
+      '[aria-label="Close"]',
+      '[aria-label="close"]',
+      '[aria-label="Dismiss"]',
+      '[aria-label="dismiss"]',
+      '[aria-label="Cancel"]',
+      '[aria-label="cancel"]',
+      'button.close',
+      '.modal-close',
+      '.popup-close',
+      '[data-dismiss="modal"]',
+      '[data-testid*="close"]',
+      '[data-testid*="dismiss"]',
+    ];
+    
+    for (const selector of SAFE_DISMISS_PATTERNS) {
+      try {
+        const buttons = document.querySelectorAll(selector);
+        for (const button of Array.from(buttons)) {
+          if (button instanceof HTMLElement && this.isVisible(button)) {
+            // Extra safety check
+            if (this.isSafeToDismiss(button)) {
+              try {
+                button.click();
+                dismissed++;
+                await this.sleep(100);
+              } catch (e) {
+                console.warn('[Recovery] Error clicking close button:', e);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Invalid selector, continue
+      }
+    }
+    
+    return {
+      success: true,
+      action,
+      elapsedMs: Date.now() - startTime,
+      message: `Safely dismissed ${dismissed} popup(s)`,
+      shouldRetry: dismissed > 0,
+    };
+  }
+  
+  /**
+   * Safety check for dismiss buttons
+   * BLOCKS dangerous actions (delete, remove, confirm, yes, submit, save)
+   * ALLOWS safe actions (close, cancel, dismiss, x, no)
+   */
+  private static isSafeToDismiss(element: Element): boolean {
+    const text = element.textContent?.toLowerCase()?.trim() || '';
+    const ariaLabel = element.getAttribute('aria-label')?.toLowerCase()?.trim() || '';
+    const className = element.className?.toString()?.toLowerCase() || '';
+    const combined = `${text} ${ariaLabel} ${className}`;
+    
+    // DANGEROUS words - NEVER click these automatically
+    const dangerousWords = [
+      'delete', 'remove', 'confirm', 'yes', 
+      'submit', 'save', 'apply', 'ok', 'accept',
+      'danger', 'destructive', 'warning'
+    ];
+    
+    for (const word of dangerousWords) {
+      if (combined.includes(word)) {
+        console.log(`[Recovery] 🚫 Blocked unsafe dismiss: "${text || ariaLabel}" (contains "${word}")`);
+        return false;
+      }
+    }
+    
+    // SAFE words - only these are allowed
+    const safeWords = ['close', 'cancel', 'dismiss', 'x', 'no', 'back', 'exit'];
+    const hasSafeWord = safeWords.some(word => combined.includes(word));
+    
+    // Also allow if it's just an X icon (common pattern)
+    const isXIcon = text === '×' || text === 'x' || text === '✕';
+    
+    if (hasSafeWord || isXIcon) {
+      return true;
+    }
+    
+    // Default: reject if we're not sure
+    console.log(`[Recovery] 🚫 Blocked uncertain dismiss: "${text || ariaLabel}"`);
+    return false;
+  }
   
   private static async scrollTargetIntoView(
     target: string,
     startTime: number
   ): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'SCROLL_TARGET_INTO_VIEW', target };
+    const action: RecoveryAction = { kind: 'SCROLL_INTO_VIEW', target };
     
     if (!target) {
       return {
@@ -300,189 +421,8 @@ export class RecoveryEngine {
     };
   }
   
-  private static async scrollToTop(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'SCROLL_TO_TOP' };
-    
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-    await this.sleep(300);
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Scrolled to top of page',
-      shouldRetry: true,
-    };
-  }
-  
-  private static async scrollToBottom(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'SCROLL_TO_BOTTOM' };
-    
-    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-    await this.sleep(300);
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Scrolled to bottom of page',
-      shouldRetry: true,
-    };
-  }
-  
-  private static async dismissCommonPopups(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'DISMISS_COMMON_POPUPS' };
-    let dismissed = 0;
-    
-    // Common close button selectors
-    const closeSelectors = [
-      '[aria-label="Close"]',
-      '[aria-label="close"]',
-      '[aria-label="Dismiss"]',
-      '.close-button',
-      '.modal-close',
-      '.popup-close',
-      'button[class*="close"]',
-      '[data-dismiss="modal"]',
-      '.MuiDialog-root button[aria-label="close"]',
-    ];
-    
-    for (const selector of closeSelectors) {
-      try {
-        const buttons = document.querySelectorAll(selector);
-        for (const button of Array.from(buttons)) {
-          if (button instanceof HTMLElement && this.isVisible(button)) {
-            try {
-              button.click();
-              dismissed++;
-              await this.sleep(100);
-            } catch (e) {
-              // Page error during click - ignore and continue
-              console.warn('Recovery: Error clicking close button:', e);
-            }
-          }
-        }
-      } catch (e) {
-        // Invalid selector
-      }
-    }
-    
-    // Also try pressing Escape (wrap in try-catch)
-    try {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    } catch (e) {
-      console.warn('Recovery: Error pressing Escape:', e);
-    }
-    
-    // Click on modal backdrops (wrap in try-catch)
-    try {
-      const backdrops = document.querySelectorAll(
-        '.modal-backdrop, .MuiBackdrop-root, [class*="overlay"]'
-      );
-      for (const backdrop of Array.from(backdrops)) {
-        if (backdrop instanceof HTMLElement && this.isVisible(backdrop)) {
-          try {
-            backdrop.click();
-            dismissed++;
-            await this.sleep(100);
-          } catch (e) {
-            console.warn('Recovery: Error clicking backdrop:', e);
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Recovery: Error finding backdrops:', e);
-    }
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: `Dismissed ${dismissed} popup(s)`,
-      shouldRetry: dismissed > 0,
-    };
-  }
-  
-  private static async waitForPageReady(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'WAIT_FOR_PAGE_READY' };
-    
-    const result = await StateWaitEngine.waitForPageReady(10000);
-    
-    return {
-      success: result.success,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: result.success ? 'Page is ready' : 'Page ready timeout',
-      shouldRetry: result.success,
-    };
-  }
-  
-  private static async switchToFrame(
-    selector: string,
-    startTime: number
-  ): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'SWITCH_TO_FRAME', selector };
-    
-    try {
-      const iframe = document.querySelector(selector) as HTMLIFrameElement;
-      if (iframe && iframe.contentDocument) {
-        // Store reference to iframe's document
-        // Note: Actual frame switching is handled by the execution engine
-        return {
-          success: true,
-          action,
-          elapsedMs: Date.now() - startTime,
-          message: `Ready to switch to frame "${selector}"`,
-          shouldRetry: true,
-        };
-      }
-    } catch (e) {
-      // Cross-origin or other error
-    }
-    
-    return {
-      success: false,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: `Could not access frame "${selector}"`,
-      shouldRetry: false,
-    };
-  }
-  
-  private static async switchToMainFrame(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'SWITCH_TO_MAIN_FRAME' };
-    
-    // In content script context, we're always in a specific frame
-    // This action signals the execution engine to switch
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Ready to switch to main frame',
-      shouldRetry: true,
-    };
-  }
-  
-  private static async refreshElementReferences(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'REFRESH_ELEMENT_REFERENCES' };
-    
-    // Wait for any pending DOM updates
-    await StateWaitEngine.waitForDOMStable(200, 2000);
-    
-    // Force a layout reflow
-    void document.body.offsetHeight;
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Element references refreshed',
-      shouldRetry: true,
-    };
-  }
-  
   private static retryWithLooserMatch(startTime: number): RecoveryResult {
-    const action: RecoveryAction = { kind: 'RETRY_WITH_LOOSER_MATCH' };
+    const action: RecoveryAction = { kind: 'RETRY_LOOSER_MATCH' };
     
     // This is a signal to the resolver to use looser matching
     return {
@@ -494,93 +434,14 @@ export class RecoveryEngine {
     };
   }
   
-  private static async clickAway(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'CLICK_AWAY' };
-    
-    // Click on body to dismiss any open popups/dropdowns
-    document.body.click();
-    await this.sleep(100);
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Clicked away from current element',
-      shouldRetry: true,
-    };
-  }
-  
-  private static async pressEscape(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'PRESS_ESCAPE' };
-    
-    // Dispatch Escape key
-    const escapeEvent = new KeyboardEvent('keydown', {
-      key: 'Escape',
-      code: 'Escape',
-      bubbles: true,
-      cancelable: true,
-    });
-    
-    document.activeElement?.dispatchEvent(escapeEvent);
-    document.dispatchEvent(escapeEvent);
-    
-    await this.sleep(100);
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Pressed Escape key',
-      shouldRetry: true,
-    };
-  }
-  
-  private static async focusBody(startTime: number): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'FOCUS_BODY' };
-    
-    // Remove focus from current element
-    (document.activeElement as HTMLElement)?.blur?.();
-    document.body.focus();
-    
-    await this.sleep(50);
-    
-    return {
-      success: true,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'Focused body element',
-      shouldRetry: true,
-    };
-  }
-  
-  private static async askUser(
-    message: string,
-    context: RecoveryContext,
-    startTime: number
-  ): Promise<RecoveryResult> {
-    const action: RecoveryAction = { kind: 'ASK_USER', message };
-    
-    if (context.onAskUser) {
-      const shouldContinue = await context.onAskUser(message);
-      
-      return {
-        success: shouldContinue,
-        action,
-        elapsedMs: Date.now() - startTime,
-        message: shouldContinue ? 'User approved continuation' : 'User declined continuation',
-        shouldRetry: shouldContinue,
-      };
-    }
-    
-    // No callback provided, can't ask user
-    return {
-      success: false,
-      action,
-      elapsedMs: Date.now() - startTime,
-      message: 'No user callback available',
-      shouldRetry: false,
-    };
-  }
+  // ============ OLD METHODS REMOVED ============
+  // Removed: scrollToTop, scrollToBottom (rarely needed)
+  // Removed: dismissCommonPopups (replaced by dismissPopupsSafe)
+  // Removed: waitForPageReady (replaced by waitForStability)
+  // Removed: switchToFrame, switchToMainFrame (handle in orchestrator)
+  // Removed: refreshElementReferences (redundant with stability wait)
+  // Removed: clickAway, pressEscape, focusBody (consolidated into dismissPopupsSafe)
+  // Removed: askUser (defer to later - complicates UX)
   
   // ============ Helper methods ============
   
@@ -600,6 +461,231 @@ export class RecoveryEngine {
   
   private static sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  /**
+   * Execute structured scroll recovery with container finding and text checking
+   */
+  private static async executeScrollRecovery(
+    directive: ScrollRecoveryDirective,
+    startTime: number
+  ): Promise<RecoveryResult> {
+    const action: RecoveryAction = directive;
+    
+    try {
+      // Find scroll container
+      const container = this.findScrollContainer(directive.containerHint);
+      if (!container) {
+        return {
+          success: false,
+          action,
+          elapsedMs: Date.now() - startTime,
+          message: `Could not find scroll container: ${directive.containerHint || 'default'}`,
+          shouldRetry: false,
+        };
+      }
+      
+      console.log(`[Recovery] Found scroll container, scrolling ${directive.scrollDirection} to find: ${directive.untilTextVisible}`);
+      
+      // Scroll incrementally until text appears or max scrolls reached
+      for (let i = 0; i < directive.maxScrolls; i++) {
+        // Scroll
+        const scrollAmount = directive.scrollDirection === 'down' 
+          ? directive.pixelsPerScroll 
+          : -directive.pixelsPerScroll;
+        
+        container.scrollBy({
+          top: scrollAmount,
+          behavior: 'smooth'
+        });
+        
+        // Wait for scroll to complete
+        await this.sleep(200);
+        
+        // Check if target text is now visible
+        if (directive.untilTextVisible) {
+          const found = document.body.innerText.includes(directive.untilTextVisible);
+          if (found) {
+            console.log(`[Recovery] Found target text after ${i + 1} scrolls`);
+            return {
+              success: true,
+              action,
+              elapsedMs: Date.now() - startTime,
+              message: `Found "${directive.untilTextVisible}" after ${i + 1} scrolls`,
+              shouldRetry: true,
+            };
+          }
+        }
+        
+        // Check if we reached the end of scrollable area
+        const atEnd = directive.scrollDirection === 'down'
+          ? container.scrollTop + container.clientHeight >= container.scrollHeight - 10
+          : container.scrollTop <= 10;
+        
+        if (atEnd) {
+          console.log(`[Recovery] Reached end of scroll area after ${i + 1} scrolls`);
+          break;
+        }
+      }
+      
+      return {
+        success: false,
+        action,
+        elapsedMs: Date.now() - startTime,
+        message: `Target text not found after ${directive.maxScrolls} scrolls`,
+        shouldRetry: false,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        action,
+        elapsedMs: Date.now() - startTime,
+        message: error instanceof Error ? error.message : 'Scroll recovery failed',
+        shouldRetry: false,
+      };
+    }
+  }
+  
+  /**
+   * Find scroll container based on hint
+   */
+  private static findScrollContainer(containerHint?: string): Element | null {
+    // Strategy 1: If hint provided, try to find by text content
+    if (containerHint) {
+      // Look for elements with text matching the hint
+      const candidates = document.querySelectorAll('[role="region"], [role="main"], main, [class*="table"], [class*="list"], [class*="scroll"]');
+      for (const candidate of candidates) {
+        const text = candidate.textContent?.toLowerCase() || '';
+        const hint = containerHint.toLowerCase();
+        if (text.includes(hint) || candidate.getAttribute('aria-label')?.toLowerCase().includes(hint)) {
+          // Check if it's scrollable
+          const style = window.getComputedStyle(candidate);
+          if (style.overflow === 'auto' || style.overflow === 'scroll' || 
+              style.overflowY === 'auto' || style.overflowY === 'scroll') {
+            return candidate;
+          }
+          // Check if any parent is scrollable
+          let parent = candidate.parentElement;
+          while (parent) {
+            const parentStyle = window.getComputedStyle(parent);
+            if (parentStyle.overflow === 'auto' || parentStyle.overflow === 'scroll' ||
+                parentStyle.overflowY === 'auto' || parentStyle.overflowY === 'scroll') {
+              return parent;
+            }
+            parent = parent.parentElement;
+          }
+        }
+      }
+    }
+    
+    // Strategy 2: Find first scrollable container
+    const scrollables = document.querySelectorAll('[role="region"], [role="main"], main, div');
+    for (const el of scrollables) {
+      const style = window.getComputedStyle(el);
+      if (style.overflow === 'auto' || style.overflow === 'scroll' ||
+          style.overflowY === 'auto' || style.overflowY === 'scroll') {
+        if (el.scrollHeight > el.clientHeight) {
+          return el;
+        }
+      }
+    }
+    
+    // Strategy 3: Fallback to window
+    return document.documentElement;
+  }
+  
+  /**
+   * Execute structured dismiss popup recovery
+   */
+  private static async dismissPopupStructured(
+    directive: DismissRecoveryDirective,
+    startTime: number
+  ): Promise<RecoveryResult> {
+    const action: RecoveryAction = directive;
+    const method = directive.dismissMethod || 'escape';
+    
+    try {
+      switch (method) {
+        case 'escape':
+          // Press Escape key
+          document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          document.body.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true, cancelable: true }));
+          await this.sleep(300);
+          break;
+          
+        case 'click_outside':
+          // Click on body to dismiss
+          document.body.click();
+          await this.sleep(300);
+          break;
+          
+        case 'close_button':
+          // Find and click close button
+          const closeButton = this.findCloseButton(directive.popupHint);
+          if (closeButton) {
+            closeButton.click();
+            await this.sleep(300);
+          } else {
+            return {
+              success: false,
+              action,
+              elapsedMs: Date.now() - startTime,
+              message: 'Close button not found',
+              shouldRetry: false,
+            };
+          }
+          break;
+      }
+      
+      return {
+        success: true,
+        action,
+        elapsedMs: Date.now() - startTime,
+        message: `Dismissed popup using ${method}`,
+        shouldRetry: true,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        action,
+        elapsedMs: Date.now() - startTime,
+        message: error instanceof Error ? error.message : 'Dismiss popup failed',
+        shouldRetry: false,
+      };
+    }
+  }
+  
+  /**
+   * Find close button for popup
+   */
+  private static findCloseButton(popupHint?: string): HTMLElement | null {
+    // Look for common close button selectors
+    const selectors = [
+      '[aria-label*="close" i]',
+      '[aria-label*="dismiss" i]',
+      '[title*="close" i]',
+      'button[class*="close" i]',
+      '[role="button"][class*="close" i]',
+      'button[class*="dismiss" i]',
+    ];
+    
+    for (const selector of selectors) {
+      const buttons = document.querySelectorAll(selector);
+      for (const button of buttons) {
+        // If popup hint provided, check if button is inside that popup
+        if (popupHint) {
+          const text = button.closest('[role="dialog"], [role="alertdialog"], [class*="modal"], [class*="popup"]')?.textContent?.toLowerCase() || '';
+          if (text.includes(popupHint.toLowerCase())) {
+            return button as HTMLElement;
+          }
+        } else {
+          // Return first close button found
+          return button as HTMLElement;
+        }
+      }
+    }
+    
+    return null;
   }
 }
 

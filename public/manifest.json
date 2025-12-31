@@ -23,11 +23,17 @@
     {
       "matches": ["<all_urls>"],
       "js": ["src/content/content-script.ts"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ],
   "host_permissions": [
-    "<all_urls>"
+    "<all_urls>",
+    "*://*.force.com/*",
+    "*://*.salesforce.com/*",
+    "*://*.lightning.force.com/*",
+    "*://*.gainsight.com/*",
+    "*://*.gainsightcloud.com/*"
   ]
 }
 

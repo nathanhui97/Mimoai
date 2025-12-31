@@ -8,6 +8,8 @@
 import type { LocatorBundle, LocatorStrategy, LocatorType } from '../types/locator';
 import { resolveScopeContainer } from '../types/scope';
 import { TextMatcher } from './text-matcher';
+import { FeatureFlags } from '../lib/feature-flags';
+import { computeAccessibleName } from '../lib/accessible-name';
 
 /**
  * Result from finding a candidate element
@@ -150,6 +152,12 @@ export class CandidateFinder {
     scopeContainer: Element,
     doc: Document = document
   ): CandidateResult[] {
+    // Skip XPath if disabled via feature flag
+    if (strategy.type === 'xpath' && !FeatureFlags.XPATH_FALLBACK) {
+      console.log('[CandidateFinder] Skipping XPath strategy (XPATH_FALLBACK flag disabled)');
+      return [];
+    }
+    
     switch (strategy.type) {
       case 'css':
         return this.findByCSS(strategy, scopeContainer);
@@ -282,6 +290,12 @@ export class CandidateFinder {
   ): CandidateResult[] {
     const results: CandidateResult[] = [];
     const targetText = strategy.value;
+    
+    // Safety check: skip empty or unlabeled text
+    if (!targetText || targetText.trim() === '' || targetText === '(unlabeled)') {
+      console.warn('CandidateFinder: findByText received empty or unlabeled value, skipping');
+      return results;
+    }
     
     // Safety check: if value looks like XPath, skip (should be handled by xpath strategy)
     if (targetText.startsWith('//') || targetText.startsWith('/')) {
@@ -438,11 +452,8 @@ export class CandidateFinder {
       for (const candidate of Array.from(candidates)) {
         if (!this.isElementVisible(candidate)) continue;
         
-        // Get accessible name
-        const candidateName = 
-          candidate.getAttribute('aria-label') ||
-          candidate.textContent?.trim() ||
-          '';
+        // Get accessible name properly (handles labels, aria-labelledby, etc.)
+        const candidateName = computeAccessibleName(candidate) || '';
         
         if (accessibleName) {
           const score = TextMatcher.similarityScore(accessibleName, candidateName);
@@ -465,6 +476,7 @@ export class CandidateFinder {
       }
     } catch (e) {
       // Invalid selector
+      console.warn('[CandidateFinder] Error in findByRole:', e);
     }
     
     return results;
@@ -568,6 +580,11 @@ export class CandidateFinder {
    * Get tag hints based on recorded tag name
    */
   private static getTagHints(tagName: string): string[] {
+    // Safety check: if tagName is empty, return empty array (will use '*' selector)
+    if (!tagName || tagName.trim() === '') {
+      return [];
+    }
+    
     const tag = tagName.toLowerCase();
     
     switch (tag) {
@@ -581,6 +598,8 @@ export class CandidateFinder {
         return ['select', '[role="combobox"]', '[role="listbox"]'];
       case 'li':
         return ['li', '[role="option"]', '[role="menuitem"]', '[role="listitem"]'];
+      case 'option':
+        return ['[role="option"]', 'option', 'li'];
       default:
         return [tag];
     }

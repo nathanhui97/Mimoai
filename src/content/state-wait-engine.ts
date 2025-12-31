@@ -21,6 +21,29 @@ export interface WaitResult {
 }
 
 /**
+ * Result of stability wait with detailed status
+ */
+export interface StabilityResult extends WaitResult {
+  domStable?: boolean;
+  networkIdle?: boolean;
+  spinnersGone?: boolean;
+}
+
+/**
+ * Configuration for unified stability wait
+ */
+export interface StabilityConfig {
+  /** Minimum time with no DOM mutations (default: 300-600ms) */
+  domQuietMs?: number;
+  /** Minimum time with no pending network requests (default: 400-800ms) */
+  networkQuietMs?: number;
+  /** Maximum total time to wait (default: 5000ms) */
+  maxWaitMs?: number;
+  /** Whether to check for spinners (default: true) */
+  checkSpinners?: boolean;
+}
+
+/**
  * Configuration for network idle detection
  */
 interface NetworkIdleConfig {
@@ -93,6 +116,91 @@ export class StateWaitEngine {
         });
       }, timeoutMs);
     });
+  }
+  
+  /**
+   * UNIFIED STABILITY WAIT - Foundation for reliable outcome diffing
+   * 
+   * Combines DOM quiet + network idle + spinner detection
+   * Returns when ALL conditions are met, or timeout
+   * 
+   * This is the key function that replaces fixed setTimeout() delays.
+   * Use this before capturing "after" state in outcome diffing.
+   * 
+   * @param config - Configuration for stability checks
+   * @returns StabilityResult with detailed status of each check
+   */
+  static async waitForStability(config: StabilityConfig = {}): Promise<StabilityResult> {
+    const {
+      domQuietMs = 400,           // Reasonable middle ground (300-600ms)
+      networkQuietMs = 600,       // Slightly longer for network (400-800ms)
+      maxWaitMs = 5000,           // Total timeout
+      checkSpinners = true,
+    } = config;
+    
+    const startTime = Date.now();
+    const result: StabilityResult = {
+      success: false,
+      elapsedMs: 0,
+      domStable: false,
+      networkIdle: false,
+      spinnersGone: false,
+    };
+    
+    // Helper to check remaining time
+    const remainingTime = () => Math.max(0, maxWaitMs - (Date.now() - startTime));
+    
+    // 1. Wait for DOM mutations to stop
+    const domResult = await this.waitForDOMStable(
+      domQuietMs,
+      Math.min(3000, remainingTime())
+    );
+    result.domStable = domResult.success;
+    
+    if (!domResult.success) {
+      console.log('[StateWaitEngine] DOM not stable, continuing anyway');
+    }
+    
+    // 2. Wait for network to be idle
+    const networkResult = await this.waitForNetworkIdle({
+      idleMs: networkQuietMs,
+      timeoutMs: Math.min(2000, remainingTime()),
+    });
+    result.networkIdle = networkResult.success;
+    
+    if (!networkResult.success) {
+      console.log('[StateWaitEngine] Network not idle, continuing anyway');
+    }
+    
+    // 3. Wait for spinners to disappear (if enabled)
+    if (checkSpinners) {
+      const spinnersResult = await this.waitForLoadersGone(
+        Math.min(2000, remainingTime())
+      );
+      result.spinnersGone = spinnersResult.success;
+      
+      if (!spinnersResult.success) {
+        console.log('[StateWaitEngine] Spinners still present, continuing anyway');
+      }
+    } else {
+      result.spinnersGone = true; // Not checking, so assume true
+    }
+    
+    // Success if ALL checks passed (or were not required)
+    result.success = result.domStable && result.networkIdle && result.spinnersGone;
+    result.elapsedMs = Date.now() - startTime;
+    
+    if (result.success) {
+      console.log(`[StateWaitEngine] ✅ Stability achieved in ${result.elapsedMs}ms`);
+    } else {
+      console.log(`[StateWaitEngine] ⚠️ Partial stability after ${result.elapsedMs}ms:`, {
+        domStable: result.domStable,
+        networkIdle: result.networkIdle,
+        spinnersGone: result.spinnersGone,
+      });
+    }
+    
+    return result;
   }
   
   /**

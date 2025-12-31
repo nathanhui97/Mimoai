@@ -8,6 +8,7 @@ import { ElementContext } from './element-context';
 import { ElementSimilarity } from './element-similarity';
 import { ElementStateCapture } from './element-state';
 import { ElementTextCapture } from './element-text';
+import { ElementAnalyzer } from '../lib/element-analyzer';
 // WaitConditionDeterminer removed - StateWaitEngine handles waits at execution time
 import { IframeUtils } from './iframe-utils';
 import { ContextScanner } from './context-scanner';
@@ -17,6 +18,9 @@ import { VisualAnalysisService } from '../lib/visual-analysis';
 import { DOMDistiller } from '../lib/dom-distiller';
 import { PIIScrubber } from '../lib/pii-scrubber';
 import { aiConfig } from '../lib/ai-config';
+import { StateWaitEngine } from './state-wait-engine';
+import { capturePageSignals, generateOutcomesFromDiff } from './universal-execution/state-verifier';
+import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep, WorkflowStepPayload } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import type { PageAnalysis, PageType } from '../types/visual';
@@ -48,7 +52,8 @@ export class RecordingManager {
   private scrollHandler: ((event: Event) => void) | null = null;
   private copyHandler: ((event: ClipboardEvent) => void) | null = null;
   private scrollDebounceTimer: number | null = null;
-  private lastScrollStep: { scrollX: number; scrollY: number; timestamp: number } | null = null;
+  private lastScrollStep: { scrollX: number; scrollY: number; timestamp: number; container?: Element } | null = null;
+  private pendingScrollEvent: Event | null = null; // Store the scroll event for processing after debounce
   private currentUrl: string = window.location.href;
   private currentTabUrl: string | null = null; // Tab URL (stable identifier, not tabId)
   private currentTabTitle: string | null = null; // Tab title for context
@@ -183,19 +188,105 @@ export class RecordingManager {
 
   /**
    * Stop recording - remove event listeners
-   * Waits for pending AI validations (max 2 seconds) before completing
+   * IMPORTANT: Flushes pending debounced steps before stopping to prevent data loss
+   * Waits for pending AI validations (max 10 seconds) before completing
    */
   async stop(): Promise<void> {
     if (!this.isRecording) {
       return;
     }
 
+    console.log('🛑 GhostWriter: Stopping recording - flushing pending steps...');
+
+    // ============================================
+    // PHASE 1: FLUSH PENDING DEBOUNCED STEPS
+    // (Must happen BEFORE setting isRecording = false)
+    // ============================================
+
+    // Flush pending input (if there's a debounced input waiting)
+    if (this.inputDebounceTimer !== null && this.currentInputElement) {
+      console.log('🔄 GhostWriter: Flushing pending input step...');
+      clearTimeout(this.inputDebounceTimer);
+      this.inputDebounceTimer = null;
+      
+      try {
+        // Capture the pending input value now
+        await this.captureInputValue(
+          this.currentInputElement as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement
+        );
+        console.log('✅ GhostWriter: Pending input step flushed successfully');
+      } catch (error) {
+        console.warn('⚠️ GhostWriter: Failed to flush pending input:', error);
+      }
+    } else if (this.inputDebounceTimer !== null) {
+      // Timer exists but no element tracked - just clear it
+      clearTimeout(this.inputDebounceTimer);
+      this.inputDebounceTimer = null;
+    }
+
+    // Flush pending scroll (if there's a debounced scroll waiting)
+    if (this.scrollDebounceTimer !== null) {
+      console.log('🔄 GhostWriter: Flushing pending scroll step...');
+      clearTimeout(this.scrollDebounceTimer);
+      this.scrollDebounceTimer = null;
+      
+      try {
+        // Check if pending scroll event was on a container
+        const event = this.pendingScrollEvent;
+        let isContainerScroll = false;
+        let scrollContainer: Element | null = null;
+        let scrollTop = 0;
+        let scrollLeft = 0;
+        
+        if (event && event.target && event.target !== document && event.target !== window && event.target instanceof Element) {
+          const element = event.target as Element;
+          const style = window.getComputedStyle(element);
+          const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' || 
+                              style.overflowY === 'auto' || style.overflowY === 'scroll';
+          
+          if (isScrollable && element.scrollHeight > element.clientHeight) {
+            isContainerScroll = true;
+            scrollContainer = element;
+            scrollTop = element.scrollTop;
+            scrollLeft = element.scrollLeft;
+          }
+        }
+        
+        const scrollX = window.scrollX || window.pageXOffset;
+        const scrollY = window.scrollY || window.pageYOffset;
+        
+        // Only record if there's been meaningful scroll since last recorded
+        const shouldRecordScroll = !this.lastScrollStep || 
+          Math.abs((isContainerScroll ? scrollLeft : scrollX) - this.lastScrollStep.scrollX) >= 50 ||
+          Math.abs((isContainerScroll ? scrollTop : scrollY) - this.lastScrollStep.scrollY) >= 50;
+        
+        if (shouldRecordScroll && (scrollX > 0 || scrollY > 0 || scrollTop > 0)) {
+          await this.flushPendingScrollStep(scrollX, scrollY, isContainerScroll, scrollContainer, scrollTop, scrollLeft);
+          console.log('✅ GhostWriter: Pending scroll step flushed successfully');
+        }
+      } catch (error) {
+        console.warn('⚠️ GhostWriter: Failed to flush pending scroll:', error);
+      }
+    }
+
+    // Brief delay to allow any in-flight events to complete
+    // This handles the edge case where user clicks Stop right after an action
+    console.log('⏳ GhostWriter: Waiting 300ms for any in-flight events...');
+    await new Promise(resolve => setTimeout(resolve, 300));
+
+    // ============================================
+    // PHASE 2: MARK RECORDING AS STOPPED
+    // ============================================
     this.isRecording = false;
 
     // Remove visual indicator
     if (document.body) {
       document.body.removeAttribute('data-ghostwriter-recording');
     }
+
+    // ============================================
+    // PHASE 3: REMOVE EVENT LISTENERS
+    // ============================================
 
     // Remove event listeners (must match the phase used in addEventListener)
     if (this.clickHandler) {
@@ -238,16 +329,9 @@ export class RecordingManager {
       this.copyHandler = null;
     }
 
-    // Clear any pending debounce timers
-    if (this.inputDebounceTimer !== null) {
-      clearTimeout(this.inputDebounceTimer);
-      this.inputDebounceTimer = null;
-    }
-
-    if (this.scrollDebounceTimer !== null) {
-      clearTimeout(this.scrollDebounceTimer);
-      this.scrollDebounceTimer = null;
-    }
+    // ============================================
+    // PHASE 4: CLEANUP STATE
+    // ============================================
 
     // Clear last input step tracking
     this.lastInputStep = null;
@@ -257,7 +341,9 @@ export class RecordingManager {
     this.currentInputElement = null;
     this.pendingSnapshot = null;
 
-    // Wait for AI validations to complete (max 2 seconds)
+    // ============================================
+    // PHASE 5: WAIT FOR AI VALIDATIONS
+    // ============================================
     if (this.pendingValidations.length > 0) {
       console.log(`🤖 GhostWriter: Waiting for ${this.pendingValidations.length} pending AI validation(s) to complete...`);
       const waitStartTime = performance.now();
@@ -273,12 +359,120 @@ export class RecordingManager {
           const waitTime = performance.now() - waitStartTime;
           console.warn(`🤖 GhostWriter: Timeout waiting for AI validations (waited ${waitTime.toFixed(2)}ms, ${this.pendingValidations.length} still pending)`);
           resolve(undefined);
-        }, 10000)) // Increased to 10 seconds to allow AI requests to complete
+        }, 10000)) // 10 seconds to allow AI requests to complete
       ]);
       this.pendingValidations = [];
     }
 
-    console.log('Recording stopped');
+    console.log('✅ GhostWriter: Recording stopped successfully');
+  }
+
+  /**
+   * Flush a pending scroll step - helper for stop()
+   * NOW SUPPORTS: Page scrolls AND container scrolls (modals, divs, etc.)
+   */
+  private async flushPendingScrollStep(
+    scrollX: number, 
+    scrollY: number,
+    isContainerScroll: boolean = false,
+    scrollContainer: Element | null = null,
+    scrollTop: number = 0,
+    scrollLeft: number = 0
+  ): Promise<void> {
+    const url = window.location.href;
+    const currentTimestamp = Date.now();
+
+    // Capture viewport snapshot for scroll (shows what's visible after scrolling)
+    let visualSnapshot: WorkflowStepPayload['visualSnapshot'] | undefined;
+    try {
+      console.log('📸 GhostWriter: Capturing snapshot for flushed scroll event');
+      const response = await chrome.runtime.sendMessage({ type: 'CAPTURE_VIEWPORT' });
+      if (response && response.data?.snapshot) {
+        const viewportSnapshot = response.data.snapshot;
+        visualSnapshot = {
+          viewport: viewportSnapshot,
+          elementSnippet: viewportSnapshot,
+          timestamp: Date.now(),
+          viewportSize: {
+            width: window.innerWidth,
+            height: window.innerHeight
+          },
+        };
+      }
+    } catch (snapshotError) {
+      console.warn('📸 GhostWriter: Failed to capture snapshot for flushed scroll:', snapshotError);
+    }
+
+    // Capture viewport information (matching existing scroll step format)
+    const viewport: import('../types/workflow').ViewportInfo = {
+      width: window.innerWidth,
+      height: window.innerHeight,
+      scrollX,
+      scrollY,
+      // Store container scroll info if this is a container scroll
+      ...(isContainerScroll && scrollContainer && {
+        elementScrollContainer: {
+          selector: scrollContainer.getAttribute('class') 
+            ? `.${scrollContainer.getAttribute('class')?.split(' ')[0]}`
+            : scrollContainer.tagName.toLowerCase(),
+          scrollTop,
+          scrollLeft,
+        }
+      }),
+    };
+
+    // Capture timing information
+    const delayAfter = this.lastStep ? (currentTimestamp - this.lastStep.payload.timestamp) : undefined;
+    const timing: import('../types/workflow').TimingInfo | undefined = delayAfter ? {
+      delayAfter,
+    } : undefined;
+
+    // Generate selectors for the scroll target
+    let selector = 'body';
+    let fallbackSelectors = ['body', 'html'];
+    let xpath = '/html/body';
+    
+    if (isContainerScroll && scrollContainer) {
+      // Generate proper selectors for the container
+      const containerSelectors = SelectorEngine.generateSelectors(scrollContainer, undefined);
+      selector = containerSelectors.primary || 'body';
+      fallbackSelectors = [
+        containerSelectors.primary,
+        ...containerSelectors.fallbacks,
+      ].filter((s): s is string => !!s);
+      xpath = containerSelectors.xpath || '/html/body';
+    }
+
+    const stepPayload: WorkflowStep['payload'] = {
+      selector,
+      fallbackSelectors,
+      xpath,
+      timestamp: currentTimestamp,
+      url: url,
+      tabUrl: this.currentTabUrl || undefined,
+      tabTitle: this.currentTabTitle || undefined,
+      tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
+      viewport,
+      timing,
+      visualSnapshot, // Visual snapshot for AI description generation
+    };
+
+    const step: WorkflowStep = {
+      type: 'SCROLL',
+      payload: stepPayload,
+    };
+
+    // Update tracking
+    this.lastScrollStep = {
+      scrollX: isContainerScroll ? scrollLeft : scrollX,
+      scrollY: isContainerScroll ? scrollTop : scrollY,
+      timestamp: currentTimestamp,
+      container: scrollContainer || undefined,
+    };
+    this.lastStep = step;
+
+    // Send step
+    await this.sendStep(step);
   }
 
   /**
@@ -1071,6 +1265,19 @@ export class RecordingManager {
         
         console.log('GhostWriter: Element was visible at click time, proceeding with recording...');
         
+        // OUTCOME DIFFING: Capture "before" state
+        const beforeSignals = FeatureFlags.OUTCOME_VERIFICATION ? 
+          capturePageSignals(clickableElement) : 
+          null;
+        if (beforeSignals) {
+          console.log('[OutcomeDiff] Before signals captured:', {
+            url: beforeSignals.url,
+            modals: beforeSignals.modals.length,
+            toasts: beforeSignals.toasts.length,
+            spinners: beforeSignals.spinnerCount,
+          });
+        }
+        
         // Log if we're recording a list item/option (for debugging)
         if (finalIsListItemOrOption) {
           console.log('GhostWriter: Recording list item/option click:', clickableElement.tagName, 'Text:', (clickableElement as HTMLElement).textContent?.trim()?.substring(0, 50));
@@ -1600,6 +1807,10 @@ export class RecordingManager {
           // Capture semantic anchors (Phase 6)
           const semanticAnchors = ElementContext.getSemanticAnchors(actualElement as HTMLElement);
 
+          // Analyze element for execution strategy
+          const elementAnalysis = ElementAnalyzer.analyze(actualElement);
+          console.log('🔍 GhostWriter: Element Analysis:\n' + ElementAnalyzer.formatAnalysis(elementAnalysis));
+
           const stepPayload: WorkflowStep['payload'] = {
             selector: selectors.primary,
             fallbackSelectors: enhancedFallbacks.length > 0 ? enhancedFallbacks : [selectors.primary], // Ensure never empty
@@ -1656,6 +1867,14 @@ export class RecordingManager {
                 ? semanticAnchors 
                 : undefined
             } : undefined,
+            // Element analysis for execution strategy
+            elementAnalysis: {
+              executionStrategy: elementAnalysis.executionStrategy,
+              confidence: elementAnalysis.confidence,
+              reasons: elementAnalysis.reasons,
+              bestSelector: elementAnalysis.bestSelector,
+              fallbackSelectors: elementAnalysis.fallbackSelectors,
+            },
           };
 
           // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
@@ -1689,6 +1908,38 @@ export class RecordingManager {
             type: isNavigation ? 'NAVIGATION' : 'CLICK',
             payload: stepPayload,
           };
+
+          // OUTCOME DIFFING: Wait for stability, then capture "after" state and generate outcomes
+          if (beforeSignals && FeatureFlags.OUTCOME_VERIFICATION) {
+            try {
+              console.log('[OutcomeDiff] Waiting for stability before capturing after state...');
+              await StateWaitEngine.waitForStability({
+                domQuietMs: 400,
+                networkQuietMs: 600,
+                maxWaitMs: 5000,
+                checkSpinners: true,
+              });
+              
+              const afterSignals = capturePageSignals(target);
+              console.log('[OutcomeDiff] After signals captured:', {
+                url: afterSignals.url,
+                modals: afterSignals.modals.length,
+                toasts: afterSignals.toasts.length,
+                spinners: afterSignals.spinnerCount,
+              });
+              
+              const outcomes = generateOutcomesFromDiff(beforeSignals, afterSignals);
+              if (outcomes.length > 0) {
+                stepPayload.expectedOutcomes = outcomes;
+                console.log(`[OutcomeDiff] ✅ Generated ${outcomes.length} expected outcomes:`, 
+                  outcomes.map(o => o.type).join(', '));
+              } else {
+                console.log('[OutcomeDiff] No significant changes detected');
+              }
+            } catch (error) {
+              console.warn('[OutcomeDiff] Error during outcome capture:', error);
+            }
+          }
 
           // Debug: Log if visualSnapshot is present
           if (stepPayload.visualSnapshot) {
@@ -1814,6 +2065,19 @@ export class RecordingManager {
       const target = actualElement as HTMLSelectElement | HTMLInputElement;
       if (!target) return;
 
+      // OUTCOME DIFFING: Capture "before" state (select/checkbox changes can trigger page updates)
+      const beforeSignals = FeatureFlags.OUTCOME_VERIFICATION ? 
+        capturePageSignals(actualElement) : 
+        null;
+      if (beforeSignals) {
+        console.log('[OutcomeDiff:Change] Before signals captured:', {
+          url: beforeSignals.url,
+          modals: beforeSignals.modals.length,
+          toasts: beforeSignals.toasts.length,
+          spinners: beforeSignals.spinnerCount,
+        });
+      }
+
       // Capture snapshot for change events (for AI context)
       try {
         console.log('📸 GhostWriter: Capturing snapshot for change event');
@@ -1828,7 +2092,8 @@ export class RecordingManager {
       }
 
       // Capture immediately (no debounce for change events)
-      await this.captureInputValue(target);
+      // Pass beforeSignals so captureInputValue can add outcomes after recording
+      await this.captureInputValue(target, beforeSignals);
     } catch (error) {
       console.error('Error handling change:', error);
     }
@@ -1853,25 +2118,33 @@ export class RecordingManager {
     // Start capturing IMMEDIATELY with annotation. Do not await it here.
     // Store the Promise so the Click handler can await it.
     // Users can't click two things at the exact same millisecond, so single Promise is sufficient
-    console.log('📸 GhostWriter: Starting annotated snapshot capture on mousedown at', this.pendingClickPoint);
-    
-    // Use captureWithAnnotation to get both original and annotated versions
-    this.pendingAnnotatedSnapshot = VisualSnapshotService.captureWithAnnotation(
-      actualElement,
-      this.pendingClickPoint,
-      'click' // Default action type, can be refined based on element type
-    );
-    
-    // Also keep legacy pendingSnapshot for backward compatibility
-    this.pendingSnapshot = this.pendingAnnotatedSnapshot.then(result => {
-      if (result) {
-        return {
-          viewport: result.viewport,
-          elementSnippet: result.elementSnippet,
-        };
-      }
-      return null;
-    });
+    // Only capture if VisionClicker is enabled (annotated snapshots are expensive and only used by vision clicker)
+    if (FeatureFlags.VISION_CLICKER) {
+      console.log('📸 GhostWriter: Starting annotated snapshot capture on mousedown at', this.pendingClickPoint);
+      
+      // Use captureWithAnnotation to get both original and annotated versions
+      this.pendingAnnotatedSnapshot = VisualSnapshotService.captureWithAnnotation(
+        actualElement,
+        this.pendingClickPoint,
+        'click' // Default action type, can be refined based on element type
+      );
+      
+      // Also keep legacy pendingSnapshot for backward compatibility
+      this.pendingSnapshot = this.pendingAnnotatedSnapshot.then(result => {
+        if (result) {
+          return {
+            viewport: result.viewport,
+            elementSnippet: result.elementSnippet,
+          };
+        }
+        return null;
+      });
+    } else {
+      // VisionClicker disabled - don't capture expensive annotated snapshots
+      console.log('📸 GhostWriter: Skipping annotated snapshot (VisionClicker disabled)');
+      this.pendingAnnotatedSnapshot = null;
+      this.pendingSnapshot = null;
+    }
   }
 
   /**
@@ -1926,6 +2199,19 @@ export class RecordingManager {
       // Get actual element (handles Shadow DOM)
       const actualElement = this.getActualElement(event);
       if (!actualElement) return;
+
+      // OUTCOME DIFFING: Capture "before" state (especially important for Enter key which can cause navigation)
+      const beforeSignals = FeatureFlags.OUTCOME_VERIFICATION ? 
+        capturePageSignals(actualElement) : 
+        null;
+      if (beforeSignals) {
+        console.log('[OutcomeDiff:Keyboard] Before signals captured:', {
+          url: beforeSignals.url,
+          modals: beforeSignals.modals.length,
+          toasts: beforeSignals.toasts.length,
+          spinners: beforeSignals.spinnerCount,
+        });
+      }
 
       const url = window.location.href;
 
@@ -2116,6 +2402,37 @@ export class RecordingManager {
         payload: stepPayload,
       };
 
+      // OUTCOME DIFFING: Wait for stability, then capture "after" state and generate outcomes
+      // Keyboard events (especially Enter) can trigger form submissions and navigation
+      if (beforeSignals && FeatureFlags.OUTCOME_VERIFICATION) {
+        try {
+          console.log('[OutcomeDiff:Keyboard] Waiting for stability before capturing after state...');
+          await StateWaitEngine.waitForStability({
+            domQuietMs: 150,
+            networkQuietMs: 200,
+            maxWaitMs: 3000,
+            checkSpinners: true,
+          });
+          
+          const afterSignals = capturePageSignals(actualElement);
+          console.log('[OutcomeDiff:Keyboard] After signals captured:', {
+            url: afterSignals.url,
+            modals: afterSignals.modals.length,
+            toasts: afterSignals.toasts.length,
+            spinners: afterSignals.spinnerCount,
+          });
+          
+          const outcomes = generateOutcomesFromDiff(beforeSignals, afterSignals);
+          if (outcomes.length > 0) {
+            stepPayload.expectedOutcomes = outcomes;
+            console.log(`[OutcomeDiff:Keyboard] ✅ Generated ${outcomes.length} expected outcomes:`, 
+              outcomes.map(o => o.type));
+          }
+        } catch (diffError) {
+          console.warn('[OutcomeDiff:Keyboard] Failed to generate outcomes:', diffError);
+        }
+      }
+
       this.sendStep(step);
       this.lastStep = step;
     } catch (error) {
@@ -2126,9 +2443,13 @@ export class RecordingManager {
   /**
    * Handle scroll events (debounced)
    * Captures meaningful scroll actions with visual snapshots
+   * NOW SUPPORTS: Page scrolls AND container scrolls (modals, divs, etc.)
    */
-  private handleScroll(_event: Event): void {
+  private handleScroll(event: Event): void {
     if (!this.isRecording) return;
+
+    // Store the event for processing after debounce
+    this.pendingScrollEvent = event;
 
     // Clear previous timer
     if (this.scrollDebounceTimer !== null) {
@@ -2141,24 +2462,60 @@ export class RecordingManager {
       if (!this.isRecording) return;
 
       try {
+        const event = this.pendingScrollEvent;
+        if (!event) return;
+
+        // Detect if this is a container scroll or window scroll
+        const target = event.target;
+        let isContainerScroll = false;
+        let scrollContainer: Element | null = null;
+        let scrollTop = 0;
+        let scrollLeft = 0;
+        
+        // Check if scroll happened on a specific element (not document/window)
+        if (target && target !== document && target !== window && target instanceof Element) {
+          const element = target as Element;
+          const style = window.getComputedStyle(element);
+          const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' || 
+                              style.overflowY === 'auto' || style.overflowY === 'scroll';
+          
+          if (isScrollable && element.scrollHeight > element.clientHeight) {
+            isContainerScroll = true;
+            scrollContainer = element;
+            scrollTop = element.scrollTop;
+            scrollLeft = element.scrollLeft;
+            console.log(`📜 GhostWriter: Detected container scroll: ${element.tagName} scrollTop=${scrollTop}`);
+          }
+        }
+        
         const scrollX = window.scrollX || window.pageXOffset;
         const scrollY = window.scrollY || window.pageYOffset;
         const currentTimestamp = Date.now();
 
         // Skip if scroll position hasn't changed significantly (less than 50px)
         if (this.lastScrollStep) {
-          const deltaX = Math.abs(scrollX - this.lastScrollStep.scrollX);
-          const deltaY = Math.abs(scrollY - this.lastScrollStep.scrollY);
+          // Check if this is the same container/window as last time
+          const sameTarget = isContainerScroll 
+            ? this.lastScrollStep.container === scrollContainer
+            : !this.lastScrollStep.container;
           
-          if (deltaX < 50 && deltaY < 50) {
-            return; // Not a meaningful scroll
-          }
+          if (sameTarget) {
+            const deltaX = isContainerScroll 
+              ? Math.abs(scrollLeft - (this.lastScrollStep.scrollX || 0))
+              : Math.abs(scrollX - this.lastScrollStep.scrollX);
+            const deltaY = isContainerScroll 
+              ? Math.abs(scrollTop - (this.lastScrollStep.scrollY || 0))
+              : Math.abs(scrollY - this.lastScrollStep.scrollY);
+            
+            if (deltaX < 50 && deltaY < 50) {
+              return; // Not a meaningful scroll
+            }
 
-          // Skip if same scroll position within 1 second (debounce)
-          if ((currentTimestamp - this.lastScrollStep.timestamp) < 1000 &&
-              Math.abs(scrollX - this.lastScrollStep.scrollX) < 10 &&
-              Math.abs(scrollY - this.lastScrollStep.scrollY) < 10) {
-            return; // Duplicate scroll
+            // Skip if same scroll position within 1 second (debounce)
+            if ((currentTimestamp - this.lastScrollStep.timestamp) < 1000 &&
+                deltaX < 10 && deltaY < 10) {
+              return; // Duplicate scroll
+            }
           }
         }
 
@@ -2193,6 +2550,16 @@ export class RecordingManager {
           height: window.innerHeight,
           scrollX,
           scrollY,
+          // Store container scroll info if this is a container scroll
+          ...(isContainerScroll && scrollContainer && {
+            elementScrollContainer: {
+              selector: scrollContainer.getAttribute('class') 
+                ? `.${scrollContainer.getAttribute('class')?.split(' ')[0]}`
+                : scrollContainer.tagName.toLowerCase(),
+              scrollTop,
+              scrollLeft,
+            }
+          }),
         };
 
         // Capture timing information
@@ -2202,10 +2569,26 @@ export class RecordingManager {
           delayAfter,
         } : undefined;
 
+        // Generate selectors for the scroll target
+        let selector = 'body';
+        let fallbackSelectors = ['body', 'html'];
+        let xpath = '/html/body';
+        
+        if (isContainerScroll && scrollContainer) {
+          // Generate proper selectors for the container
+          const containerSelectors = SelectorEngine.generateSelectors(scrollContainer, undefined);
+          selector = containerSelectors.primary || 'body';
+          fallbackSelectors = [
+            containerSelectors.primary,
+            ...containerSelectors.fallbacks,
+          ].filter((s): s is string => !!s);
+          xpath = containerSelectors.xpath || '/html/body';
+        }
+
         const stepPayload: WorkflowStep['payload'] = {
-          selector: 'body', // Scroll affects the entire page
-          fallbackSelectors: ['body', 'html'],
-          xpath: '/html/body',
+          selector,
+          fallbackSelectors,
+          xpath,
           timestamp: stepTimestamp,
           url: url,
           tabUrl: this.currentTabUrl || undefined,
@@ -2224,9 +2607,10 @@ export class RecordingManager {
 
         // Update last scroll step
         this.lastScrollStep = {
-          scrollX,
-          scrollY,
+          scrollX: isContainerScroll ? scrollLeft : scrollX,
+          scrollY: isContainerScroll ? scrollTop : scrollY,
           timestamp: currentTimestamp,
+          container: scrollContainer || undefined,
         };
 
         this.sendStep(step);
@@ -2316,7 +2700,10 @@ export class RecordingManager {
   /**
    * Capture the final value of an input element
    */
-  private async captureInputValue(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement): Promise<void> {
+  private async captureInputValue(
+    element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
+    beforeSignals?: ReturnType<typeof capturePageSignals> | null
+  ): Promise<void> {
     try {
       // Check if element is contenteditable
       const isContentEditable = (element as HTMLElement).isContentEditable || 
@@ -2610,6 +2997,10 @@ export class RecordingManager {
         console.warn('GhostWriter: Failed to check clipboard data:', error);
       }
 
+      // Analyze element for execution strategy
+      const elementAnalysis = ElementAnalyzer.analyze(element);
+      console.log('🔍 GhostWriter: Element Analysis (INPUT):\n' + ElementAnalyzer.formatAnalysis(elementAnalysis));
+
       // Build step payload first (without wait conditions)
       const stepPayload: WorkflowStep['payload'] = {
         selector: selectors.primary,
@@ -2676,6 +3067,14 @@ export class RecordingManager {
             ? semanticAnchors 
             : undefined
         } : undefined,
+        // Element analysis for execution strategy
+        elementAnalysis: {
+          executionStrategy: elementAnalysis.executionStrategy,
+          confidence: elementAnalysis.confidence,
+          reasons: elementAnalysis.reasons,
+          bestSelector: elementAnalysis.bestSelector,
+          fallbackSelectors: elementAnalysis.fallbackSelectors,
+        },
       };
 
       // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
@@ -2722,6 +3121,37 @@ export class RecordingManager {
         selector: selectors.primary,
         value: value,
       };
+
+      // OUTCOME DIFFING: If beforeSignals provided (from handleChange), wait for stability and generate outcomes
+      // This is important for select/checkbox/radio changes that can trigger page updates
+      if (beforeSignals && FeatureFlags.OUTCOME_VERIFICATION) {
+        try {
+          console.log('[OutcomeDiff:Input] Waiting for stability before capturing after state...');
+          await StateWaitEngine.waitForStability({
+            domQuietMs: 150,
+            networkQuietMs: 200,
+            maxWaitMs: 3000,
+            checkSpinners: true,
+          });
+          
+          const afterSignals = capturePageSignals(element);
+          console.log('[OutcomeDiff:Input] After signals captured:', {
+            url: afterSignals.url,
+            modals: afterSignals.modals.length,
+            toasts: afterSignals.toasts.length,
+            spinners: afterSignals.spinnerCount,
+          });
+          
+          const outcomes = generateOutcomesFromDiff(beforeSignals, afterSignals);
+          if (outcomes.length > 0) {
+            stepPayload.expectedOutcomes = outcomes;
+            console.log(`[OutcomeDiff:Input] ✅ Generated ${outcomes.length} expected outcomes:`, 
+              outcomes.map(o => o.type));
+          }
+        } catch (diffError) {
+          console.warn('[OutcomeDiff:Input] Failed to generate outcomes:', diffError);
+        }
+      }
 
       this.sendStep(step);
       this.lastStep = step;
