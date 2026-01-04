@@ -12,6 +12,7 @@ import { ElementAnalyzer } from '../lib/element-analyzer';
 // WaitConditionDeterminer removed - StateWaitEngine handles waits at execution time
 import { IframeUtils } from './iframe-utils';
 import { ContextScanner } from './context-scanner';
+import { SheetStateExtractor } from './sheet-state-extractor';
 import { VisualSnapshotService, type AnnotatedCaptureResult } from './visual-snapshot';
 import { AIService } from '../lib/ai-service';
 import { VisualAnalysisService } from '../lib/visual-analysis';
@@ -63,6 +64,7 @@ export class RecordingManager {
   private readonly CLICK_DEDUP_WINDOW = 500; // 500ms - ignore duplicate clicks on same element within this window (reduced from 2s to allow rapid different clicks)
   private lastInputStep: { selector: string; value: string } | null = null; // Track last input to prevent duplicates
   private lastClickStep: { selector: string; timestamp: number } | null = null; // Track last click to prevent duplicates
+  private pendingInputTimestamp: number | null = null; // Capture INPUT timestamp when event fires, not when debounce completes
   private lastStep: WorkflowStep | null = null; // Track last step for wait condition determination
   // Value Cache Pattern: Cache input values for Google Sheets (contenteditable elements that clear on blur)
   private lastInputValue: string = ''; // Cache for contenteditable values (Google Sheets)
@@ -74,6 +76,10 @@ export class RecordingManager {
   private pendingClickPoint: { x: number; y: number } | null = null;
   // AI Validation: Track pending validations to wait before saving
   private pendingValidations: Promise<void>[] = [];
+  // Track pending click processing to ensure last step is captured
+  private pendingClickProcessing: Promise<void>[] = [];
+  // Track pending click callbacks that can be forcibly executed on stop()
+  private pendingClickCallbacks: Array<{ callback: () => Promise<void>; timeoutId?: number }> = [];
   // Phase 4: Human-like visual understanding
   private currentPageAnalysis: PageAnalysis | null = null;
   private pageAnalysisPending: boolean = false;
@@ -212,8 +218,10 @@ export class RecordingManager {
       
       try {
         // Capture the pending input value now
+        // Use the captured timestamp if available, otherwise use current time
         await this.captureInputValue(
-          this.currentInputElement as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement
+          this.currentInputElement as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
+          this.pendingInputTimestamp || Date.now()
         );
         console.log('✅ GhostWriter: Pending input step flushed successfully');
       } catch (error) {
@@ -270,10 +278,60 @@ export class RecordingManager {
       }
     }
 
-    // Brief delay to allow any in-flight events to complete
+    // Brief delay to allow any in-flight events to START
     // This handles the edge case where user clicks Stop right after an action
-    console.log('⏳ GhostWriter: Waiting 300ms for any in-flight events...');
+    console.log('⏳ GhostWriter: Waiting 300ms for any in-flight events to start...');
     await new Promise(resolve => setTimeout(resolve, 300));
+
+    // ============================================
+    // PHASE 1.4: FORCE-EXECUTE PENDING CLICK CALLBACKS
+    // (Critical: Ensures the LAST click is processed immediately!)
+    // ============================================
+    if (this.pendingClickCallbacks.length > 0) {
+      console.log(`⚡ GhostWriter: Force-executing ${this.pendingClickCallbacks.length} pending click callback(s)...`);
+      const callbacks = [...this.pendingClickCallbacks]; // Copy array as callbacks will remove themselves
+      for (const callbackEntry of callbacks) {
+        try {
+          // Cancel the scheduled callback (it will execute immediately instead)
+          if (callbackEntry.timeoutId !== undefined) {
+            if (typeof cancelIdleCallback !== 'undefined') {
+              cancelIdleCallback(callbackEntry.timeoutId);
+            } else {
+              clearTimeout(callbackEntry.timeoutId);
+            }
+          }
+          // Execute immediately
+          await callbackEntry.callback();
+        } catch (error) {
+          console.warn('⚠️ GhostWriter: Error force-executing click callback:', error);
+        }
+      }
+      console.log('✅ GhostWriter: All pending click callbacks force-executed');
+      this.pendingClickCallbacks = [];
+    }
+
+    // ============================================
+    // PHASE 1.5: WAIT FOR PENDING CLICK PROCESSING
+    // (Critical: This captures the LAST step!)
+    // ============================================
+    if (this.pendingClickProcessing.length > 0) {
+      console.log(`🔄 GhostWriter: Waiting for ${this.pendingClickProcessing.length} pending click(s) to complete...`);
+      const waitStartTime = performance.now();
+      await Promise.race([
+        Promise.all(this.pendingClickProcessing).then(() => {
+          const waitTime = performance.now() - waitStartTime;
+          console.log(`✅ GhostWriter: All pending clicks completed in ${waitTime.toFixed(2)}ms`);
+        }).catch((error) => {
+          console.warn('⚠️ GhostWriter: Error waiting for pending clicks:', error);
+        }),
+        new Promise(resolve => setTimeout(() => {
+          const waitTime = performance.now() - waitStartTime;
+          console.warn(`⚠️ GhostWriter: Timeout waiting for pending clicks (waited ${waitTime.toFixed(2)}ms, ${this.pendingClickProcessing.length} still pending)`);
+          resolve(undefined);
+        }, 10000)) // 10 seconds max wait for click processing
+      ]);
+      this.pendingClickProcessing = [];
+    }
 
     // ============================================
     // PHASE 2: MARK RECORDING AS STOPPED
@@ -1177,7 +1235,11 @@ export class RecordingManager {
       return;
     }
 
-    console.log('GhostWriter: Click event received, processing...');
+    // CRITICAL: Capture click timestamp SYNCHRONOUSLY before async processing
+    // This ensures correct step ordering even when async processing delays occur
+    const clickTimestamp = Date.now();
+
+    console.log('GhostWriter: Click event received, processing... (timestamp:', clickTimestamp, ')');
 
     // CRITICAL: Capture element and all detection data SYNCHRONOUSLY before dropdown can close
     // This fixes the race condition where dropdown options disappear before async processing
@@ -1423,7 +1485,7 @@ export class RecordingManager {
         // Deduplicate: Skip if this is the same click on the same element within the dedup window
         // IMPROVED: Check both selector AND element text to avoid false positives
         // BUT: NEVER skip list items/options - they are critical for dropdown interactions
-        const currentTimestamp = Date.now();
+        // NOTE: Use clickTimestamp (captured synchronously at start of handleClick) for accurate timing
         
         // CRITICAL: Always allow list items/options to be recorded, even if within dedup window
         // This ensures dropdown option clicks are never filtered out
@@ -1437,13 +1499,13 @@ export class RecordingManager {
           
           console.log('GhostWriter: Checking deduplication - Last click selector:', this.lastClickStep?.selector, 'Current selector:', selectors.primary);
           console.log('GhostWriter: Last element text:', lastElementText, 'Current element text:', elementText);
-          console.log('GhostWriter: Time since last click:', this.lastClickStep ? (currentTimestamp - this.lastClickStep.timestamp) : 'N/A', 'ms');
+          console.log('GhostWriter: Time since last click:', this.lastClickStep ? (clickTimestamp - this.lastClickStep.timestamp) : 'N/A', 'ms');
           
           // Only skip if BOTH selector AND element text match (within dedup window)
           if (this.lastClickStep && 
               this.lastClickStep.selector === selectors.primary &&
               elementText === lastElementText &&
-              (currentTimestamp - this.lastClickStep.timestamp) < this.CLICK_DEDUP_WINDOW) {
+              (clickTimestamp - this.lastClickStep.timestamp) < this.CLICK_DEDUP_WINDOW) {
             console.log('GhostWriter: ⚠️ SKIPPING duplicate click on same element (selector + text match) within', this.CLICK_DEDUP_WINDOW, 'ms');
             return; // Skip duplicate click (same selector AND text, not a list item/option)
           }
@@ -1465,7 +1527,7 @@ export class RecordingManager {
         // allow it even if within the dedup window (dropdown trigger -> option is a valid sequence)
         if (finalIsListItemOrOption && this.lastClickStep && 
             this.lastClickStep.selector !== selectors.primary &&
-            (currentTimestamp - this.lastClickStep.timestamp) < this.CLICK_DEDUP_WINDOW) {
+            (clickTimestamp - this.lastClickStep.timestamp) < this.CLICK_DEDUP_WINDOW) {
           console.log('GhostWriter: Allowing list item/option click after different selector (dropdown sequence)');
           // Continue - don't skip this click
         }
@@ -1474,7 +1536,7 @@ export class RecordingManager {
         // This catches dropdown options that might not be detected as list items/options
         if (wasDropdownTrigger && this.lastClickStep && 
             this.lastClickStep.selector !== selectors.primary &&
-            (currentTimestamp - this.lastClickStep.timestamp) < 5000) { // 5 second window for dropdown options
+            (clickTimestamp - this.lastClickStep.timestamp) < 5000) { // 5 second window for dropdown options
           console.log('GhostWriter: Last click was dropdown trigger - allowing next click as potential option');
           // Continue - don't skip this click (it's likely a dropdown option)
         }
@@ -1483,7 +1545,7 @@ export class RecordingManager {
         // This prevents race conditions where two clicks pass the check before either records
         this.lastClickStep = {
           selector: selectors.primary,
-          timestamp: currentTimestamp,
+          timestamp: clickTimestamp, // Use synchronously captured timestamp
         };
 
         let elementState: import('../types/workflow').ElementState | null = null;
@@ -1573,7 +1635,7 @@ export class RecordingManager {
         const pageState: import('../types/workflow').PageState | undefined = undefined;
 
         // Capture timing information (Phase 2: Important) - only include if delayAfter exists
-        const delayAfter = this.lastStep ? (currentTimestamp - this.lastStep.payload.timestamp) : undefined;
+        const delayAfter = this.lastStep ? (clickTimestamp - this.lastStep.payload.timestamp) : undefined;
         const timing: import('../types/workflow').TimingInfo | undefined = delayAfter ? {
           delayAfter,
           // animationWait and networkWait omitted when false
@@ -1611,7 +1673,7 @@ export class RecordingManager {
           const isListItemOrOptionCheck = finalIsListItemOrOption || this.isListItemOrOption(target);
           if (!isListItemOrOptionCheck && this.lastClickStep && 
               this.lastClickStep.selector === selectors.primary &&
-              this.lastClickStep.timestamp !== currentTimestamp && // Different click
+              this.lastClickStep.timestamp !== clickTimestamp && // Different click (timestamp captured synchronously)
               (checkTimestamp - this.lastClickStep.timestamp) < this.CLICK_DEDUP_WINDOW) {
             // IMPROVED: Also check element text to avoid false positives
             const currentElementText = elementText;
@@ -1642,6 +1704,66 @@ export class RecordingManager {
           // Generate semantic fallback selectors for grid cells
           const semanticContext = ContextScanner.scan(target);
           let enhancedFallbacks = [...selectors.fallbacks];
+          
+          // NEW: For spreadsheets, capture full sheet state for AI comprehension
+          let spreadsheetContext: any = null;
+          if (SheetStateExtractor.isSpreadsheetDomain() && semanticContext.gridCoordinates?.cellReference) {
+            try {
+              console.log('📊 RecordingManager: Extracting spreadsheet state...');
+              const sheetState = await SheetStateExtractor.extract();
+              
+              if (sheetState) {
+                // Determine intent based on cell state
+                const cellRef = semanticContext.gridCoordinates.cellReference;
+                const column = cellRef.match(/^([A-Z]+)/)?.[1] || '';
+                const row = parseInt(cellRef.match(/(\d+)$/)?.[1] || '0', 10);
+                
+                // Find column info
+                const columnInfo = sheetState.columns.find(c => c.letter === column);
+                
+                // Determine if cell was empty
+                const wasEmpty = sheetState.activeCell.isEmpty;
+                
+                // Determine if this is an append position
+                const wasAppendPosition = columnInfo 
+                  ? (row === columnInfo.firstEmptyRow && row > 1 && columnInfo.lastDataRow > 0)
+                  : false;
+                
+                // Generate reasoning
+                let reasoning = '';
+                if (wasAppendPosition) {
+                  reasoning = `User clicked first empty cell (${cellRef}) after data ends at row ${columnInfo!.lastDataRow}. This is an append operation.`;
+                } else if (wasEmpty && columnInfo && columnInfo.lastDataRow > 0) {
+                  reasoning = `User clicked empty cell ${cellRef}, but there's a gap - likely intentional specific cell selection.`;
+                } else if (!wasEmpty) {
+                  reasoning = `User clicked cell ${cellRef} which has data - editing specific cell.`;
+                } else {
+                  reasoning = `User clicked cell ${cellRef} in ${wasEmpty ? 'empty' : 'populated'} column.`;
+                }
+                
+                // Store minimal context (full sheet state will be extracted fresh during replay)
+                spreadsheetContext = {
+                  recordedIntent: {
+                    cellRef,
+                    columnHeader: semanticContext.gridCoordinates.columnHeader,
+                    wasEmpty,
+                    wasAppendPosition,
+                    reasoning,
+                    // Store only essential column info for intent verification
+                    column: column,
+                    columnDataType: columnInfo?.dataType,
+                    lastDataRow: columnInfo?.lastDataRow,
+                    firstEmptyRow: columnInfo?.firstEmptyRow,
+                  }
+                };
+                
+                console.log('📊 RecordingManager: Spreadsheet context captured (minimal):', reasoning);
+                console.log('📊 RecordingManager: Storage optimized - full sheet state will be extracted during replay');
+              }
+            } catch (err) {
+              console.error('📊 RecordingManager: Error extracting spreadsheet state:', err);
+            }
+          }
           
           if (semanticContext.gridCoordinates?.cellReference) {
             const cellRef = semanticContext.gridCoordinates.cellReference;
@@ -1816,7 +1938,7 @@ export class RecordingManager {
             selector: selectors.primary,
             fallbackSelectors: enhancedFallbacks.length > 0 ? enhancedFallbacks : [selectors.primary], // Ensure never empty
             xpath: selectors.xpath,
-            timestamp: Date.now(),
+            timestamp: clickTimestamp, // Use synchronously captured timestamp for correct ordering
             url: isNavigation ? this.currentUrl : url,
             tabUrl: this.currentTabUrl || undefined,
             tabTitle: this.currentTabTitle || undefined,
@@ -1876,6 +1998,8 @@ export class RecordingManager {
               bestSelector: elementAnalysis.bestSelector,
               fallbackSelectors: elementAnalysis.fallbackSelectors,
             },
+            // NEW: Spreadsheet context for AI comprehension
+            spreadsheetContext: spreadsheetContext || undefined,
           };
 
           // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
@@ -2013,13 +2137,48 @@ export class RecordingManager {
       }
     };
 
-    // Use setTimeout with 0 delay to ensure event can propagate first
-    // This prevents blocking the click event
-    if (typeof requestIdleCallback !== 'undefined') {
-      requestIdleCallback(processClick, { timeout: 100 });
-    } else {
-      setTimeout(processClick, 0);
-    }
+    // CRITICAL: Track the click processing promise to ensure it completes before stop()
+    // This prevents missing the last step when user clicks Stop immediately after clicking
+    const clickPromise = new Promise<void>((resolve) => {
+      let callbackExecuted = false;
+      const callbackEntry = { callback: processClick as () => Promise<void>, timeoutId: undefined as number | undefined };
+      
+      const wrappedProcessClick = async () => {
+        if (callbackExecuted) return; // Prevent double execution
+        callbackExecuted = true;
+        
+        // Remove from pending callbacks array
+        const cbIndex = this.pendingClickCallbacks.indexOf(callbackEntry);
+        if (cbIndex > -1) {
+          this.pendingClickCallbacks.splice(cbIndex, 1);
+        }
+        
+        try {
+          await processClick();
+        } finally {
+          // Remove this promise from pending array
+          const index = this.pendingClickProcessing.indexOf(clickPromise);
+          if (index > -1) {
+            this.pendingClickProcessing.splice(index, 1);
+          }
+          resolve();
+        }
+      };
+      
+      // Schedule the callback and store the ID so we can cancel/force-execute it later
+      if (typeof requestIdleCallback !== 'undefined') {
+        callbackEntry.timeoutId = requestIdleCallback(wrappedProcessClick, { timeout: 100 }) as unknown as number;
+      } else {
+        callbackEntry.timeoutId = setTimeout(wrappedProcessClick, 0) as unknown as number;
+      }
+      
+      // Store the wrapped callback so stop() can force-execute it
+      callbackEntry.callback = wrappedProcessClick;
+      this.pendingClickCallbacks.push(callbackEntry);
+    });
+    
+    this.pendingClickProcessing.push(clickPromise);
+    console.log('🔄 GhostWriter: Click processing promise added, pending count:', this.pendingClickProcessing.length);
   }
 
   /**
@@ -2027,6 +2186,10 @@ export class RecordingManager {
    */
   private handleInput(event: Event): void {
     if (!this.isRecording) return;
+
+    // CRITICAL: Capture timestamp SYNCHRONOUSLY when event fires (not when debounce completes)
+    // This ensures correct step ordering even when async processing delays occur
+    const inputTimestamp = Date.now();
 
     try {
       // Get actual element (handles Shadow DOM)
@@ -2061,6 +2224,9 @@ export class RecordingManager {
       // Ignore password fields (though user chose to record all)
       // We'll still record them but could add filtering here if needed
 
+      // Store the input timestamp for when the debounced handler runs
+      this.pendingInputTimestamp = inputTimestamp;
+
       // Clear previous timer
       if (this.inputDebounceTimer !== null) {
         clearTimeout(this.inputDebounceTimer);
@@ -2070,7 +2236,8 @@ export class RecordingManager {
       this.inputDebounceTimer = window.setTimeout(() => {
         // Don't capture if recording was stopped
         if (!this.isRecording) return;
-        this.captureInputValue(target as HTMLInputElement | HTMLTextAreaElement | HTMLElement);
+        this.captureInputValue(target as HTMLInputElement | HTMLTextAreaElement | HTMLElement, this.pendingInputTimestamp!);
+        this.pendingInputTimestamp = null; // Clear after use
       }, this.DEBOUNCE_DELAY);
     } catch (error) {
       console.error('Error handling input:', error);
@@ -2082,6 +2249,10 @@ export class RecordingManager {
    */
   private async handleChange(event: Event): Promise<void> {
     if (!this.isRecording) return;
+
+    // CRITICAL: Capture timestamp SYNCHRONOUSLY when event fires
+    // This ensures correct step ordering for change events (selects, checkboxes, etc.)
+    const changeTimestamp = Date.now();
 
     try {
       // Get actual element (handles Shadow DOM)
@@ -2119,7 +2290,7 @@ export class RecordingManager {
 
       // Capture immediately (no debounce for change events)
       // Pass beforeSignals so captureInputValue can add outcomes after recording
-      await this.captureInputValue(target, beforeSignals);
+      await this.captureInputValue(target, changeTimestamp, beforeSignals);
     } catch (error) {
       console.error('Error handling change:', error);
     }
@@ -2745,9 +2916,13 @@ export class RecordingManager {
 
   /**
    * Capture the final value of an input element
+   * @param element The input element
+   * @param captureTimestamp The timestamp when the input event first fired (not when debounce completed)
+   * @param beforeSignals Optional before signals for outcome diffing
    */
   private async captureInputValue(
     element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
+    captureTimestamp: number,
     beforeSignals?: ReturnType<typeof capturePageSignals> | null
   ): Promise<void> {
     try {
@@ -2912,7 +3087,8 @@ export class RecordingManager {
       const iframeContext = IframeUtils.getIframeContext(element);
 
       // Capture timing information (Phase 2: Important) - only include if delayAfter exists
-      const stepTimestamp = Date.now();
+      // Use the synchronously captured timestamp (when input event fired, not when debounce completed)
+      const stepTimestamp = captureTimestamp;
       const delayAfter = this.lastStep ? (stepTimestamp - this.lastStep.payload.timestamp) : undefined;
       const timing: import('../types/workflow').TimingInfo | undefined = delayAfter ? {
         delayAfter,

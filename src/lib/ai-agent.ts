@@ -15,6 +15,8 @@ import { VisualSnapshotService } from '../content/visual-snapshot';
 import { generateDOMMap, domMapToText, type DOMMap, type DOMMapElement } from '../content/dom-map';
 import { FeatureFlags } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
+import { SpreadsheetExecutor } from './spreadsheet-executor';
+import { SheetStateExtractor } from '../content/sheet-state-extractor';
 import { VisionAssist } from './tier3-vision-assist';
 import { RecoveryEngine } from '../content/recovery-engine';
 import type { WorkflowStepPayload, SavedWorkflow } from '../types/workflow';
@@ -187,6 +189,21 @@ export interface AgentHint {
   scrollAmount?: number;      // Recorded scroll distance in pixels
   scrollDirection?: 'up' | 'down' | 'left' | 'right';
   scrollContainer?: string;   // CSS selector for scroll container (e.g., ".main-content")
+  
+  // NEW: Spreadsheet context (minimal - full state extracted during replay)
+  spreadsheetContext?: {
+    recordedIntent: {
+      cellRef: string;
+      columnHeader?: string;
+      wasEmpty: boolean;
+      wasAppendPosition: boolean;
+      reasoning: string;
+      column: string;
+      columnDataType?: 'text' | 'number' | 'date' | 'mixed' | 'empty';
+      lastDataRow?: number;
+      firstEmptyRow?: number;
+    };
+  };
 }
 
 /** Current observation of the page (DOM-first, screenshot optional) */
@@ -517,8 +534,8 @@ export class AIAgent {
                 console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found after ${maxWaitMs}ms - continuing anyway`);
               }
             } else {
-              // No specific widget required, just wait for general page stability
-              await this.sleep(500);
+              // No specific widget required, just wait for general page stability (optimized from 500ms)
+              await this.sleep(200);
             }
           } else {
             // Scroll failed - increment failure count
@@ -539,7 +556,41 @@ export class AIAgent {
         // This ensures the agent always clicks through the UI instead of navigating to URLs
         // which could be stale or point to wrong records (e.g., different account IDs)
 
-        // 2. Think (use AI)
+        // ============================================================================
+        // 🚀 FAST-PATH OPTIMIZATION: Try deterministic execution first (skip AI call)
+        // If we can find the element directly using recorded selectors, execute immediately
+        // This saves ~500-1500ms per step by avoiding the LLM network call
+        // ============================================================================
+        if (currentHint && currentHint.actionType === 'click') {
+          const fastPathResult = await this.tryFastPathExecute(currentHint);
+          if (fastPathResult.executed && fastPathResult.success) {
+            console.log(`[AIAgent] ⚡ FAST-PATH: Click executed directly, skipping AI call`);
+            
+            // Mark as completed and advance
+            this.state.hints[this.state.currentHintIndex].completed = true;
+            this.state.currentHintIndex++;
+            
+            // Log to history
+            this.state.history.push({
+              stepNumber: currentHint.stepNumber,
+              action: { 
+                type: 'click', 
+                params: { description: currentHint.description }, 
+                reasoning: 'Fast-path: Direct execution via recorded selector', 
+                confidence: 0.9 
+              },
+              observation,
+              result: 'success',
+              timestamp: Date.now(),
+            });
+            
+            // Brief pause then continue
+            await this.sleep(150);
+            continue;
+          }
+        }
+        
+        // 2. Think (use AI) - only if fast-path didn't work
         this.onProgress?.(this.state.currentHintIndex, { type: 'wait', params: {}, reasoning: 'Thinking...', confidence: 0 }, 'thinking');
         const action = await this.think(observation);
         console.log(`[AIAgent] Action: ${action.type}`, action.params);
@@ -569,8 +620,8 @@ export class AIAgent {
             this.state.currentHintIndex = nextHintIndex !== -1 ? nextHintIndex : this.state.currentHintIndex + 1;
             console.log(`[AIAgent] Advanced to hint ${this.state.currentHintIndex}`);
           }
-          // Continue loop without executing
-          await this.sleep(200);
+          // Continue loop without executing (optimized from 200ms)
+          await this.sleep(50);
           continue;
         }
         
@@ -641,8 +692,8 @@ export class AIAgent {
               const nextHint = this.state.hints[this.state.currentHintIndex];
               console.log(`[AIAgent] ⏳ Navigation click detected, waiting for new content to load...`);
               
-              // Wait for page stability (no more DOM changes)
-              await this.sleep(800); // Initial wait for navigation to start
+              // Wait for page stability (optimized from 800ms to 300ms)
+              await this.sleep(300); // Initial wait for navigation to start
               
               // If next hint has a scope, wait for that widget to appear
               if (nextHint?.recordedScopeHint) {
@@ -731,8 +782,8 @@ export class AIAgent {
           result.success ? 'completed' : 'failed'
         );
 
-        // Brief pause between actions
-        await this.sleep(500);
+        // Brief pause between actions (optimized from 500ms)
+        await this.sleep(150);
       }
     } catch (error) {
       console.error('[AIAgent] Error:', error);
@@ -839,6 +890,113 @@ export class AIAgent {
   }
 
   /**
+   * 🚀 FAST-PATH: Try to execute action deterministically without AI
+   * This saves ~500-1500ms per step by avoiding the LLM network call
+   * 
+   * IMPORTANT: This actually EXECUTES the action directly (not just returning an action)
+   * because passing the element to Tier1 for re-resolution causes failures.
+   * 
+   * Returns: { executed: true, success: boolean } if fast-path executed
+   *          { executed: false } if should fall back to AI
+   */
+  private async tryFastPathExecute(hint: AgentHint): Promise<{ executed: boolean; success?: boolean; error?: string }> {
+    try {
+      // Only attempt fast-path for click actions (type is more complex)
+      if (hint.actionType !== 'click') {
+        return { executed: false };
+      }
+
+      // Check if a dropdown is currently open
+      const { generateDOMMap } = await import('../content/dom-map');
+      const domMap = generateDOMMap();
+      const dropdownIsOpen = !!domMap.activeDropdown;
+      
+      // If dropdown is open and hint text matches a dropdown option, ONLY consider dropdown menu items
+      if (dropdownIsOpen && hint.targetText) {
+        const hintTextLower = hint.targetText.toLowerCase();
+        const dropdownOptions = domMap.activeDropdown?.options || [];
+        const matchesDropdownOption = dropdownOptions.some(opt => 
+          (opt.text || opt.name || '').toLowerCase().includes(hintTextLower) ||
+          hintTextLower.includes((opt.text || opt.name || '').toLowerCase())
+        );
+        
+        if (matchesDropdownOption) {
+          console.log('[AIAgent] ⚡ Fast-path skipped: Dropdown is open, letting AI select the correct option');
+          return { executed: false };
+        }
+      }
+
+      // Need recorded selectors for fast-path
+      const selectors = [
+        hint.recordedSelector,
+        ...(hint.recordedFallbackSelectors || []),
+      ].filter(Boolean) as string[];
+      
+      if (selectors.length === 0) {
+        console.log('[AIAgent] ⚡ Fast-path skipped: No recorded selectors');
+        return { executed: false };
+      }
+
+      // Try each selector to find the element
+      let element: HTMLElement | null = null;
+      let usedSelector: string | null = null;
+      
+      for (const selector of selectors) {
+        try {
+          // Skip XPath selectors (they start with / or //)
+          if (selector.startsWith('/')) {
+            continue;
+          }
+          const found = document.querySelector(selector) as HTMLElement;
+          if (found && found.offsetParent !== null) { // Check if visible
+            // Additional validation: element should be reasonably sized (not a container)
+            const rect = found.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && rect.width < 500 && rect.height < 200) {
+              element = found;
+              usedSelector = selector;
+              break;
+            }
+          }
+        } catch {
+          // Invalid selector, try next
+        }
+      }
+
+      if (!element || !usedSelector) {
+        console.log('[AIAgent] ⚡ Fast-path skipped: Element not found with recorded selectors');
+        return { executed: false };
+      }
+
+      console.log(`[AIAgent] ⚡ Fast-path: Found element, executing click directly`, {
+        tag: element.tagName,
+        text: element.textContent?.slice(0, 50),
+        selector: usedSelector.slice(0, 80),
+      });
+
+      // Execute click directly
+      try {
+        element.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await this.sleep(50);
+        element.focus();
+        element.click();
+        
+        // Wait for stability
+        const { StateWaitEngine } = await import('../content/state-wait-engine');
+        await StateWaitEngine.waitForStability({ maxWaitMs: 2000 });
+        
+        console.log('[AIAgent] ⚡ Fast-path: Click executed successfully');
+        return { executed: true, success: true };
+      } catch (clickError) {
+        console.log('[AIAgent] ⚡ Fast-path: Click failed, falling back to AI', clickError);
+        return { executed: false };
+      }
+    } catch (error) {
+      console.log('[AIAgent] ⚡ Fast-path error, falling back to AI:', error);
+      return { executed: false };
+    }
+  }
+
+  /**
    * Think about what action to take (DOM-first approach)
    */
   private async think(observation: AgentObservation): Promise<AgentAction> {
@@ -860,6 +1018,32 @@ export class AIAgent {
       console.log(`[AIAgent] Found ${currentCandidates.length} ranked candidates for hint ${nextIncompleteHint.stepNumber}`);
       if (currentCandidates.length > 0) {
         console.log(`[AIAgent] Top candidate: [${currentCandidates[0].role}] "${currentCandidates[0].name}" (score: ${currentCandidates[0].score})`);
+      }
+    }
+
+    // NEW: Extract fresh spreadsheet context if current hint is a spreadsheet action
+    let spreadsheetContext: any = undefined;
+    if (nextIncompleteHint?.spreadsheetContext && SheetStateExtractor.isSpreadsheetDomain()) {
+      try {
+        console.log('[AIAgent] 📊 Extracting fresh spreadsheet state for AI decision...');
+        const freshSheetState = await SheetStateExtractor.extract();
+        
+        if (freshSheetState) {
+          spreadsheetContext = {
+            isSpreadsheet: true,
+            sheetState: freshSheetState,
+            recordedIntent: nextIncompleteHint.spreadsheetContext.recordedIntent,
+          };
+          console.log('[AIAgent] 📊 Spreadsheet context ready:', {
+            recorded: nextIncompleteHint.spreadsheetContext.recordedIntent.cellRef,
+            wasAppend: nextIncompleteHint.spreadsheetContext.recordedIntent.wasAppendPosition,
+            currentFirstEmpty: freshSheetState.columns.find(
+              c => c.letter === nextIncompleteHint.spreadsheetContext?.recordedIntent.column
+            )?.firstEmptyRow,
+          });
+        }
+      } catch (error) {
+        console.error('[AIAgent] 📊 Error extracting spreadsheet context:', error);
       }
     }
 
@@ -947,6 +1131,9 @@ export class AIAgent {
         frameId: c.frameId,
         score: c.score,
       })),
+      
+      // NEW: Spreadsheet context (extracted fresh during replay)
+      spreadsheetContext,
       
       // Only include screenshot if VisionClicker is enabled
       screenshot: observation.screenshot,
@@ -1155,7 +1342,41 @@ export class AIAgent {
     for (let attempt = 1; attempt <= maxRecoveryAttempts; attempt++) {
       console.log(`[AIAgent] 🎯 Attempt ${attempt}/${maxRecoveryAttempts}`);
       
-      // Tier 1: Execute with deterministic executor
+      // NEW: Handle spreadsheet actions (click_cell, find_and_click_empty, find_by_header)
+      // SAFEGUARD: Only route to SpreadsheetExecutor if on a spreadsheet domain
+      const spreadsheetActions = ['click_cell', 'find_and_click_empty', 'find_by_header'];
+      if (spreadsheetActions.includes(currentAction.type) && SheetStateExtractor.isSpreadsheetDomain()) {
+        console.log(`[AIAgent] 📊 Routing to SpreadsheetExecutor: ${currentAction.type}`);
+        
+        try {
+          const spreadsheetResult = await SpreadsheetExecutor.execute({
+            action: currentAction.type,
+            cellRef: (currentAction.params as any).cellRef,
+            column: (currentAction.params as any).column,
+            headerText: (currentAction.params as any).headerText,
+            rowOffset: (currentAction.params as any).rowOffset,
+          });
+          
+          if (spreadsheetResult.success) {
+            console.log(`[AIAgent] ✅ Spreadsheet action succeeded: ${spreadsheetResult.message}`);
+            return { success: true };
+          } else {
+            console.error(`[AIAgent] ❌ Spreadsheet action failed: ${spreadsheetResult.error}`);
+            return {
+              success: false,
+              error: spreadsheetResult.error || 'Spreadsheet action failed',
+            };
+          }
+        } catch (error) {
+          console.error('[AIAgent] ❌ Spreadsheet executor threw error:', error);
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Spreadsheet executor error',
+          };
+        }
+      }
+      
+      // Tier 1: Execute with deterministic executor (non-spreadsheet actions)
       const result: Tier1ExecutionResult = await Tier1Executor.execute(currentAction);
       
       if (result.status === 'success') {
@@ -1801,6 +2022,11 @@ export class AIAgent {
    * Infer the goal from workflow
    */
   private inferGoal(workflow: SavedWorkflow): string {
+    // Prefer workflow name + description for richer context
+    if (workflow.name && workflow.description) {
+      return `${workflow.name} - ${workflow.description}`;
+    }
+    
     // Use workflow name as primary goal
     if (workflow.name) {
       return workflow.name;

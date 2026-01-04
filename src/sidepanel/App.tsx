@@ -6,6 +6,7 @@ import { CorrectionMemory } from '../lib/correction-memory';
 import { VariableDetector } from '../lib/variable-detector';
 import { SimpleVariableDetector } from '../lib/simple-variable-detector';
 import { NavigationOptimizer } from '../lib/navigation-optimizer';
+import { IntentAnalyzer } from '../lib/intent-analyzer';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { FeatureFlags } from '../lib/feature-flags';
@@ -688,6 +689,17 @@ function App() {
     }
 
     try {
+      // CRITICAL: Sort steps by timestamp before saving
+      // INPUT steps are debounced and may arrive after subsequent CLICK steps
+      // This ensures the correct execution order is preserved
+      const sortedSteps = [...workflowSteps].sort((a, b) => 
+        a.payload.timestamp - b.payload.timestamp
+      );
+      
+      console.log('[SaveWorkflow] 📊 Sorted steps by timestamp:', 
+        sortedSteps.map(s => `${s.type}@${s.payload.timestamp}`).join(' → ')
+      );
+      
       // Start variable detection
       setIsDetectingVariables(true);
       
@@ -695,14 +707,14 @@ function App() {
       let variables;
       
       if (FeatureFlags.AI_VARIABLE_DETECTION) {
-        console.log('[SaveWorkflow] Starting AI variable detection for', workflowSteps.length, 'steps');
-        console.log('[SaveWorkflow] Step types:', workflowSteps.map(s => ({ type: s.type, hasSnapshot: isWorkflowStepPayload(s.payload) ? !!s.payload.visualSnapshot : false })));
+        console.log('[SaveWorkflow] Starting AI variable detection for', sortedSteps.length, 'steps');
+        console.log('[SaveWorkflow] Step types:', sortedSteps.map(s => ({ type: s.type, hasSnapshot: isWorkflowStepPayload(s.payload) ? !!s.payload.visualSnapshot : false })));
         // For saved workflows, we don't have the initial snapshot, so pass null
-        variables = await VariableDetector.detectVariables(workflowSteps, null);
+        variables = await VariableDetector.detectVariables(sortedSteps, null);
         console.log('[SaveWorkflow] AI variables detected:', JSON.stringify(variables, null, 2));
       } else {
         console.log('[SaveWorkflow] Using pattern-based variable detection');
-        variables = SimpleVariableDetector.detectVariables(workflowSteps);
+        variables = SimpleVariableDetector.detectVariables(sortedSteps);
         console.log('[SaveWorkflow] Pattern-based variables detected:', {
           count: variables.variables.length,
           variables: variables.variables.map(v => v.fieldName),
@@ -719,7 +731,7 @@ function App() {
         name: workflowName.trim(),
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        steps: workflowSteps,
+        steps: sortedSteps,
       };
       
       const optimizationResult = await optimizer.optimizeWorkflow(tempWorkflow, {
@@ -728,7 +740,7 @@ function App() {
       });
       
       console.log('[SaveWorkflow] Optimization complete:', {
-        originalSteps: workflowSteps.length,
+        originalSteps: sortedSteps.length,
         optimizedSteps: optimizationResult.optimizedSteps.length,
         stepsRemoved: optimizationResult.metadata.stepsRemoved,
         sequencesOptimized: optimizationResult.metadata.sequencesOptimized,
@@ -736,26 +748,50 @@ function App() {
       });
 
       // Note: Natural language translation already happened after recording stopped
-      // The workflowSteps already have naturalLanguage attached to each step
-      const hasNaturalLanguage = workflowSteps.some((s: any) => s.naturalLanguage);
+      // The sortedSteps already have naturalLanguage attached to each step
+      const hasNaturalLanguage = sortedSteps.some((s: any) => s.naturalLanguage);
       console.log('[SaveWorkflow] Steps have naturalLanguage:', hasNaturalLanguage);
       if (hasNaturalLanguage) {
-        console.log('[SaveWorkflow] Sample naturalLanguage:', (workflowSteps[0] as any)?.naturalLanguage);
+        console.log('[SaveWorkflow] Sample naturalLanguage:', (sortedSteps[0] as any)?.naturalLanguage);
+      }
+
+      // Generate task summary using IntentAnalyzer
+      console.log('[SaveWorkflow] Analyzing workflow intent for summary...');
+      setLearningFeedback('📝 Generating task summary...');
+      let workflowDescription: string | undefined;
+      
+      try {
+        const intentAnalysis = await IntentAnalyzer.analyzeWorkflowIntent(tempWorkflow);
+        if (intentAnalysis?.intent) {
+          workflowDescription = IntentAnalyzer.formatIntentAsSummary(intentAnalysis.intent);
+          console.log('[SaveWorkflow] Generated description:', workflowDescription);
+        } else {
+          // Fallback to local analysis
+          const localIntent = IntentAnalyzer.analyzeIntentLocally(sortedSteps);
+          workflowDescription = IntentAnalyzer.formatIntentAsSummary(localIntent);
+          console.log('[SaveWorkflow] Generated description (local):', workflowDescription);
+        }
+      } catch (error) {
+        console.warn('[SaveWorkflow] Failed to generate description:', error);
+        // Fallback to local analysis
+        const localIntent = IntentAnalyzer.analyzeIntentLocally(sortedSteps);
+        workflowDescription = IntentAnalyzer.formatIntentAsSummary(localIntent);
       }
 
       const workflow: SavedWorkflow = {
         id: tempWorkflow.id,
         name: workflowName.trim(),
+        description: workflowDescription,
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        // Use workflowSteps directly since they already have naturalLanguage
-        steps: workflowSteps,
+        // Use sortedSteps to ensure correct execution order
+        steps: sortedSteps,
         // Include detected variables if any were found
         variables: variables.variables.length > 0 ? variables : undefined,
-        // Use optimized steps if optimization reduced steps, otherwise use workflowSteps
+        // Use optimized steps if optimization reduced steps, otherwise use sortedSteps
         optimizedSteps: optimizationResult.metadata.stepsRemoved > 0 
           ? optimizationResult.optimizedSteps 
-          : workflowSteps,
+          : sortedSteps,
         optimizationMetadata: optimizationResult.metadata.stepsRemoved > 0 ? optimizationResult.metadata : undefined,
       };
 
@@ -1803,6 +1839,11 @@ function App() {
                           </span>
                         )}
                       </div>
+                      {workflow.description && (
+                        <div className="text-sm text-muted-foreground mt-1 italic">
+                          {workflow.description}
+                        </div>
+                      )}
                       <div className="text-xs text-muted-foreground mt-1">
                         {formatDate(workflow.updatedAt)} • {workflow.steps.length} steps
                       </div>

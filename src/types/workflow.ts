@@ -337,6 +337,23 @@ export interface WorkflowStepPayload {
     bestSelector?: string;
     fallbackSelectors?: string[];
   };
+  
+  // NEW: Spreadsheet context for AI comprehension (only present on sheet domains)
+  // NOTE: Stores minimal intent data only. Full sheet state is extracted fresh during replay.
+  spreadsheetContext?: {
+    recordedIntent: {
+      cellRef: string;
+      columnHeader?: string;
+      wasEmpty: boolean;
+      wasAppendPosition: boolean;
+      reasoning: string;
+      // Minimal column info for intent verification
+      column: string;
+      columnDataType?: 'text' | 'number' | 'date' | 'mixed' | 'empty';
+      lastDataRow?: number;
+      firstEmptyRow?: number;
+    };
+  };
 }
 
 export interface Pattern {
@@ -431,6 +448,7 @@ export interface OptimizationMetadata {
 export interface SavedWorkflow {
   id: string; // Unique identifier (timestamp or UUID)
   name: string; // User-provided name
+  description?: string; // AI-generated task summary explaining what the workflow does
   createdAt: number; // Timestamp
   updatedAt: number; // Timestamp
   steps: WorkflowStep[]; // Array of recorded steps

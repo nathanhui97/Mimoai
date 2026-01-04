@@ -88,6 +88,32 @@ interface RankedCandidate {
   score: number;
 }
 
+interface SheetState {
+  domain: 'google-sheets' | 'excel-online' | null;
+  sheetName: string;
+  headers: Array<{ column: string; text: string }>;
+  dataRange: {
+    firstRow: number;
+    lastRow: number;
+    firstColumn: string;
+    lastColumn: string;
+  };
+  columns: Array<{
+    letter: string;
+    header: string;
+    dataType: 'text' | 'number' | 'date' | 'mixed' | 'empty';
+    rowCount: number;
+    lastDataRow: number;
+    firstEmptyRow: number;
+    sampleValues: string[];
+  }>;
+  activeCell: {
+    reference: string;
+    value: string | null;
+    isEmpty: boolean;
+  };
+}
+
 interface DOMAgentRequest {
   mode: 'dom' | 'recover';  // 'dom' for planning, 'recover' for recovery decisions
   domMap?: string;  // Text representation of the DOM
@@ -107,6 +133,19 @@ interface DOMAgentRequest {
   
   // Ranked candidates for LLM selection (max 8)
   currentCandidates?: RankedCandidate[];
+  
+  // NEW: Spreadsheet context (only present on sheet domains)
+  spreadsheetContext?: {
+    isSpreadsheet: true;
+    sheetState: SheetState;
+    recordedIntent: {
+      cellRef: string;           // 'B5'
+      columnHeader?: string;     // 'Monthly Sales'
+      wasEmpty: boolean;
+      wasAppendPosition: boolean;
+      reasoning: string;
+    };
+  };
   
   // For recovery mode
   rejectionCode?: 'NOT_FOUND' | 'AMBIGUOUS' | 'NOT_INTERACTABLE' | 'SCOPE_FAILED' | 'UNSAFE_ACTION' | 'OUTCOME_FAILED';
@@ -148,7 +187,7 @@ interface ExpectedOutcome {
 
 interface DOMAgentResponse {
   // Note: 'navigate' is deprecated - all navigation should use 'click' on UI elements
-  action?: 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover';
+  action?: 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover' | 'click_cell' | 'find_and_click_empty' | 'find_by_header';
   target?: SemanticTarget;
   description?: string;
   text?: string;
@@ -177,6 +216,12 @@ interface DOMAgentResponse {
   // For hover action
   hoverDuration?: number;
   waitForMenu?: boolean;
+  
+  // For spreadsheet actions
+  cellRef?: string;           // 'B5'
+  column?: string;            // 'B'
+  headerText?: string;        // 'Monthly Sales'
+  rowOffset?: number;         // 1 (first row after header)
   
   // For recovery mode
   strategy?: 'RETRY_WITH_VISION' | 'RETRY_LOOSER' | 'SCROLL_AND_RETRY' | 'DISMISS_POPUP' | 'GIVE_UP';
@@ -366,12 +411,71 @@ IMPORTANT: When a hint says to enter a value, check if there's a variable overri
 The hints show RECORDED values, but variable overrides are what the user WANTS NOW.
 `;
   }
+  
+  // SAFEGUARD: Only inject spreadsheet prompts if spreadsheetContext exists
+  let spreadsheetSection = '';
+  if (payload.spreadsheetContext?.isSpreadsheet) {
+    const ctx = payload.spreadsheetContext;
+    spreadsheetSection = `
+## 📊 SPREADSHEET CONTEXT (Google Sheets / Excel)
+
+You are working in a spreadsheet. You can see the full sheet structure and make intelligent decisions about where to place data.
+
+### Current Sheet State
+Sheet: "${ctx.sheetState.sheetName}"
+Data Range: ${ctx.sheetState.dataRange.firstColumn}${ctx.sheetState.dataRange.firstRow} to ${ctx.sheetState.dataRange.lastColumn}${ctx.sheetState.dataRange.lastRow}
+
+### Column Structure
+${ctx.sheetState.columns.map(col => 
+  `${col.letter} "${col.header}": ${col.rowCount} rows of ${col.dataType}, last data at row ${col.lastDataRow}, next empty: row ${col.firstEmptyRow}`
+).join('\n')}
+
+### Recorded Action
+User clicked: ${ctx.recordedIntent.cellRef} (${ctx.recordedIntent.wasEmpty ? 'was empty' : 'had data'})
+Column header: "${ctx.recordedIntent.columnHeader || 'unknown'}"
+${ctx.recordedIntent.wasAppendPosition ? '>>> This was an APPEND operation (first empty after data)' : ''}
+Reasoning: ${ctx.recordedIntent.reasoning}
+
+### Your Task
+Decide the BEST cell to click based on CURRENT sheet state:
+- If the recorded cell is still the right choice, use it
+- If data has changed, find the new appropriate cell
+- For append operations, find the current first empty row in that column
+
+### Spreadsheet Actions Available
+- **click_cell**: Click a specific cell reference
+  Example: {"action": "click_cell", "cellRef": "B8", "reasoning": "Current next empty row in column B"}
+  
+- **find_and_click_empty**: Find next empty in column and click
+  Example: {"action": "find_and_click_empty", "column": "B", "reasoning": "Appending to column B"}
+  
+- **find_by_header**: Find cell by column header name
+  Example: {"action": "find_by_header", "headerText": "Monthly Sales", "rowOffset": 1, "reasoning": "First data row under header"}
+
+IMPORTANT: Use your judgment like a human would. If the user was appending data and now there's more data, find the NEW next empty row.
+`;
+  }
+
+  // Extract task summary from goal if it contains a dash separator (name - description format)
+  let taskSummarySection = '';
+  if (goal.includes(' - ')) {
+    const [taskName, taskDescription] = goal.split(' - ', 2);
+    taskSummarySection = `
+## 🎯 TASK SUMMARY
+**Workflow:** ${taskName}
+**Purpose:** ${taskDescription}
+
+This context helps you understand the OVERALL INTENT of the workflow, especially important for spreadsheets and adaptive tasks where you need to make intelligent decisions about where to place data or how to handle changes in the page state.
+`;
+  }
 
   const prompt = `You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
 
 IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.
+${taskSummarySection}
 ${prioritySection}
 ${variableSection}
+${spreadsheetSection}
 ${referenceScreenshot ? `
 ## 📷 VISUAL REFERENCE (RECORDED SCREENSHOT)
 An image is attached showing what the user clicked during recording.
@@ -447,10 +551,14 @@ ${currentHint
      1. Check if the expected outcome "${currentHint.naturalLanguage?.expectedOutcome || 'action complete'}" is already true
      2. If modal is expected to be open and it IS open → SKIP this step
      3. If dropdown is expected to be open and it IS open → SKIP this step  
-     4. If field should have value X and it ALREADY has value X → SKIP this step
+     4. For TYPE actions: Compare the CURRENT field value with the TARGET value
+        - Hint says "Enter 1000", DOM shows value="1000" → SKIP (already correct)
+        - Hint says "Enter 1000", DOM shows value="" or value="500" → MUST TYPE
+        - Hint says "Enter 1000", field not found in DOM → SKIP
      5. If the element doesn't exist at all → SKIP this step
      
      ⚠️ IMPORTANT: If the expected outcome is ALREADY satisfied, skip to the NEXT step!
+     ⚠️ FOR TYPE ACTIONS: Never assume a field is filled just because you see its name - CHECK THE ACTUAL VALUE!
      
      YOU MUST: Return "hintStepIndex": ${hints.indexOf(currentHint)} in your response`
   : 'All steps completed - check if goal is achieved'}
@@ -523,13 +631,15 @@ PRIORITY ORDER (follow strictly):
    
 3. 📝 FORM FIELDS → Check which fields need values
    - Look at Form Fields section - some may already have values!
-   - Example: [spinbutton] "Budget Amount" value="1000" ← Already filled, SKIP IT
-   - Only type into fields that are EMPTY or need different values
+   - CRITICAL: Compare CURRENT value with TARGET value from hint
+   - Example: Hint says "Enter 1000", field shows value="500" → MUST TYPE "1000"
+   - Example: Hint says "Enter 1000", field shows value="1000" → SKIP (already correct)
+   - NEVER skip a TYPE hint unless the field value EXACTLY matches what needs to be entered
    - Match field by NAME/PLACEHOLDER, not just hint order
 
 4. ADAPTIVE: The hints are a GUIDE, not strict commands
-   - Skip hints that reference elements that don't exist
-   - Skip hints for fields that are already filled
+   - Skip hints that reference elements that don't exist  
+   - Skip TYPE hints ONLY if field value exactly matches the target value
    - Adapt to current page state, don't blindly follow hint order
 
 ⚠️ FAIL ACTION: Use ONLY as last resort when:
@@ -846,7 +956,7 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     }
     
     // Regular action response
-    const validActions = ['click', 'type', 'select', 'scroll', 'navigate', 'wait', 'assert', 'done', 'fail', 'skip', 'read', 'keyboard', 'hover'];
+    const validActions = ['click', 'type', 'select', 'scroll', 'navigate', 'wait', 'assert', 'done', 'fail', 'skip', 'read', 'keyboard', 'hover', 'click_cell', 'find_and_click_empty', 'find_by_header'];
     const action = validActions.includes(parsed.action) ? parsed.action : 'fail';
     
     // Build response
@@ -977,6 +1087,20 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     }
     if (parsed.waitForMenu !== undefined) {
       response.waitForMenu = parsed.waitForMenu;
+    }
+    
+    // Add spreadsheet action params
+    if (parsed.cellRef) {
+      response.cellRef = parsed.cellRef;
+    }
+    if (parsed.column) {
+      response.column = parsed.column;
+    }
+    if (parsed.headerText) {
+      response.headerText = parsed.headerText;
+    }
+    if (parsed.rowOffset !== undefined) {
+      response.rowOffset = parsed.rowOffset;
     }
     
     return response;

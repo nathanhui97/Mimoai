@@ -413,6 +413,33 @@ export class IntentAnalyzer {
         return `${step.type} action`;
     }
   }
+
+  /**
+   * Format analyzed intent into a human-readable summary string
+   */
+  static formatIntentAsSummary(intent: AnalyzedIntent): string {
+    const parts: string[] = [];
+    
+    // Primary goal
+    parts.push(intent.primaryGoal);
+    
+    // Add sub-goals if available (limit to 3 for brevity)
+    if (intent.subGoals && intent.subGoals.length > 0) {
+      const topSubGoals = intent.subGoals.slice(0, 3);
+      parts.push(`Steps: ${topSubGoals.join(', ')}`);
+      
+      if (intent.subGoals.length > 3) {
+        parts.push(`... and ${intent.subGoals.length - 3} more`);
+      }
+    }
+    
+    // Expected outcome
+    if (intent.expectedOutcome && intent.expectedOutcome !== 'Unknown outcome') {
+      parts.push(`Expected result: ${intent.expectedOutcome}`);
+    }
+    
+    return parts.join('. ') + '.';
+  }
 }
 
 

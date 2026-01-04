@@ -402,8 +402,8 @@ export class Tier1Executor {
         return clickResult;
       }
       
-      // Wait for dropdown to open
-      await new Promise(resolve => setTimeout(resolve, 300));
+      // Wait for dropdown to open (optimized from 300ms)
+      await new Promise(resolve => setTimeout(resolve, 150));
     }
     
     // Find and click option
@@ -618,8 +618,8 @@ export class Tier1Executor {
       }
     }
     
-    // Wait for scroll animation to complete
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Wait for scroll animation to complete (optimized from 300ms)
+    await new Promise(resolve => setTimeout(resolve, 150));
     
     // Wait for lazy-loaded content to render (critical for dashboards like Gainsight!)
     // Use StateWaitEngine to wait for actual DOM stability
