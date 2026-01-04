@@ -59,6 +59,8 @@ interface VariableDefinition {
   reasoning?: string;
   options?: string[];      // Available options for dropdown/select variables
   isDropdown?: boolean;    // Whether this is a dropdown/select variable
+  columnHeader?: string;   // Column header for spreadsheet cells (e.g., "Name", "Email")
+  cellReference?: string;  // Cell reference for spreadsheet cells (e.g., "A2", "B3")
 }
 
 interface DetectVariablesResponse {
@@ -1505,6 +1507,9 @@ function parseVariableResponse(
       isVariable,
       confidence,
       reasoning: parsed.reasoning,
+      // Preserve spreadsheet context for intelligent column-based targeting
+      columnHeader: metadata.columnHeader || finalFieldName, // Use columnHeader if available, else fieldName
+      cellReference: metadata.cellReference,
     };
 
     // Add dropdown-specific fields

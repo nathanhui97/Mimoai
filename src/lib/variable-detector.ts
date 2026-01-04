@@ -31,6 +31,9 @@ export interface VariableDefinition {
   // For dropdowns/selects: all available options
   options?: string[];       // Available options for dropdown/select variables
   isDropdown?: boolean;     // Whether this is a dropdown/select variable
+  // For spreadsheet cells: column context
+  columnHeader?: string;    // Column header (e.g., "Name", "Email", "Phone")
+  cellReference?: string;   // Cell reference (e.g., "A2", "B3")
 }
 
 /**

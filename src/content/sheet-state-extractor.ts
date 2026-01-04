@@ -43,6 +43,88 @@ export interface SheetState {
 
 export class SheetStateExtractor {
   /**
+   * Find the first empty row using keyboard navigation
+   * This is fast and reliable - uses Google Sheets' own Ctrl+Down logic
+   */
+  static async findFirstEmptyRowViaKeyboard(): Promise<number> {
+    console.log('📊 SheetStateExtractor: Finding first empty row via keyboard navigation...');
+    
+    try {
+      // Save current active cell to restore later
+      const originalCell = this.getGoogleSheetsActiveCell().reference;
+      console.log(`📊 Original active cell: ${originalCell}`);
+      
+      // Navigate to A1
+      const nameBox = document.querySelector('#t-name-box') as HTMLInputElement;
+      if (!nameBox) {
+        console.warn('📊 Name Box not found, using fallback');
+        return 2; // Default fallback
+      }
+      
+      // Type A1 into Name Box
+      nameBox.focus();
+      await this.sleep(50);
+      nameBox.value = 'A1';
+      nameBox.dispatchEvent(new Event('input', { bubbles: true }));
+      await this.sleep(50);
+      
+      // Press Enter to navigate
+      nameBox.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+      }));
+      await this.sleep(150);
+      
+      console.log('📊 Navigated to A1, now pressing Ctrl+Down...');
+      
+      // Press Ctrl+Down to jump to last cell with data in column A
+      const activeElement = document.activeElement || document.body;
+      activeElement.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        code: 'ArrowDown',
+        keyCode: 40,
+        which: 40,
+        ctrlKey: true,
+        bubbles: true,
+      }));
+      await this.sleep(200);
+      
+      // Read current cell from Name Box
+      const currentCell = nameBox.value || 'A1';
+      console.log(`📊 After Ctrl+Down, Name Box shows: "${currentCell}"`);
+      
+      // Extract row number
+      const rowMatch = currentCell.match(/(\d+)$/);
+      const lastDataRow = rowMatch ? parseInt(rowMatch[1], 10) : 1;
+      
+      // If we're still at A1, that means column A is empty or has only header
+      // In this case, check if A1 has data (header)
+      const firstEmptyRow = lastDataRow === 1 ? 2 : lastDataRow + 1;
+      
+      console.log(`📊 Last data row: ${lastDataRow}, First empty row: ${firstEmptyRow}`);
+      
+      // Restore original cell (optional - the workflow will navigate anyway)
+      // nameBox.value = originalCell;
+      // nameBox.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      
+      return firstEmptyRow;
+    } catch (error) {
+      console.error('📊 Error finding empty row via keyboard:', error);
+      return 2; // Safe fallback
+    }
+  }
+  
+  /**
+   * Sleep helper
+   */
+  private static sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  /**
    * Canonical domain check - used EVERYWHERE for safeguards
    * This is the ONLY function that determines if we're on a spreadsheet
    */
@@ -263,9 +345,10 @@ export class SheetStateExtractor {
     
     // Get all visible cells with role="gridcell"
     const cells = document.querySelectorAll('[role="gridcell"]');
+    console.log(`📊 SheetStateExtractor: Found ${cells.length} gridcells`);
     
     // Parse cell references and organize by column
-    const columnData = new Map<string, Array<{ row: number; value: string }>>();
+    const columnData = new Map<string, Array<{ row: number; value: string; isEmpty: boolean }>>();
     let minRow = Infinity;
     let maxRow = 0;
     const columnLetters = new Set<string>();
@@ -287,6 +370,7 @@ export class SheetStateExtractor {
       const column = colMatch[1];
       const row = parseInt(rowMatch[1], 10);
       const value = cell.textContent?.trim() || '';
+      const isEmpty = !value;
       
       columnLetters.add(column);
       minRow = Math.min(minRow, row);
@@ -296,10 +380,13 @@ export class SheetStateExtractor {
         columnData.set(column, []);
       }
       
-      if (value) {
-        columnData.get(column)!.push({ row, value });
-      }
+      // CRITICAL FIX: Store ALL cells (not just ones with values)
+      // This allows us to detect columns and find first empty row
+      columnData.get(column)!.push({ row, value, isEmpty });
     }
+    
+    console.log(`📊 SheetStateExtractor: Detected ${columnLetters.size} columns:`, Array.from(columnLetters));
+    console.log(`📊 SheetStateExtractor: Row range: ${minRow} to ${maxRow}`);
     
     // Sort columns alphabetically
     const sortedColumns = Array.from(columnLetters).sort();
@@ -317,15 +404,18 @@ export class SheetStateExtractor {
         headers.push({ column: colLetter, text: headerText });
       }
       
-      // Get data cells (skip row 1 if it's header)
+      // Get ALL cells beyond row 1 (to detect empty rows)
       const dataCells = cellsInColumn.filter(c => c.row > 1);
       
-      // Determine data type
+      // Get cells with actual values
+      const cellsWithData = dataCells.filter(c => !c.isEmpty);
+      
+      // Determine data type (only from cells with data)
       let dataType: SheetState['columns'][0]['dataType'] = 'empty';
-      if (dataCells.length > 0) {
-        const hasNumbers = dataCells.some(c => !isNaN(parseFloat(c.value)));
-        const hasText = dataCells.some(c => isNaN(parseFloat(c.value)));
-        const hasDate = dataCells.some(c => /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(c.value));
+      if (cellsWithData.length > 0) {
+        const hasNumbers = cellsWithData.some(c => !isNaN(parseFloat(c.value)));
+        const hasText = cellsWithData.some(c => isNaN(parseFloat(c.value)) && c.value);
+        const hasDate = cellsWithData.some(c => /\d{1,2}\/\d{1,2}\/\d{2,4}/.test(c.value));
         
         if (hasDate) dataType = 'date';
         else if (hasNumbers && hasText) dataType = 'mixed';
@@ -334,25 +424,30 @@ export class SheetStateExtractor {
       }
       
       // Find last data row and first empty row
-      const lastDataRow = dataCells.length > 0 
-        ? Math.max(...dataCells.map(c => c.row))
-        : 1;
+      const lastDataRow = cellsWithData.length > 0 
+        ? Math.max(...cellsWithData.map(c => c.row))
+        : 1; // Default to row 1 if no data
       
+      // First empty row is the row after the last data row
       const firstEmptyRow = lastDataRow + 1;
       
-      // Sample values (first 3 data cells)
-      const sampleValues = dataCells.slice(0, 3).map(c => c.value);
+      // Sample values (first 3 cells with data)
+      const sampleValues = cellsWithData.slice(0, 3).map(c => c.value);
+      
+      console.log(`📊 Column ${colLetter}: ${cellsWithData.length} cells with data, lastDataRow=${lastDataRow}, firstEmptyRow=${firstEmptyRow}`);
       
       columns.push({
         letter: colLetter,
         header: headerText,
         dataType,
-        rowCount: dataCells.length,
+        rowCount: cellsWithData.length,
         lastDataRow,
         firstEmptyRow,
         sampleValues,
       });
     }
+    
+    console.log(`📊 SheetStateExtractor: Built ${columns.length} column summaries`);
     
     // Determine overall data range
     const firstColumn = sortedColumns[0] || 'A';

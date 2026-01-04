@@ -855,13 +855,19 @@ function App() {
   /**
    * Handle variable form confirmation - execute workflow with provided values
    */
-  const handleVariableFormConfirm = async (values: Record<string, string>) => {
+  const handleVariableFormConfirm = async (values: Record<string, string>, editedDescription?: string) => {
     setShowVariableForm(false);
     
     if (pendingExecution.workflow) {
+      // If user edited the description, pass it along
+      // This will be sent to the AI agent to guide intelligent placement
+      const workflowWithContext = editedDescription 
+        ? { ...pendingExecution.workflow, description: editedDescription, userEditedDescription: true }
+        : pendingExecution.workflow;
+        
       await executeWorkflowWithVariables(
         pendingExecution.steps,
-        pendingExecution.workflow,
+        workflowWithContext,
         values
       );
     }
@@ -2082,6 +2088,7 @@ function App() {
           <VariableInputForm
             variables={pendingExecution.workflow.variables}
             workflowName={pendingExecution.workflow.name}
+            workflowDescription={pendingExecution.workflow.description}
             onConfirm={handleVariableFormConfirm}
             onCancel={handleVariableFormCancel}
           />

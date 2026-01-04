@@ -585,42 +585,75 @@ export class AIAgent {
         }
         
         // ============================================================================
-        // 📊 SPREADSHEET TYPE HINTS - BYPASS AI ENTIRELY
-        // If on spreadsheet + type hint + cell reference → execute directly
-        // This is simple and reliable - no AI skip decisions to worry about
+        // 📊 SPREADSHEET INTELLIGENT APPEND ENGINE
+        // When on a spreadsheet with type hints:
+        // 1. Extract column from recorded cell (A2 → column A)
+        // 2. Find the first EMPTY row for that column (intelligent append)
+        // 3. Use the same row for all columns (one row per workflow run)
+        // This ensures we APPEND new data instead of overwriting
         // ============================================================================
         if (SheetStateExtractor.isSpreadsheetDomain() && currentHint?.actionType === 'type' && currentHint?.value) {
           console.log(`[AIAgent] 📊 SPREADSHEET TYPE HINT detected: "${currentHint.value}"`);
           
           // Extract cell reference from hint
-          let cellRef: string | undefined;
+          let recordedCellRef: string | undefined;
           
           // Try recordedAriaLabel first (e.g., "A2", "B3")
           if (currentHint.recordedAriaLabel) {
             const match = currentHint.recordedAriaLabel.match(/^([A-Z]+\d+)$/i);
             if (match) {
-              cellRef = match[1].toUpperCase();
+              recordedCellRef = match[1].toUpperCase();
             }
           }
           
           // Try fallback selectors (e.g., [aria-label="A2"])
-          if (!cellRef && currentHint.recordedFallbackSelectors) {
+          if (!recordedCellRef && currentHint.recordedFallbackSelectors) {
             for (const selector of currentHint.recordedFallbackSelectors) {
               const ariaMatch = selector.match(/\[aria-label=["']([A-Z]+\d+)["']\]/i);
               if (ariaMatch) {
-                cellRef = ariaMatch[1].toUpperCase();
+                recordedCellRef = ariaMatch[1].toUpperCase();
                 break;
               }
             }
           }
           
-          if (cellRef) {
-            console.log(`[AIAgent] 📊 Executing SPREADSHEET TYPE: ${cellRef} = "${currentHint.value}" (NO AI)`);
+          if (recordedCellRef) {
+            // Extract column letter from recorded cell (A2 → A, B10 → B)
+            const columnMatch = recordedCellRef.match(/^([A-Z]+)/i);
+            const column = columnMatch ? columnMatch[1].toUpperCase() : 'A';
+            
+            // ============================================================================
+            // INTELLIGENT APPEND: Find the target row
+            // We use a shared "targetRow" for the entire workflow run
+            // This is stored in agent memory so all columns use the same row
+            // ============================================================================
+            let targetRow: number;
+            
+            // Check if we already determined the target row for this workflow run
+            if (this.state.memory?.spreadsheetTargetRow) {
+              targetRow = this.state.memory.spreadsheetTargetRow as number;
+              console.log(`[AIAgent] 📊 Using cached target row: ${targetRow}`);
+            } else {
+              // First time - find the next empty row using keyboard navigation
+              // This is fast (~300ms) and reliable - uses Google's native Ctrl+Down
+              console.log(`[AIAgent] 📊 Finding first empty row via keyboard navigation...`);
+              targetRow = await SheetStateExtractor.findFirstEmptyRowViaKeyboard();
+              console.log(`[AIAgent] 📊 INTELLIGENT APPEND: Using row ${targetRow} (found via Ctrl+Down)`);
+              
+              // Cache the target row for subsequent steps
+              if (!this.state.memory) this.state.memory = {};
+              this.state.memory.spreadsheetTargetRow = targetRow;
+            }
+            
+            // Build the actual cell reference
+            const actualCellRef = `${column}${targetRow}`;
+            
+            console.log(`[AIAgent] 📊 Executing SPREADSHEET TYPE: ${actualCellRef} = "${currentHint.value}" (recorded: ${recordedCellRef}, intelligent append)`);
             
             try {
               const result = await SpreadsheetExecutor.execute({
                 action: 'type_in_cell',
-                cellRef: cellRef,
+                cellRef: actualCellRef,
                 text: currentHint.value,
                 clearFirst: true,
               });
@@ -628,8 +661,8 @@ export class AIAgent {
               // Record result
               const spreadsheetAction: AgentAction = {
                 type: 'type_in_cell',
-                params: { cellRef, text: currentHint.value },
-                reasoning: `Direct spreadsheet execution: type "${currentHint.value}" in ${cellRef}`,
+                params: { cellRef: actualCellRef, text: currentHint.value },
+                reasoning: `Intelligent append: type "${currentHint.value}" in ${actualCellRef} (recorded: ${recordedCellRef})`,
                 confidence: 1.0,
                 hintStepIndex: this.state.currentHintIndex,
               };
@@ -644,7 +677,7 @@ export class AIAgent {
               });
               
               if (result.success) {
-                console.log(`[AIAgent] ✅ Spreadsheet type completed: ${cellRef} = "${currentHint.value}"`);
+                console.log(`[AIAgent] ✅ Spreadsheet type completed: ${actualCellRef} = "${currentHint.value}"`);
                 this.state.hints[this.state.currentHintIndex].completed = true;
                 this.state.currentHintIndex++;
                 this.onProgress?.(this.state.currentHintIndex - 1, spreadsheetAction, 'completed');
@@ -2449,6 +2482,22 @@ export class AIAgent {
     
     const originalSteps = workflow.steps; // Keep reference to original steps for elementText lookup
     
+    // ============================================================================
+    // 📊 VARIABLE SUBSTITUTION: Build step→variable mapping
+    // Variables are detected at recording time and stored in workflow.variables
+    // User provides values in variableValues with keys matching variableName
+    // ============================================================================
+    const stepToVariable: Map<number, { variableName: string; fieldName: string }> = new Map();
+    if (workflow.variables?.variables) {
+      for (const variable of workflow.variables.variables) {
+        stepToVariable.set(variable.stepIndex, {
+          variableName: variable.variableName,
+          fieldName: variable.fieldName,
+        });
+        console.log(`[AIAgent] 📝 Variable mapping: step ${variable.stepIndex} → "${variable.variableName}" (${variable.fieldName})`);
+      }
+    }
+    
     return steps.map((step, index) => {
       const payload = step.payload as WorkflowStepPayload;
       
@@ -2489,8 +2538,18 @@ export class AIAgent {
       let value = payload.value;
       let originalValue = payload.value; // Keep for reference
       
-      if (value && variableValues) {
-        // Replace {{varName}} with user-provided values
+      // ============================================================================
+      // 📊 VARIABLE SUBSTITUTION: Use user-provided values
+      // 1. Check if this step has a detected variable → use variableValues[variableName]
+      // 2. Fallback: Replace {{varName}} patterns (legacy support)
+      // ============================================================================
+      const stepVariable = stepToVariable.get(index);
+      if (stepVariable && variableValues && variableValues[stepVariable.variableName] !== undefined) {
+        const userValue = variableValues[stepVariable.variableName];
+        console.log(`[AIAgent] 📝 Variable substitution: step ${index} "${originalValue}" → "${userValue}" (${stepVariable.fieldName})`);
+        value = userValue;
+      } else if (value && variableValues) {
+        // Fallback: Replace {{varName}} patterns
         value = value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
           return variableValues[varName] ?? match;
         });

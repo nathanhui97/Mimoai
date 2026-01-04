@@ -11,7 +11,8 @@ import type { WorkflowVariables, VariableDefinition } from '../lib/variable-dete
 interface VariableInputFormProps {
   variables: WorkflowVariables;
   workflowName: string;
-  onConfirm: (values: Record<string, string>) => void;
+  workflowDescription?: string; // AI-generated summary
+  onConfirm: (values: Record<string, string>, editedDescription?: string) => void;
   onCancel: () => void;
 }
 
@@ -83,6 +84,7 @@ function validateInput(value: string, inputType?: string, isDropdown?: boolean):
 export function VariableInputForm({
   variables,
   workflowName,
+  workflowDescription,
   onConfirm,
   onCancel,
 }: VariableInputFormProps) {
@@ -100,6 +102,10 @@ export function VariableInputForm({
 
   // Track if form has been touched
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+  
+  // Track workflow description (user can edit)
+  const [description, setDescription] = useState(workflowDescription || '');
+  const [showDescriptionEdit, setShowDescriptionEdit] = useState(false);
 
   /**
    * Handle input change
@@ -168,7 +174,9 @@ export function VariableInputForm({
       return;
     }
 
-    onConfirm(values);
+    // Pass edited description if different from original
+    const editedDesc = description !== workflowDescription ? description : undefined;
+    onConfirm(values, editedDesc);
   };
 
   return (
@@ -177,12 +185,51 @@ export function VariableInputForm({
         {/* Header */}
         <div className="mb-6">
           <h2 className="text-xl font-semibold text-card-foreground">
-            Enter Variable Values
+            Run Workflow
           </h2>
           <p className="text-sm text-muted-foreground mt-1">
             Workflow: <span className="font-medium">{workflowName}</span>
           </p>
-          <p className="text-xs text-muted-foreground mt-1">
+          
+          {/* AI Summary / Description */}
+          {workflowDescription && (
+            <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-md">
+              <div className="flex items-start justify-between">
+                <div className="flex-1">
+                  <p className="text-xs font-medium text-blue-700 mb-1">
+                    🤖 AI Understanding
+                  </p>
+                  {showDescriptionEdit ? (
+                    <textarea
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      className="w-full text-sm text-blue-900 bg-white border border-blue-300 rounded p-2 min-h-[60px]"
+                      placeholder="Describe what this workflow does..."
+                    />
+                  ) : (
+                    <p className="text-sm text-blue-900 italic">
+                      "{description}"
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowDescriptionEdit(!showDescriptionEdit)}
+                  className="ml-2 text-blue-600 hover:text-blue-800 text-xs"
+                  title={showDescriptionEdit ? 'Done editing' : 'Edit description'}
+                >
+                  {showDescriptionEdit ? '✓ Done' : '✏️ Edit'}
+                </button>
+              </div>
+              {description !== workflowDescription && (
+                <p className="text-xs text-blue-600 mt-1">
+                  ✨ Your edits will be used to guide the AI
+                </p>
+              )}
+            </div>
+          )}
+          
+          <p className="text-xs text-muted-foreground mt-2">
             {variables.variables.length} variable{variables.variables.length !== 1 ? 's' : ''} detected
           </p>
         </div>
