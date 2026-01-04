@@ -57,3 +57,5 @@ Make sure you're running from the project root, not from the `supabase` director
 2. Check the function logs: `supabase functions logs dom_agent`
 3. Verify the CORS headers are set in the function code (they are - see line 132-138 in `supabase/functions/dom_agent/index.ts`)
 
+
+

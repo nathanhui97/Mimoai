@@ -429,3 +429,5 @@ function parseGeminiResponse(geminiData: any, candidates: VisualCandidate[]): Vi
 
 
 
+
+

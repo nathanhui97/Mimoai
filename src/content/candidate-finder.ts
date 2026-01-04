@@ -10,6 +10,7 @@ import { resolveScopeContainer } from '../types/scope';
 import { TextMatcher } from './text-matcher';
 import { FeatureFlags } from '../lib/feature-flags';
 import { computeAccessibleName } from '../lib/accessible-name';
+import { ShadowDOMUtils } from './shadow-dom-utils';
 
 /**
  * Result from finding a candidate element
@@ -30,6 +31,44 @@ export interface CandidateResult {
  */
 export class CandidateFinder {
   /**
+   * Shadow-aware querySelectorAll - searches both light DOM and shadow DOM
+   */
+  private static querySelectorAllDeep(container: Element, selector: string): Element[] {
+    const results: Element[] = [];
+    
+    // Phase 1: Light DOM
+    try {
+      const lightDOMMatches = container.querySelectorAll(selector);
+      results.push(...Array.from(lightDOMMatches));
+    } catch (e) {
+      // Invalid selector
+    }
+    
+    // Phase 2: Shadow DOM
+    let shadowDOMCount = 0;
+    ShadowDOMUtils.traverseShadowDOM(container.ownerDocument || document, (el) => {
+      // Only include elements that are descendants of the container
+      // (either in light DOM or shadow DOM)
+      const shadowHost = (el.getRootNode() as ShadowRoot).host;
+      if (shadowHost && container.contains(shadowHost)) {
+        if (el.matches(selector)) {
+          // Deduplicate - check if already in results
+          if (!results.includes(el)) {
+            results.push(el);
+            shadowDOMCount++;
+          }
+        }
+      }
+    });
+    
+    if (shadowDOMCount > 0) {
+      console.log(`[CandidateFinder] Found ${shadowDOMCount} additional elements in shadow DOM`);
+    }
+    
+    return results;
+  }
+  
+  /**
    * Find all candidates for each strategy within scope
    * Returns a map of strategy type -> candidates found
    */
@@ -40,13 +79,19 @@ export class CandidateFinder {
     const results = new Map<LocatorType, CandidateResult[]>();
     
     // Resolve scope container
-    const scopeContainer = bundle.scope 
+    // CRITICAL: If scope resolution fails, fall back to document-wide search
+    // We'll use scope for disambiguation later if multiple candidates are found
+    let scopeContainer = bundle.scope 
       ? resolveScopeContainer(bundle.scope, doc)
       : doc.body;
     
     if (!scopeContainer) {
-      console.warn('CandidateFinder: Could not resolve scope container');
-      return results;
+      const scopeDesc = bundle.scope?.kind === 'WIDGET' 
+        ? `${bundle.scope.kind}:${bundle.scope.title}`
+        : bundle.scope?.kind || 'unknown';
+      console.warn(`[CandidateFinder] ⚠️ Scope "${scopeDesc}" not found, falling back to document-wide search`);
+      scopeContainer = doc.body; // Fall back to full document search
+      // DON'T abort - continue with document-wide search and use scope for disambiguation later
     }
     
     // Find candidates for each strategy
@@ -191,8 +236,8 @@ export class CandidateFinder {
     const results: CandidateResult[] = [];
     
     try {
-      const elements = scopeContainer.querySelectorAll(strategy.value);
-      for (const element of Array.from(elements)) {
+      const elements = this.querySelectorAllDeep(scopeContainer, strategy.value);
+      for (const element of elements) {
         if (this.isElementVisible(element)) {
           results.push({
             element,
@@ -393,8 +438,8 @@ export class CandidateFinder {
     // First try exact match
     const exactSelector = `[aria-label="${strategy.value}"]`;
     try {
-      const exactMatches = scopeContainer.querySelectorAll(exactSelector);
-      for (const element of Array.from(exactMatches)) {
+      const exactMatches = this.querySelectorAllDeep(scopeContainer, exactSelector);
+      for (const element of exactMatches) {
         if (this.isElementVisible(element)) {
           results.push({
             element,
@@ -410,8 +455,8 @@ export class CandidateFinder {
     
     // If no exact matches, try fuzzy
     if (results.length === 0) {
-      const candidates = scopeContainer.querySelectorAll('[aria-label]');
-      for (const candidate of Array.from(candidates)) {
+      const candidates = this.querySelectorAllDeep(scopeContainer, '[aria-label]');
+      for (const candidate of candidates) {
         if (!this.isElementVisible(candidate)) continue;
         
         const ariaLabel = candidate.getAttribute('aria-label')?.toLowerCase() || '';
@@ -447,9 +492,9 @@ export class CandidateFinder {
     const roleSelector = `[role="${role}"]`;
     
     try {
-      const candidates = scopeContainer.querySelectorAll(roleSelector);
+      const candidates = this.querySelectorAllDeep(scopeContainer, roleSelector);
       
-      for (const candidate of Array.from(candidates)) {
+      for (const candidate of candidates) {
         if (!this.isElementVisible(candidate)) continue;
         
         // Get accessible name properly (handles labels, aria-labelledby, etc.)

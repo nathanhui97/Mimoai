@@ -9,9 +9,11 @@
  * - Interactive elements (buttons, links, inputs)
  * - Structural elements (headings, regions, tables)
  * - Current context (modals, dialogs, focused areas)
+ * - Shadow DOM traversal (for web components like Gainsight, Salesforce Lightning)
  */
 
 import { computeAccessibleName } from '../lib/accessible-name';
+import { ShadowDOMUtils } from './shadow-dom-utils';
 
 // ============================================================================
 // Types
@@ -51,6 +53,10 @@ export interface DOMMapElement {
   widgetTitle?: string;
   /** Frame ID - which frame this element is in (0 = main frame) */
   frameId: number;
+  /** Is this element inside a Shadow DOM? (for web components) */
+  inShadowDOM?: boolean;
+  /** Shadow host element tag if in shadow DOM (e.g., "gs-report-widget-element") */
+  shadowHost?: string;
 }
 
 export interface DOMMapRegion {
@@ -148,17 +154,26 @@ export function generateDOMMap(): DOMMap {
     const modalFormFields = getFormFields(modal);
     const modalInteractiveElements = getInteractiveElements(modal);
     
-    map.activeModal = {
-      title: getModalTitle(modal),
-      elements: modalInteractiveElements,
-    };
-    
-    // When modal is active, ONLY return modal content
-    map.formFields = modalFormFields;
-    map.interactiveElements = modalInteractiveElements;
-    
-    console.log('[DOMMap] 🔔 Active modal detected:', map.activeModal.title, 'with', modalInteractiveElements.length, 'interactive elements and', modalFormFields.length, 'form fields');
-  } else {
+    // CRITICAL: Ignore empty modals (false positives - likely hidden overlays/notifications)
+    // A real modal that users need to interact with MUST have at least some interactive elements
+    if (modalInteractiveElements.length === 0 && modalFormFields.length === 0) {
+      console.log('[DOMMap] ⚠️ Ignoring detected modal - it has 0 interactive elements and 0 form fields (likely false positive)');
+      modal = null; // Treat as no modal
+    } else {
+      map.activeModal = {
+        title: getModalTitle(modal),
+        elements: modalInteractiveElements,
+      };
+      
+      // When modal is active, ONLY return modal content
+      map.formFields = modalFormFields;
+      map.interactiveElements = modalInteractiveElements;
+      
+      console.log('[DOMMap] 🔔 Active modal detected:', map.activeModal.title, 'with', modalInteractiveElements.length, 'interactive elements and', modalFormFields.length, 'form fields');
+    }
+  }
+  
+  if (!modal) {
     // No modal - get page content
     
     // Get regions
@@ -605,6 +620,51 @@ function getPageRegions(): DOMMapRegion[] {
   return regions;
 }
 
+/**
+ * Query elements from both light DOM and shadow DOM
+ * This is critical for web component-based apps (Gainsight, Salesforce Lightning, etc.)
+ */
+function querySelectorAllDeep(container: Element, selector: string): Element[] {
+  const results: Element[] = [];
+  const seen = new Set<Element>();
+  
+  // Phase 1: Get elements from light DOM
+  const lightDOMElements = container.querySelectorAll(selector);
+  for (const el of Array.from(lightDOMElements)) {
+    results.push(el);
+    seen.add(el);
+  }
+  
+  // Phase 2: Traverse shadow DOM to find elements in web components
+  // This automatically handles any app using shadow DOM - no app-specific code!
+  ShadowDOMUtils.traverseShadowDOM(container.ownerDocument || document, (el) => {
+    // Skip if not in our container's subtree
+    const rootNode = el.getRootNode();
+    if (rootNode instanceof ShadowRoot) {
+      const host = rootNode.host;
+      // Check if shadow host is within container
+      if (!container.contains(host) && host !== container) return;
+    } else if (!container.contains(el) && el !== container) {
+      return;
+    }
+    
+    // Check if element matches selector
+    try {
+      if (!el.matches(selector)) return;
+    } catch {
+      return;
+    }
+    
+    // Skip if we already found this element (avoid duplicates)
+    if (seen.has(el)) return;
+    seen.add(el);
+    
+    results.push(el);
+  });
+  
+  return results;
+}
+
 function getInteractiveElements(container: Element): DOMMapElement[] {
   const elements: DOMMapElement[] = [];
   const interactiveSelector = [
@@ -619,7 +679,8 @@ function getInteractiveElements(container: Element): DOMMapElement[] {
     '[class*="btn"]', '[class*="Button"]', 
   ].join(', ');
   
-  const candidates = container.querySelectorAll(interactiveSelector);
+  // Use deep query to traverse shadow DOM automatically
+  const candidates = querySelectorAllDeep(container, interactiveSelector);
   const indexMap = new Map<string, number>();
   
   // Check if we're in a modal (be less aggressive about skipping)
@@ -690,7 +751,8 @@ function getFormFields(container: Element): DOMMapElement[] {
   const elements: DOMMapElement[] = [];
   const fieldSelector = 'input, textarea, select, [contenteditable="true"], [role="combobox"], [role="textbox"], [role="searchbox"], [role="spinbutton"]';
   
-  const candidates = container.querySelectorAll(fieldSelector);
+  // Use deep query to traverse shadow DOM automatically  
+  const candidates = querySelectorAllDeep(container, fieldSelector);
   
   console.log(`[DOMMap] getFormFields found ${candidates.length} candidates in`, container.tagName || 'container');
   
@@ -699,7 +761,7 @@ function getFormFields(container: Element): DOMMapElement[] {
     const role = el.getAttribute('role');
     
     if (!isVisible(el)) {
-      console.log(`[DOMMap] ⏭️ Skipping invisible field:`, tag, role);
+      // Skipping invisible field
       continue;
     }
     if (isDisabled(el)) {
@@ -714,7 +776,6 @@ function getFormFields(container: Element): DOMMapElement[] {
     }
     
     const mapEl = elementToMapElement(el);
-    console.log(`[DOMMap] ✅ Form field: [${mapEl.role}] "${mapEl.name}" id="${mapEl.attrs?.id || 'none'}" placeholder="${mapEl.attrs?.placeholder || 'none'}"`);
     elements.push(mapEl);
   }
   
@@ -785,6 +846,13 @@ function elementToMapElement(el: Element, frameId: number = 0): DOMMapElement {
     interactive: isInteractive(el),
     frameId,
   };
+  
+  // Detect if element is inside Shadow DOM (for web components)
+  const rootNode = el.getRootNode();
+  if (rootNode instanceof ShadowRoot) {
+    mapEl.inShadowDOM = true;
+    mapEl.shadowHost = rootNode.host.tagName.toLowerCase();
+  }
   
   // Compute scope identity for disambiguation
   mapEl.scopePath = computeScopePath(el);
@@ -1055,26 +1123,46 @@ function computeRowKey(element: Element): string | undefined {
 
 /**
  * Find the closest widget title (heading) for an element
+ * MUST traverse Shadow DOM correctly!
  */
 function findWidgetTitle(element: Element): string | undefined {
-  let current = element.parentElement;
-  const maxDepth = 10;
+  let current: Element | null = element.parentElement;
+  const maxDepth = 15; // Increased for shadow DOM depth
   let depth = 0;
   
   while (current && depth < maxDepth) {
-    // Look for headings in this container
-    const heading = current.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
+    // Check shadowRoot FIRST (widget titles are often in shadow DOM!)
+    if (current.shadowRoot) {
+      const shadowHeading = current.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"], [class*="title"], [class*="header"]');
+      if (shadowHeading?.textContent?.trim()) {
+        const title = shadowHeading.textContent.trim();
+        // Return full title (don't truncate - we need it for fuzzy matching)
+        return title.length > 100 ? title.substring(0, 100) : title;
+      }
+    }
+    
+    // Look for headings in light DOM
+    const heading = current.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"], [class*="title"], [class*="header"]');
     if (heading?.textContent?.trim()) {
-      return heading.textContent.trim().substring(0, 50);
+      const title = heading.textContent.trim();
+      return title.length > 100 ? title.substring(0, 100) : title;
     }
     
     // Check if this element itself has a title attribute or aria-label
     const title = current.getAttribute('title') || current.getAttribute('aria-label');
     if (title?.trim()) {
-      return title.trim().substring(0, 50);
+      return title.trim().substring(0, 100);
     }
     
-    current = current.parentElement;
+    // Handle shadow DOM boundaries - traverse UP correctly!
+    const rootNode = current.getRootNode();
+    if (rootNode instanceof ShadowRoot) {
+      // Jump to shadow host
+      current = rootNode.host;
+    } else {
+      // Normal DOM traversal
+      current = current.parentElement;
+    }
     depth++;
   }
   

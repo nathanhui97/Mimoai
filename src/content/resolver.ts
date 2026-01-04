@@ -65,16 +65,19 @@ export class Resolver {
     const startTime = Date.now();
     
     // Find scope container
-    const scopeContainer = bundle.scope 
+    // CRITICAL: If scope resolution fails, fall back to document-wide search
+    // We'll use scope for disambiguation later if multiple candidates are found
+    let scopeContainer = bundle.scope 
       ? resolveScopeContainer(bundle.scope, doc)
       : doc.body;
     
     if (!scopeContainer) {
-      return {
-        status: 'not_found',
-        triedStrategies: [],
-        metrics: this.createMetrics(0, {}, false, startTime, false),
-      };
+      const scopeDesc = bundle.scope?.kind === 'WIDGET' 
+        ? `${bundle.scope.kind}:${bundle.scope.title}`
+        : bundle.scope?.kind || 'unknown';
+      console.warn(`[Resolver] ⚠️ Scope "${scopeDesc}" not found, falling back to document-wide search`);
+      scopeContainer = doc.body; // Fall back to full document search
+      // DON'T abort - continue with document-wide search and use scope for disambiguation later
     }
     
     // Find all candidates

@@ -81,7 +81,6 @@ function App() {
   // Screenshot modal state
   const [screenshotModalStep, setScreenshotModalStep] = useState<{ step: WorkflowStep; index: number } | null>(null);
   // Optimization toggle state
-  const [useOptimizedSteps, setUseOptimizedSteps] = useState<Record<string, boolean>>({});
   // Editable AI instructions state
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [editedInstruction, setEditedInstruction] = useState<string>('');
@@ -888,6 +887,35 @@ function App() {
         throw new Error('No active tab found');
       }
       
+      // Navigate to starting page if needed
+      const startingUrl = workflow.steps.length > 0 && isWorkflowStepPayload(workflow.steps[0].payload)
+        ? workflow.steps[0].payload.url
+        : undefined;
+      
+      if (startingUrl && tab.url !== startingUrl) {
+        addLog(`Navigating to starting page: ${startingUrl}`, 'info');
+        
+        await chrome.tabs.update(tab.id, { url: startingUrl });
+        
+        // Wait for page load
+        await new Promise<void>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            chrome.tabs.onUpdated.removeListener(listener);
+            reject(new Error('Navigation timeout'));
+          }, 15000);
+          
+          const listener = (tabId: number, changeInfo: { status?: string }) => {
+            if (tabId === tab.id && changeInfo.status === 'complete') {
+              clearTimeout(timeout);
+              chrome.tabs.onUpdated.removeListener(listener);
+              // Wait a bit more for Salesforce Lightning to fully load
+              setTimeout(() => resolve(), 1500);
+            }
+          };
+          chrome.tabs.onUpdated.addListener(listener);
+        });
+      }
+      
       addLog('Starting AI Agent execution...', 'info');
       
       // Send execution message to content script using AI Agent
@@ -940,13 +968,13 @@ function App() {
         throw new Error('No active tab found');
       }
       
-      // Use optimized steps if available AND user wants to use them
-      const shouldUseOptimized = useOptimizedSteps[workflow.id] !== false; // Default to true if not set
-      const stepsToExecute = (workflow.optimizedSteps && shouldUseOptimized) ? workflow.optimizedSteps : steps;
-      const isOptimized = !!(workflow.optimizedSteps && shouldUseOptimized);
+      // Always use original steps for reliable click-through behavior
+      // The AI Agent automatically handles navigation by clicking through the UI
+      const stepsToExecute = steps;
+      const isOptimized = false;
       
-      if (isOptimized) {
-        console.log(`[ExecuteWorkflow] Using optimized steps (${stepsToExecute.length} vs ${steps.length} original)`);
+      if (workflow.optimizedSteps) {
+        console.log(`[ExecuteWorkflow] Ignoring optimized steps, using original ${steps.length} steps for reliability`);
       } else if (workflow.optimizedSteps) {
         console.log(`[ExecuteWorkflow] Using original steps (user disabled optimization)`);
       }
@@ -1765,37 +1793,10 @@ function App() {
                         )}
                       </div>
                       <div className="text-xs text-muted-foreground mt-1">
-                        {formatDate(workflow.updatedAt)} • {workflow.optimizedSteps ? workflow.optimizedSteps.length : workflow.steps.length} steps
-                        {workflow.optimizedSteps && (
-                          <span className="text-green-600"> (optimized from {workflow.steps.length})</span>
-                        )}
+                        {formatDate(workflow.updatedAt)} • {workflow.steps.length} steps
                       </div>
                     </div>
                   </div>
-                  {/* Optimization Toggle */}
-                  {workflow.optimizedSteps && workflow.optimizationMetadata && workflow.optimizationMetadata.stepsRemoved > 0 && (
-                    <div className="mb-2 p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded border border-yellow-200 dark:border-yellow-700">
-                      <label className="flex items-center gap-2 text-sm cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={useOptimizedSteps[workflow.id] !== false}
-                          onChange={(e) => {
-                            setUseOptimizedSteps({
-                              ...useOptimizedSteps,
-                              [workflow.id]: e.target.checked,
-                            });
-                          }}
-                          className="rounded"
-                        />
-                        <span className="text-yellow-800 dark:text-yellow-200">
-                          Use optimized version ({workflow.optimizedSteps.length} steps)
-                        </span>
-                      </label>
-                      <p className="text-xs text-yellow-700 dark:text-yellow-300 mt-1 ml-6">
-                        ⚠️ Uncheck if modal/state-dependent steps fail. Original has {workflow.steps.length} steps.
-                      </p>
-                    </div>
-                  )}
                   
                   <div className="flex gap-2 mt-2">
                     <button

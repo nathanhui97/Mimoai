@@ -20,6 +20,7 @@ export type Intent =
   | { kind: 'HOVER' }
   | { kind: 'FOCUS' }
   | { kind: 'PRESS_KEY'; key: string; modifiers?: KeyModifiers }
+  | { kind: 'READ'; attribute?: string }
   | { kind: 'ASSERT' };
 
 /**
@@ -55,7 +56,7 @@ export function isIntent(obj: unknown): obj is Intent {
   const validKinds = [
     'CLICK', 'TYPE', 'OPEN_ROW_ACTIONS', 'SELECT_DROPDOWN_OPTION',
     'NAVIGATE', 'SUBMIT_FORM', 'TOGGLE_CHECKBOX', 'SCROLL_TO',
-    'HOVER', 'FOCUS', 'PRESS_KEY', 'ASSERT'
+    'HOVER', 'FOCUS', 'PRESS_KEY', 'READ', 'ASSERT'
   ];
   
   return validKinds.includes(intent.kind);
@@ -152,12 +153,15 @@ export function describeIntent(intent: Intent): string {
             .join('+') + '+'
         : '';
       return `Press ${modStr}${intent.key}`;
+    case 'READ':
+      return intent.attribute ? `Read ${intent.attribute} from element` : 'Read element value';
     case 'ASSERT':
       return 'Assert condition';
     default:
       return 'Unknown intent';
   }
 }
+
 
 
 

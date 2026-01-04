@@ -62,6 +62,9 @@ export interface Tier1ExecutionResult {
     // General
     element?: Element;
     resolveMetrics?: any;
+    
+    // For read action
+    value?: string | boolean | number;
   };
   message?: string;
 }
@@ -99,6 +102,15 @@ export class Tier1Executor {
         
         case 'assert':
           return await this.executeAssert(action);
+        
+        case 'read':
+          return await this.executeRead(action);
+        
+        case 'keyboard':
+          return await this.executeKeyboard(action);
+        
+        case 'hover':
+          return await this.executeHover(action);
         
         case 'done':
           return { status: 'success', details: {} };
@@ -427,47 +439,152 @@ export class Tier1Executor {
    * MODAL-AWARE: Scrolls within modal if one is open, otherwise scrolls the page
    */
   private static async executeScroll(action: AgentAction): Promise<Tier1ExecutionResult> {
-    const { direction, amount = 300 } = action.params;
+    const { direction, amount = 300, scrollContainerSelector } = action.params;
     
     const scrollOptions: ScrollToOptions = { behavior: 'smooth' };
-    
-    // Check if there's an active modal - if so, scroll within it
     let scrollTarget: Element | Window = window;
     
-    const modalSelectors = [
-      '[role="dialog"]',
-      '[aria-modal="true"]',
-      '.modal',
-      '[class*="Modal"]',
-      '[class*="dialog"]',
-      '[class*="Dialog"]',
-      '[class*="popup"]',
-      '[class*="Popup"]',
-    ];
-    
-    for (const selector of modalSelectors) {
-      const modals = Array.from(document.querySelectorAll(selector));
-      for (const modal of modals) {
-        const style = window.getComputedStyle(modal);
-        const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-        const zIndex = parseInt(style.zIndex) || 0;
-        
-        if (isVisible && zIndex > 50) {
-          // Found an active modal - look for scrollable container within it
-          const scrollableContainer = this.findScrollableContainer(modal);
-          if (scrollableContainer) {
-            scrollTarget = scrollableContainer;
-            console.log('[Tier1] 📜 Found scrollable modal container, will scroll within it');
-            break;
+    // PRIORITY 1: Use recorded scroll container selector if provided
+    // This is what the user recorded, so it should be used first!
+    if (scrollContainerSelector) {
+      try {
+        const container = document.querySelector(scrollContainerSelector);
+        if (container) {
+          // Check if container is scrollable:
+          // 1. Has overflow CSS allowing scroll, OR
+          // 2. Has scrollable content (scrollHeight > clientHeight)
+          const style = window.getComputedStyle(container);
+          const hasOverflowCSS = style.overflow === 'auto' || style.overflow === 'scroll' || 
+                                style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+                                style.overflow === 'hidden'; // hidden can still be scrolled via JS
+          const hasScrollableContent = container.scrollHeight > container.clientHeight;
+          
+          if (hasOverflowCSS || hasScrollableContent) {
+            scrollTarget = container;
+            console.log(`[Tier1] 📜 Using recorded scroll container: "${scrollContainerSelector}" (scrollHeight: ${container.scrollHeight}, clientHeight: ${container.clientHeight})`);
+          } else {
+            console.warn(`[Tier1] ⚠️ Recorded container "${scrollContainerSelector}" found but not scrollable`);
           }
+        } else {
+          console.warn(`[Tier1] ⚠️ Recorded scroll container "${scrollContainerSelector}" not found in DOM`);
+        }
+      } catch (e) {
+        console.warn(`[Tier1] ⚠️ Invalid scroll container selector: "${scrollContainerSelector}"`);
+      }
+    }
+    
+    // PRIORITY 2: Auto-detect scrollable container using SMART heuristics
+    if (scrollTarget === window) {
+      console.log('[Tier1] 📜 Auto-detecting scrollable container...');
+      
+      // Strategy 1: Find ALL potentially scrollable elements
+      const allElements = document.querySelectorAll('*');
+      const scrollableCandidates: Array<{ element: Element; score: number; reason: string }> = [];
+      
+      for (const el of Array.from(allElements)) {
+        const style = window.getComputedStyle(el);
+        const hasScrollableContent = el.scrollHeight > el.clientHeight + 10; // +10px tolerance
+        
+        if (!hasScrollableContent) continue;
+        
+        // Check if it has overflow that allows scrolling
+        const canScroll = style.overflow === 'auto' || style.overflow === 'scroll' || 
+                         style.overflowY === 'auto' || style.overflowY === 'scroll' ||
+                         style.overflow === 'hidden'; // hidden can still be JS scrolled
+        
+        if (!canScroll) continue;
+        
+        // Score this candidate
+        let score = 0;
+        const className = el.className?.toString() || '';
+        const tagName = el.tagName.toLowerCase();
+        
+        // Prefer elements with content-related classes
+        if (className.includes('content')) score += 50;
+        if (className.includes('main')) score += 40;
+        if (className.includes('scroll')) score += 30;
+        if (className.includes('wrapper')) score += 20;
+        if (className.includes('container')) score += 10;
+        if (className.includes('page')) score += 15;
+        if (className.includes('app')) score += 10;
+        if (className.includes('viewer')) score += 25;
+        if (className.includes('renderer')) score += 25;
+        
+        // Prefer semantic elements
+        if (tagName === 'main') score += 60;
+        if (el.getAttribute('role') === 'main') score += 55;
+        
+        // Prefer elements with large scrollable area (actual content)
+        const scrollableHeight = el.scrollHeight - el.clientHeight;
+        if (scrollableHeight > 500) score += 30;
+        else if (scrollableHeight > 200) score += 20;
+        else if (scrollableHeight > 100) score += 10;
+        
+        // Deprioritize body (too generic)
+        if (tagName === 'body') score -= 20;
+        
+        // Only consider elements with reasonable score
+        if (score > 0) {
+          scrollableCandidates.push({
+            element: el,
+            score,
+            reason: `${tagName}.${className.split(' ')[0] || 'no-class'} (scrollHeight: ${el.scrollHeight}, clientHeight: ${el.clientHeight})`,
+          });
         }
       }
-      if (scrollTarget !== window) break;
+      
+      // Sort by score and pick the best
+      if (scrollableCandidates.length > 0) {
+        scrollableCandidates.sort((a, b) => b.score - a.score);
+        scrollTarget = scrollableCandidates[0].element;
+        console.log(`[Tier1] 📜 Smart-detected scrollable container (score: ${scrollableCandidates[0].score}): ${scrollableCandidates[0].reason}`);
+        
+        // Log top 3 candidates for debugging
+        if (scrollableCandidates.length > 1) {
+          console.log(`[Tier1] 📜 Other candidates:`, scrollableCandidates.slice(1, 3).map(c => `${c.reason} (score: ${c.score})`));
+        }
+      } else {
+        console.log('[Tier1] ⚠️ No scrollable container detected, will scroll window');
+      }
+    }
+    
+    // Priority 3: Check if there's an active modal - if so, scroll within it
+    if (scrollTarget === window) {
+      const modalSelectors = [
+        '[role="dialog"]',
+        '[aria-modal="true"]',
+        '.modal',
+        '[class*="Modal"]',
+        '[class*="dialog"]',
+        '[class*="Dialog"]',
+        '[class*="popup"]',
+        '[class*="Popup"]',
+      ];
+      
+      for (const selector of modalSelectors) {
+        const modals = Array.from(document.querySelectorAll(selector));
+        for (const modal of modals) {
+          const style = window.getComputedStyle(modal);
+          const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          const zIndex = parseInt(style.zIndex) || 0;
+          
+          if (isVisible && zIndex > 50) {
+            // Found an active modal - look for scrollable container within it
+            const scrollableContainer = this.findScrollableContainer(modal);
+            if (scrollableContainer) {
+              scrollTarget = scrollableContainer;
+              console.log('[Tier1] 📜 Found scrollable modal container');
+              break;
+            }
+          }
+        }
+        if (scrollTarget !== window) break;
+      }
     }
     
     // Perform scroll
     if (scrollTarget === window) {
-      console.log(`[Tier1] 📜 Scrolling page ${direction} by ${amount}px`);
+      console.log(`[Tier1] 📜 Scrolling window ${direction} by ${amount}px`);
       switch (direction) {
         case 'down':
           window.scrollBy({ top: amount, ...scrollOptions });
@@ -483,25 +600,46 @@ export class Tier1Executor {
           break;
       }
     } else {
-      console.log(`[Tier1] 📜 Scrolling modal container ${direction} by ${amount}px`);
+      const targetName = scrollContainerSelector || 'container';
+      console.log(`[Tier1] 📜 Scrolling ${targetName} ${direction} by ${amount}px`);
       switch (direction) {
         case 'down':
-          scrollTarget.scrollBy({ top: amount, ...scrollOptions });
+          (scrollTarget as Element).scrollBy({ top: amount, ...scrollOptions });
           break;
         case 'up':
-          scrollTarget.scrollBy({ top: -amount, ...scrollOptions });
+          (scrollTarget as Element).scrollBy({ top: -amount, ...scrollOptions });
           break;
         case 'right':
-          scrollTarget.scrollBy({ left: amount, ...scrollOptions });
+          (scrollTarget as Element).scrollBy({ left: amount, ...scrollOptions });
           break;
         case 'left':
-          scrollTarget.scrollBy({ left: -amount, ...scrollOptions });
+          (scrollTarget as Element).scrollBy({ left: -amount, ...scrollOptions });
           break;
       }
     }
     
-    // Wait for scroll to complete and DOM to stabilize
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Wait for scroll animation to complete
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    // Wait for lazy-loaded content to render (critical for dashboards like Gainsight!)
+    // Use StateWaitEngine to wait for actual DOM stability
+    try {
+      const { StateWaitEngine } = await import('../content/state-wait-engine');
+      const stabilityResult = await StateWaitEngine.waitForStability({
+        domQuietMs: 800,      // Wait 800ms of no DOM changes
+        networkQuietMs: 1000, // Wait 1s of no network activity  
+        maxWaitMs: 5000,      // Max 5s total wait
+        checkSpinners: true,  // Wait for loading spinners
+      });
+      console.log('[Tier1] 📜 Post-scroll stability:', 
+        stabilityResult.domStable ? '✅ DOM stable' : '⚠️ DOM changing',
+        stabilityResult.spinnersGone ? '✅ No spinners' : '⚠️ Loading'
+      );
+    } catch (e) {
+      // Fallback if StateWaitEngine not available
+      console.log('[Tier1] ⚠️ StateWaitEngine not available, using 2s delay');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
     
     return { status: 'success', details: {} };
   }
@@ -616,6 +754,255 @@ export class Tier1Executor {
     };
   }
 
+  /**
+   * Execute read action - query element values
+   */
+  private static async executeRead(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target, attribute = 'value' } = action.params;
+    
+    if (!target) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No target specified for read action',
+      };
+    }
+    
+    // Build locator bundle from semantic target
+    const bundle = this.buildLocatorBundle(target);
+    
+    // Build intent for resolver
+    const intent: Intent = { kind: 'CLICK' }; // Use CLICK intent for resolution
+    
+    // Resolve element
+    const resolveResult = await this.resolveElement(bundle, intent);
+    
+    if (resolveResult.status !== 'success') {
+      return resolveResult;
+    }
+    
+    const element = resolveResult.details.element!;
+    
+    // Read value based on attribute
+    let value: string | boolean | number;
+    try {
+      switch (attribute) {
+        case 'value':
+          if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+            value = element.value;
+          } else {
+            value = element.getAttribute('value') || '';
+          }
+          break;
+        
+        case 'text':
+          value = element.textContent?.trim() || '';
+          break;
+        
+        case 'checked':
+          if (element instanceof HTMLInputElement) {
+            value = element.checked;
+          } else {
+            value = element.getAttribute('aria-checked') === 'true';
+          }
+          break;
+        
+        case 'selected':
+          if (element instanceof HTMLOptionElement) {
+            value = element.selected;
+          } else {
+            value = element.getAttribute('aria-selected') === 'true';
+          }
+          break;
+        
+        case 'count':
+          // Count matching elements (use the target selector)
+          const selector = target.testId ? `[data-testid="${target.testId}"]` : 
+                          target.id ? `#${target.id}` : 
+                          target.role ? `[role="${target.role}"]` : '*';
+          value = document.querySelectorAll(selector).length;
+          break;
+        
+        default:
+          value = '';
+      }
+      
+      console.log(`[Tier1] 📖 Read ${attribute} from element: ${value}`);
+      
+      return {
+        status: 'success',
+        details: {
+          element,
+          value, // Store the read value in details
+          resolveMetrics: resolveResult.details.resolveMetrics,
+        },
+      };
+    } catch (error) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: error instanceof Error ? error.message : 'Failed to read value',
+      };
+    }
+  }
+
+  /**
+   * Execute keyboard action - Tab, Enter, Escape, shortcuts
+   */
+  private static async executeKeyboard(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { key, modifiers = [], repeat = 1, target } = action.params;
+    
+    if (!key) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No key specified for keyboard action',
+      };
+    }
+    
+    // Focus target element if specified
+    if (target) {
+      const bundle = this.buildLocatorBundle(target);
+      const result = await this.resolveElement(bundle, { kind: 'CLICK' });
+      if (result.status === 'success' && result.details.element instanceof HTMLElement) {
+        result.details.element.focus();
+        await this.sleep(50);
+      }
+    }
+    
+    // Dispatch keyboard events
+    const eventInit: KeyboardEventInit = {
+      key,
+      code: this.keyToCode(key),
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: modifiers.includes('ctrl'),
+      shiftKey: modifiers.includes('shift'),
+      altKey: modifiers.includes('alt'),
+      metaKey: modifiers.includes('meta'),
+    };
+    
+    console.log(`[Tier1] ⌨️ Pressing key: ${key}${modifiers.length > 0 ? ' with ' + modifiers.join('+') : ''} (${repeat}x)`);
+    
+    for (let i = 0; i < repeat; i++) {
+      const activeElement = document.activeElement || document.body;
+      activeElement.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+      activeElement.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+      activeElement.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+      await this.sleep(50);
+    }
+    
+    // Wait for stability after keyboard action
+    await StateWaitEngine.waitForStability({
+      domQuietMs: 150,
+      maxWaitMs: 2000,
+    });
+    
+    return {
+      status: 'success',
+      details: {},
+    };
+  }
+
+  /**
+   * Execute hover action - reveal hover-activated menus
+   */
+  private static async executeHover(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target, hoverDuration = 500, waitForMenu = true } = action.params;
+    
+    if (!target) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No target specified for hover action',
+      };
+    }
+    
+    // Build locator bundle from semantic target
+    const bundle = this.buildLocatorBundle(target);
+    
+    // Build intent for resolver
+    const intent: Intent = { kind: 'CLICK' };
+    
+    // Resolve element
+    const resolveResult = await this.resolveElement(bundle, intent);
+    
+    if (resolveResult.status !== 'success') {
+      return resolveResult;
+    }
+    
+    const element = resolveResult.details.element!;
+    
+    // Check interactability
+    const interactabilityCheck = await this.checkInteractability(element);
+    if (!interactabilityCheck.success) {
+      return {
+        status: 'rejected',
+        code: 'NOT_INTERACTABLE',
+        details: {
+          interactabilityIssue: interactabilityCheck.reason,
+          element,
+        },
+        message: interactabilityCheck.reason,
+      };
+    }
+    
+    // Get element coordinates
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    
+    console.log(`[Tier1] 🖱️ Hovering over element for ${hoverDuration}ms`);
+    
+    // Dispatch mouse events for hover
+    element.dispatchEvent(new MouseEvent('mouseenter', { 
+      bubbles: true, 
+      cancelable: true,
+      view: window,
+      clientX: x, 
+      clientY: y 
+    }));
+    
+    element.dispatchEvent(new MouseEvent('mouseover', { 
+      bubbles: true, 
+      cancelable: true,
+      view: window,
+      clientX: x, 
+      clientY: y 
+    }));
+    
+    element.dispatchEvent(new MouseEvent('mousemove', { 
+      bubbles: true, 
+      cancelable: true,
+      view: window,
+      clientX: x, 
+      clientY: y 
+    }));
+    
+    // Hold hover for duration
+    await this.sleep(hoverDuration);
+    
+    // Optionally wait for menu to appear
+    if (waitForMenu) {
+      await StateWaitEngine.waitForStability({ 
+        domQuietMs: 200, 
+        maxWaitMs: 2000 
+      });
+    }
+    
+    return {
+      status: 'success',
+      details: {
+        element,
+        resolveMetrics: resolveResult.details.resolveMetrics,
+      },
+    };
+  }
+
   // ============================================================================
   // Helper Methods - Integration with Reliable Replayer
   // ============================================================================
@@ -629,7 +1016,51 @@ export class Tier1Executor {
   ): Promise<Tier1ExecutionResult> {
     console.log('[Tier1] Resolving element with', bundle.strategies.length, 'strategies');
     
-    // Use Resolver.resolve() which returns found/ambiguous/not_found
+    // PRIORITY 1: Try recorded fallback selectors FIRST!
+    // These contain container context like "//div[contains(., 'Widget Title')]//button"
+    // which provides the most reliable disambiguation
+    if (bundle.recordedFallbackSelectors && bundle.recordedFallbackSelectors.length > 0) {
+      console.log(`[Tier1] 🎯 Trying ${bundle.recordedFallbackSelectors.length} recorded fallback selectors FIRST...`);
+      
+      for (const selector of bundle.recordedFallbackSelectors) {
+        try {
+          let element: Element | null = null;
+          
+          if (selector.startsWith('//') || selector.startsWith('(//')) {
+            // XPath selector
+            const result = document.evaluate(
+              selector,
+              document,
+              null,
+              XPathResult.FIRST_ORDERED_NODE_TYPE,
+              null
+            );
+            element = result.singleNodeValue as Element | null;
+          } else {
+            // CSS selector
+            element = document.querySelector(selector);
+          }
+          
+          if (element && this.isElementVisible(element)) {
+            console.log(`[Tier1] ✅ Found via recorded fallback selector: "${selector.substring(0, 60)}..."`);
+            return {
+              status: 'success',
+              details: {
+                element,
+                resolveMetrics: { method: 'recorded_fallback_selector' },
+              },
+            };
+          }
+        } catch (e) {
+          // Invalid selector, try next
+          console.warn(`[Tier1] ⚠️ Invalid fallback selector: "${selector.substring(0, 40)}..."`);
+        }
+      }
+      
+      console.log('[Tier1] ℹ️ Recorded fallback selectors didn\'t find element, trying semantic strategies...');
+    }
+    
+    // PRIORITY 2: Use Resolver.resolve() with semantic strategies
     const result: ResolveResult = Resolver.resolve(bundle, intent);
     
     if (result.status === 'found') {
@@ -740,13 +1171,128 @@ export class Tier1Executor {
     if (visibleCandidates.length === 0) return null;
     if (visibleCandidates.length === 1) return { element: visibleCandidates[0].element, reason: 'only visible one' };
     
+    // STEP 1.5: SCOPE-AWARE filtering - use recorded container/widget context!
+    // This is CRITICAL for distinguishing between identical elements in different widgets
+    let scopeFiltered = visibleCandidates;
+    if (bundle.scopeHint) {
+      console.log(`[Tier1] 🎯 Filtering by scope hint: "${bundle.scopeHint}"`);
+      
+      // Helper function for fuzzy title matching (handles dynamic numbers like "STORE48" vs "STORE")
+      const fuzzyTitleMatch = (recorded: string, actual: string): boolean => {
+        if (!recorded || !actual) return false;
+        const r = recorded.toLowerCase().trim();
+        const a = actual.toLowerCase().trim();
+        
+        // Exact match
+        if (r === a) return true;
+        
+        // One contains the other
+        if (r.includes(a) || a.includes(r)) return true;
+        
+        // Strip trailing numbers and compare (e.g., "STORE48" -> "STORE")
+        const rStripped = r.replace(/\d+$/, '').trim();
+        const aStripped = a.replace(/\d+$/, '').trim();
+        
+        if (rStripped && aStripped) {
+          if (rStripped === aStripped) return true;
+          if (rStripped.includes(aStripped) || aStripped.includes(rStripped)) return true;
+        }
+        
+        return false;
+      };
+      
+      const inScope = visibleCandidates.filter((c, idx) => {
+        // Walk up the DOM tree AND shadow DOM to find a container that matches the scope hint
+        let current: Element | null = c.element;
+        const maxLevels = 20; // Increased for shadow DOM depth
+        let level = 0;
+        const scopeHint = bundle.scopeHint!;
+        const isFirstCandidate = idx === 0; // Only log detailed debug for first candidate
+        
+        while (current && level < maxLevels) {
+          // Check headers in this element (light DOM)
+          const headers = current.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [role="heading"]');
+          for (const header of Array.from(headers)) {
+            const headerText = header.textContent?.trim() || '';
+            if (fuzzyTitleMatch(scopeHint, headerText)) {
+              console.log(`[Tier1] ✅ Candidate matched scope via header: "${headerText.substring(0, 50)}"`);
+              return true;
+            }
+          }
+          
+          // Check shadow DOM for titles - ALSO check text content directly!
+          if (current.shadowRoot) {
+            // Method 1: Check headers
+            const shadowHeaders = current.shadowRoot.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [role="heading"]');
+            if (isFirstCandidate) {
+              console.log(`[Tier1] 🔍 Checking ${shadowHeaders.length} headers in shadowRoot of ${current.tagName}`);
+            }
+            for (const header of Array.from(shadowHeaders)) {
+              const headerText = header.textContent?.trim() || '';
+              if (isFirstCandidate && headerText.length > 0) {
+                console.log(`[Tier1] 🔍 Shadow header found: "${headerText.substring(0, 60)}"`);
+              }
+              if (fuzzyTitleMatch(scopeHint, headerText)) {
+                console.log(`[Tier1] ✅ Candidate matched scope via shadow header: "${headerText.substring(0, 50)}"`);
+                return true;
+              }
+            }
+            
+            // Method 2: Check all text content in shadow root for widget title
+            // Some frameworks put titles in spans or divs, not headers
+            const allTextElements = current.shadowRoot.querySelectorAll('span, div, p, label');
+            for (const el of Array.from(allTextElements)) {
+              const text = el.textContent?.trim() || '';
+              // Only check elements with short text (likely labels/titles, not content blocks)
+              if (text.length > 5 && text.length < 100) {
+                if (fuzzyTitleMatch(scopeHint, text)) {
+                  console.log(`[Tier1] ✅ Candidate matched scope via shadow text: "${text.substring(0, 50)}"`);
+                  return true;
+                }
+              }
+            }
+          } else if (isFirstCandidate && current.tagName?.toLowerCase().includes('widget')) {
+            console.log(`[Tier1] ⚠️ ${current.tagName} has no accessible shadowRoot (may be closed)`);
+          }
+          
+          // Move up - handle shadow DOM boundaries!
+          // If current element is in a shadow root, we need to go to the shadow host
+          const rootNode = current.getRootNode();
+          if (rootNode instanceof ShadowRoot) {
+            // We're in a shadow DOM - jump to the host element
+            current = rootNode.host;
+            console.log(`[Tier1] 🔍 Crossed shadow boundary to host: ${current.tagName}`);
+          } else {
+            // Normal DOM traversal
+            current = current.parentElement;
+          }
+          level++;
+        }
+        return false;
+      });
+      
+      if (inScope.length > 0) {
+        scopeFiltered = inScope;
+        console.log(`[Tier1] 🎯 Filtered to ${inScope.length} inside scope "${bundle.scopeHint}"`);
+        if (inScope.length === 1) {
+          return { element: inScope[0].element, reason: `only one in scope "${bundle.scopeHint}"` };
+        }
+      } else {
+        // FAIL SAFELY: Don't click on wrong widget!
+        console.error(`[Tier1] ❌ CRITICAL: No candidates found in recorded scope "${bundle.scopeHint}"`);
+        console.error(`[Tier1] ❌ Refusing to proceed - element may be in wrong widget/container`);
+        console.error(`[Tier1] 💡 Suggestion: Scroll to make the widget visible, or re-record the workflow`);
+        return null; // Fail - let upstream handle the error
+      }
+    }
+    
     // STEP 2: CONTEXT-AWARE filtering based on element role/type
     const role = bundle.strategies.find(s => s.type === 'role')?.value;
-    let contextFiltered = visibleCandidates;
+    let contextFiltered = scopeFiltered;
     
     // For dropdown options: prefer elements inside open listbox/menu
     if (role === 'option' || role === 'menuitem') {
-      const inListbox = visibleCandidates.filter(c => {
+      const inListbox = scopeFiltered.filter(c => {
         const listbox = c.element.closest('[role="listbox"], [role="menu"], ul, [class*="dropdown"], [class*="menu"]');
         return listbox && window.getComputedStyle(listbox).display !== 'none';
       });
@@ -987,12 +1533,21 @@ export class Tier1Executor {
     
     console.log(`[Tier1] Built locator bundle with ${strategies.length} strategies:`, strategies.map(s => `${s.type}:${s.value.substring(0, 20)}`));
     
-    // Build scope if scopeHint provided
+    // Build scope if scopeHint provided - use WIDGET scope for better widget title matching
     const scope = target.scopeHint ? {
-      kind: 'CONTAINER' as const,
-      selector: `[aria-label*="${target.scopeHint}"], [data-testid*="${target.scopeHint}"]`,
-      fallbackText: target.scopeHint,
+      kind: 'WIDGET' as const,
+      title: target.scopeHint,
     } : undefined;
+    
+    if (scope) {
+      console.log(`[Tier1] 🎯 Using WIDGET scope: "${scope.title}"`);
+    }
+    
+    // CRITICAL: Include recorded fallback selectors - these contain container context!
+    // e.g., "//div[descendant::*[contains(normalize-space(.), 'Widget Title')]]//button"
+    if (target.recordedFallbackSelectors && target.recordedFallbackSelectors.length > 0) {
+      console.log(`[Tier1] 📋 Including ${target.recordedFallbackSelectors.length} recorded fallback selectors with container context`);
+    }
     
     return {
       strategies,
@@ -1000,6 +1555,9 @@ export class Tier1Executor {
       disambiguators: target.nearbyText || [],
       tagName: target.role || '',
       role: target.role,
+      // CRITICAL: Pass fallback selectors for reliable disambiguation
+      recordedFallbackSelectors: target.recordedFallbackSelectors,
+      scopeHint: target.scopeHint,
     };
   }
 
@@ -1020,6 +1578,21 @@ export class Tier1Executor {
       isWithinShadowDOM: false,
       recordedTagName: '',
     };
+  }
+
+  /**
+   * Quick check if element is visible (for fallback selector validation)
+   */
+  private static isElementVisible(element: Element): boolean {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element as HTMLElement);
+    
+    if (rect.width === 0 && rect.height === 0) return false;
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    
+    return true;
   }
 
   /**
@@ -1233,6 +1806,27 @@ export class Tier1Executor {
    */
   private static sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  /**
+   * Convert key name to key code for keyboard events
+   */
+  private static keyToCode(key: string): string {
+    const keyCodeMap: Record<string, string> = {
+      'Tab': 'Tab',
+      'Enter': 'Enter',
+      'Escape': 'Escape',
+      'ArrowUp': 'ArrowUp',
+      'ArrowDown': 'ArrowDown',
+      'ArrowLeft': 'ArrowLeft',
+      'ArrowRight': 'ArrowRight',
+      'Backspace': 'Backspace',
+      'Delete': 'Delete',
+      'Space': 'Space',
+      ' ': 'Space',
+    };
+    
+    return keyCodeMap[key] || key;
   }
 }
 

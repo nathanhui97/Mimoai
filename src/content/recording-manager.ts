@@ -33,6 +33,7 @@ import {
   inferSuccessCondition,
   buildStepGoal 
 } from '../lib/intent-inference';
+import { WidgetIdentifierService } from '../lib/widget-identifier';
 import type { LocatorBundle } from '../types/locator';
 import type { Intent, StepGoal } from '../types/intent';
 import type { SuggestedCondition } from '../types/conditions';
@@ -1958,6 +1959,31 @@ export class RecordingManager {
           };
           console.log('GhostWriter: Step recorded successfully. Total steps:', this.lastStep ? '1+' : '1');
 
+          // 🎯 AI Widget Identification (DISABLED - experimental feature)
+          // The DOM-based widget detection (context.container.text) is working reliably
+          // Re-enable this when AI vision can consistently identify correct widget titles
+          const ENABLE_AI_WIDGET_IDENTIFICATION = false;
+          
+          if (ENABLE_AI_WIDGET_IDENTIFICATION) {
+            const widgetIdentificationPromise = (async () => {
+              try {
+                console.log('🎯 GhostWriter: Identifying widget context with AI Vision...');
+                const widgetContext = await WidgetIdentifierService.identifyWidget(target, event);
+                
+                if (widgetContext && !widgetContext.noWidgetFound) {
+                  stepPayload.aiWidgetContext = widgetContext;
+                  console.log(`🎯 GhostWriter: ✅ AI identified widget: "${widgetContext.widgetTitle}" (confidence: ${widgetContext.confidence.toFixed(2)}, method: ${widgetContext.identifiedBy})`);
+                }
+              } catch (widgetError) {
+                console.warn('🎯 GhostWriter: Widget identification failed:', widgetError);
+              }
+            })();
+            
+            this.pendingValidations.push(widgetIdentificationPromise);
+          } else {
+            console.log('🎯 GhostWriter: AI widget identification disabled, using DOM-based detection');
+          }
+
           // Trigger AI validation if selector is fragile (non-blocking, background)
           // TEST MODE: Set to true to force AI validation on all selectors for testing
           const FORCE_AI_VALIDATION = true; // Set to true to test AI validation
@@ -2492,6 +2518,10 @@ export class RecordingManager {
         const scrollY = window.scrollY || window.pageYOffset;
         const currentTimestamp = Date.now();
 
+        // Calculate scroll delta (how much the user actually scrolled)
+        let scrollDeltaX = 0;
+        let scrollDeltaY = 0;
+        
         // Skip if scroll position hasn't changed significantly (less than 50px)
         if (this.lastScrollStep) {
           // Check if this is the same container/window as last time
@@ -2500,24 +2530,34 @@ export class RecordingManager {
             : !this.lastScrollStep.container;
           
           if (sameTarget) {
-            const deltaX = isContainerScroll 
-              ? Math.abs(scrollLeft - (this.lastScrollStep.scrollX || 0))
-              : Math.abs(scrollX - this.lastScrollStep.scrollX);
-            const deltaY = isContainerScroll 
-              ? Math.abs(scrollTop - (this.lastScrollStep.scrollY || 0))
-              : Math.abs(scrollY - this.lastScrollStep.scrollY);
+            scrollDeltaX = isContainerScroll 
+              ? scrollLeft - (this.lastScrollStep.scrollX || 0)
+              : scrollX - this.lastScrollStep.scrollX;
+            scrollDeltaY = isContainerScroll 
+              ? scrollTop - (this.lastScrollStep.scrollY || 0)
+              : scrollY - this.lastScrollStep.scrollY;
             
-            if (deltaX < 50 && deltaY < 50) {
+            if (Math.abs(scrollDeltaX) < 50 && Math.abs(scrollDeltaY) < 50) {
               return; // Not a meaningful scroll
             }
 
             // Skip if same scroll position within 1 second (debounce)
             if ((currentTimestamp - this.lastScrollStep.timestamp) < 1000 &&
-                deltaX < 10 && deltaY < 10) {
+                Math.abs(scrollDeltaX) < 10 && Math.abs(scrollDeltaY) < 10) {
               return; // Duplicate scroll
             }
+          } else {
+            // First scroll in this container - use current position as delta from 0
+            scrollDeltaX = isContainerScroll ? scrollLeft : scrollX;
+            scrollDeltaY = isContainerScroll ? scrollTop : scrollY;
           }
+        } else {
+          // First scroll ever - use current position as delta from 0
+          scrollDeltaX = isContainerScroll ? scrollLeft : scrollX;
+          scrollDeltaY = isContainerScroll ? scrollTop : scrollY;
         }
+        
+        console.log(`📜 GhostWriter: Scroll delta recorded: deltaX=${scrollDeltaX}, deltaY=${scrollDeltaY}`);
 
         const url = window.location.href;
 
@@ -2544,12 +2584,15 @@ export class RecordingManager {
           console.warn('📸 GhostWriter: Failed to capture snapshot for scroll event:', snapshotError);
         }
 
-        // Capture viewport information
+        // Capture viewport information INCLUDING scroll delta for exact replay
         const viewport: import('../types/workflow').ViewportInfo = {
           width: window.innerWidth,
           height: window.innerHeight,
           scrollX,
           scrollY,
+          // 🎯 NEW: Store scroll delta for exact replay!
+          scrollDeltaX,
+          scrollDeltaY,
           // Store container scroll info if this is a container scroll
           ...(isContainerScroll && scrollContainer && {
             elementScrollContainer: {
@@ -2558,6 +2601,9 @@ export class RecordingManager {
                 : scrollContainer.tagName.toLowerCase(),
               scrollTop,
               scrollLeft,
+              // 🎯 NEW: Store delta for container scrolls too
+              scrollDeltaX,
+              scrollDeltaY,
             }
           }),
         };

@@ -51,10 +51,16 @@ export interface ViewportInfo {
   height: number;
   scrollX?: number; // Only included if non-zero
   scrollY?: number; // Only included if non-zero
+  // 🎯 Scroll delta for exact replay (how much user actually scrolled)
+  scrollDeltaX?: number; // Positive = right, Negative = left
+  scrollDeltaY?: number; // Positive = down, Negative = up
   elementScrollContainer?: {
     selector: string;
     scrollTop?: number; // Only included if non-zero
     scrollLeft?: number; // Only included if non-zero
+    // 🎯 Scroll delta for container scrolls
+    scrollDeltaX?: number;
+    scrollDeltaY?: number;
   };
 }
 
@@ -149,6 +155,29 @@ export interface AIEvidence {
     nearbyText?: string[]; // Array of nearby text content
     ariaLabel?: string; // ARIA label if present
   };
+}
+
+/**
+ * AI-identified widget context captured during recording
+ * This is much more reliable than CSS heuristics for widget identification
+ */
+export interface AIWidgetContext {
+  /** Exact title/heading of the widget as identified by AI Vision */
+  widgetTitle: string;
+  /** Confidence score 0-1 */
+  confidence: number;
+  /** Description of the widget for debugging */
+  widgetDescription?: string;
+  /** Visual position description (e.g., "top-left", "center") */
+  visualPosition?: string;
+  /** Unique visual features for additional matching */
+  uniqueFeatures?: string[];
+  /** If no widget container was identified */
+  noWidgetFound?: boolean;
+  /** How the context was identified: ai-vision or fallback-dom */
+  identifiedBy: 'ai-vision' | 'fallback-dom';
+  /** Timestamp when identified */
+  identifiedAt: number;
 }
 
 export interface WorkflowStepPayload {
@@ -278,6 +307,9 @@ export interface WorkflowStepPayload {
   };
   // Phase 6: AI Evidence capture
   aiEvidence?: AIEvidence; // AI context for better understanding and replay
+  
+  // Phase 8: AI-powered widget identification (captured during recording)
+  aiWidgetContext?: AIWidgetContext; // AI-identified widget/container context for reliable execution
   
   // Reliable Replayer enhancements
   locatorBundle?: LocatorBundle;           // Multiple strategies with runtime-scorable features

@@ -30,6 +30,24 @@ interface AgentHint {
   targetRole?: string;
   value?: string;
   completed: boolean;
+  
+  // Context from recording for better matching
+  recordedSelector?: string;      // Primary CSS/XPath selector from recording
+  recordedTestId?: string;        // data-testid if captured
+  recordedAriaLabel?: string;     // aria-label from recording (critical for exact matching)
+  recordedScopeHint?: string;     // Scope from recording (e.g., "Accounts Table", "OFFERS EXPIRING IN NEXT 28 DAYS")
+  recordedRowKey?: string;        // Row key if element was in a table row
+  nearbyText?: string[];          // Nearby anchor text from recording
+  
+  // Natural language context (from AI translation)
+  naturalLanguage?: {
+    intent: string;           // "Open the promotion type dropdown"
+    precondition: string;     // "Page must be on promotion tool"
+    expectedOutcome: string;  // "Dropdown opens with BOGO, FLAT options"
+    dependencies: number[];   // [0] (depends on step 0 being complete)
+  };
+  
+  failureCount?: number;  // Track how many times this hint has failed
 }
 
 interface HistoryEntry {
@@ -130,7 +148,7 @@ interface ExpectedOutcome {
 
 interface DOMAgentResponse {
   // Note: 'navigate' is deprecated - all navigation should use 'click' on UI elements
-  action?: 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip';
+  action?: 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover';
   target?: SemanticTarget;
   description?: string;
   text?: string;
@@ -146,6 +164,19 @@ interface DOMAgentResponse {
   reasoning: string;
   confidence: number;
   hintStepIndex?: number;
+  
+  // For read action
+  attribute?: 'value' | 'text' | 'checked' | 'selected' | 'count';
+  storeAs?: string;
+  
+  // For keyboard action
+  key?: string;
+  modifiers?: Array<'ctrl' | 'shift' | 'alt' | 'meta'>;
+  repeat?: number;
+  
+  // For hover action
+  hoverDuration?: number;
+  waitForMenu?: boolean;
   
   // For recovery mode
   strategy?: 'RETRY_WITH_VISION' | 'RETRY_LOOSER' | 'SCROLL_AND_RETRY' | 'DISMISS_POPUP' | 'GIVE_UP';
@@ -395,6 +426,9 @@ ${currentHint
      ${currentHint.targetRole ? `Target role: ${currentHint.targetRole}` : ''}
      ${currentHint.targetPlaceholder ? `Placeholder: "${currentHint.targetPlaceholder}"` : ''}
      ${currentHint.value ? `Value to enter: "${currentHint.value}"` : ''}
+     ${currentHint.recordedScopeHint ? `📍 LOOK IN WIDGET/SECTION: "${currentHint.recordedScopeHint}" ⚠️ CRITICAL - Element is in this container!` : ''}
+     ${currentHint.recordedAriaLabel ? `🏷️ aria-label: "${currentHint.recordedAriaLabel}"` : ''}
+     ${currentHint.nearbyText?.length > 0 ? `🔍 Nearby text: [${currentHint.nearbyText.join(', ')}]` : ''}
      ${currentHint.failureCount ? `⚠️ This hint has failed ${currentHint.failureCount} times already!` : ''}
      
      ${currentHint.naturalLanguage ? `
@@ -436,10 +470,12 @@ DO NOT invent a new target. DO NOT return a target with role/name/text.
 ONLY return chooseCandidateIndex.
 
 ✅ SEMANTIC MATCHING - Choose the BEST candidate by:
-   1. Matching ROLE (combobox, button, textbox, etc.)
-   2. Matching CONTEXT (scope path, widget title, nearby section)
-   3. Matching NAME/PLACEHOLDER (partial or fuzzy match is OK)
-   4. If only ONE candidate matches the role → select it even if unlabeled
+   1. FIRST: Match recordedScopeHint from hint to candidate's scope/widget (HIGHEST PRIORITY!)
+      - If hint shows "📍 LOOK IN WIDGET/SECTION: XYZ", find candidate with matching scope/widget
+      - Example: hint has "OFFERS EXPIRING", choose candidate with widget="OFFERS EXPIRING..."
+   2. SECOND: Match ROLE (combobox, button, textbox, etc.)
+   3. THIRD: Match NAME/PLACEHOLDER (partial or fuzzy match is OK)
+   4. If only ONE candidate matches both scope AND role → select it even if unlabeled
 
 ❌ ONLY return chooseCandidateIndex: -1 if:
    - The page is in an error state
@@ -466,6 +502,15 @@ Analyze the page and decide the next action. Look at the DOM map to find the ele
   - Hint: "Click dropdown" → any combobox/select in the relevant section
   - Hint: "Enter value in Amount field" → textbox/spinbutton with "amount" in name/placeholder
   - Hint: "Click Submit" → button with text containing "submit", "save", "continue", etc.
+
+🎯 SCOPE/CONTAINER MATCHING (CRITICAL FOR DASHBOARDS):
+- If the hint shows "📍 LOOK IN WIDGET/SECTION:", you MUST find the element in that specific container!
+- Example: "📍 LOOK IN WIDGET/SECTION: OFFERS EXPIRING IN NEXT 28 DAYS"
+  → Look for a widget/card/section with this title in the DOM map
+  → ONLY select elements within that section
+  → If multiple "More Options" buttons exist, choose the one in the CORRECT widget
+- When returning target, ALWAYS include "scopeHint" with the recorded scope value
+- This is essential for pages with repeated elements (dashboards, tables, lists)
 
 PRIORITY ORDER (follow strictly):
 1. 🔽 DROPDOWN OPEN? → MUST click an option before anything else
@@ -500,6 +545,18 @@ PRIORITY ORDER (follow strictly):
 - **scroll**: Scroll to reveal hidden elements (use when needed element isn't visible)
   - Use with "direction": "down" or "up" and "amount": pixels (e.g., 300)
   - Example: {"action": "scroll", "direction": "down", "amount": 300}
+- **read**: Query element values (check if field already filled, read text, etc.)
+  - Use to verify state before acting
+  - Example: {"action": "read", "target": {...}, "attribute": "value", "storeAs": "accountName"}
+  - Attributes: "value", "text", "checked", "selected", "count"
+- **keyboard**: Press keyboard keys (Tab, Enter, Escape, shortcuts)
+  - Use for navigation or form submission via keyboard
+  - Example: {"action": "keyboard", "key": "Tab", "repeat": 2}
+  - Example: {"action": "keyboard", "key": "Enter"}
+  - Example: {"action": "keyboard", "key": "s", "modifiers": ["ctrl"]}
+- **hover**: Hover over element to reveal menus
+  - Use for hover-activated dropdowns and menus
+  - Example: {"action": "hover", "target": {...}, "hoverDuration": 500}
 - **wait**: Wait for page to stabilize (rarely needed, executor auto-waits)
 - **skip**: Skip current hint (element doesn't exist or already complete)
 - **done**: All steps complete
@@ -507,35 +564,54 @@ PRIORITY ORDER (follow strictly):
 
 Respond with a JSON object:
 ${currentCandidates.length > 0 ? `
-🚨 WHEN CANDIDATES ARE PROVIDED (as above), USE THIS FORMAT:
+⛔⛔⛔ CRITICAL: ${currentCandidates.length} CANDIDATES EXIST - YOU MUST USE chooseCandidateIndex ⛔⛔⛔
+
+YOUR RESPONSE MUST LOOK EXACTLY LIKE THIS:
 {
-  "chooseCandidateIndex": <0-${currentCandidates.length - 1}> or -1 if none match,
-  "action": "click" | "type" | "select" | "scroll" | "wait" | "skip" | "done" | "fail",
-  "text": "text to type (if action is type)",
-  "direction": "down" | "up" (if action is scroll),
-  "amount": 300 (if action is scroll, pixels to scroll),
-  "reasoning": "why you chose this action/candidate",
-  "confidence": 0.0-1.0,
+  "chooseCandidateIndex": 2,
+  "action": "click",
+  "reasoning": "Candidate 2 is in the correct widget",
+  "confidence": 1.0,
   "hintStepIndex": ${currentHintIndex}
 }
 
-DO NOT include "target" field when candidates are provided. Use chooseCandidateIndex instead.
+⚠️⚠️⚠️ FORBIDDEN - DO NOT DO THIS: ⚠️⚠️⚠️
+{
+  "target": {"role": "button", "name": "..."} ← WRONG! NEVER USE "target" WHEN CANDIDATES EXIST!
+}
+
+REQUIRED FIELDS:
+- "chooseCandidateIndex": INTEGER from 0 to ${currentCandidates.length - 1} (REQUIRED!)
+- "action": "click" | "type" | "select" | etc.
+- "text": "text to type" (only if action is type)
+- "reasoning": "why you chose this candidate"
+- "confidence": 0.0-1.0
+- "hintStepIndex": ${currentHintIndex}
+
+THE "target" FIELD IS FORBIDDEN WHEN CANDIDATES EXIST. DO NOT INCLUDE IT.
 ` : `
 WHEN NO CANDIDATES (free-form target):
 {
-  "action": "click" | "type" | "select" | "scroll" | "wait" | "done" | "fail" | "skip",
+  "action": "click" | "type" | "select" | "scroll" | "read" | "keyboard" | "hover" | "wait" | "done" | "fail" | "skip",
   "target": {
     "testId": "test-id if shown in DOM map (MOST RELIABLE)",
     "role": "button" | "link" | "textbox" | "combobox" | "option" | etc.,
     "name": "accessible name or label",
     "text": "visible text content",
     "id": "id attribute if shown",
-    "scopeHint": "region name if element is in a specific area"
+    "scopeHint": "USE THE recordedScopeHint FROM CURRENT HINT IF PROVIDED - this is critical for disambiguation!"
   },
   "text": "text to type (for type action)",
   "option": "option text (for select action)",
   "direction": "down" | "up" (for scroll action),
   "amount": 300 (for scroll action, pixels),
+  "attribute": "value" | "text" | "checked" | "selected" | "count" (for read action),
+  "storeAs": "variableName" (for read action, optional),
+  "key": "Tab" | "Enter" | "Escape" | etc. (for keyboard action),
+  "modifiers": ["ctrl", "shift", "alt", "meta"] (for keyboard action, optional),
+  "repeat": 1 (for keyboard action, optional),
+  "hoverDuration": 500 (for hover action, optional),
+  "waitForMenu": true (for hover action, optional),
   "expectedOutcome": {
     "urlContains": "expected URL fragment",
     "textAppears": "expected text after action"
@@ -770,7 +846,7 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     }
     
     // Regular action response
-    const validActions = ['click', 'type', 'select', 'scroll', 'navigate', 'wait', 'assert', 'done', 'fail', 'skip'];
+    const validActions = ['click', 'type', 'select', 'scroll', 'navigate', 'wait', 'assert', 'done', 'fail', 'skip', 'read', 'keyboard', 'hover'];
     const action = validActions.includes(parsed.action) ? parsed.action : 'fail';
     
     // Build response
@@ -874,6 +950,33 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     // Add fail reason
     if (parsed.reason) {
       response.reason = parsed.reason;
+    }
+    
+    // Add read action params
+    if (parsed.attribute) {
+      response.attribute = parsed.attribute;
+    }
+    if (parsed.storeAs) {
+      response.storeAs = parsed.storeAs;
+    }
+    
+    // Add keyboard action params
+    if (parsed.key) {
+      response.key = parsed.key;
+    }
+    if (parsed.modifiers) {
+      response.modifiers = parsed.modifiers;
+    }
+    if (parsed.repeat) {
+      response.repeat = parsed.repeat;
+    }
+    
+    // Add hover action params
+    if (parsed.hoverDuration !== undefined) {
+      response.hoverDuration = parsed.hoverDuration;
+    }
+    if (parsed.waitForMenu !== undefined) {
+      response.waitForMenu = parsed.waitForMenu;
     }
     
     return response;

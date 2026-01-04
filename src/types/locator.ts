@@ -71,6 +71,21 @@ export interface LocatorBundle {
   tagName: string;
   /** Original element role for validation */
   role?: string;
+  
+  /**
+   * Recorded fallback selectors WITH container context.
+   * These are CSS/XPath selectors that include the container/widget text.
+   * e.g., "//div[descendant::*[contains(normalize-space(.), 'Widget Title')]]//button"
+   * 
+   * CRITICAL: These should be tried FIRST as they provide the most reliable disambiguation!
+   */
+  recordedFallbackSelectors?: string[];
+  
+  /**
+   * Scope hint text from recording (e.g., widget title, container text).
+   * Used to filter candidates when fallback selectors don't work.
+   */
+  scopeHint?: string;
 }
 
 /**
@@ -303,6 +318,8 @@ export function isLikelyDynamicText(text: string): boolean {
   
   return dynamicPatterns.some(pattern => pattern.test(text));
 }
+
+
 
 
 

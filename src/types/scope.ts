@@ -221,17 +221,124 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
     }
     
     case 'WIDGET': {
-      // Find widget by title
-      const widgets = doc.querySelectorAll(
-        '[class*="widget"], [class*="card"], [class*="panel"], gridster-item'
-      );
-      for (const widget of Array.from(widgets)) {
-        const titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
-        const title = titleEl?.textContent?.trim().toLowerCase() || '';
-        if (title.includes(scope.title.toLowerCase())) {
-          return widget;
+      // Find widget by title - comprehensive search for various widget types
+      const searchTitle = scope.title.toLowerCase();
+      const searchTitleStripped = searchTitle.replace(/\d+$/g, '').trim(); // Remove trailing numbers
+      
+      console.log(`[Scope] 🔍 Searching for widget: "${scope.title}" (stripped: "${searchTitleStripped}")`);
+      
+      // Method 1: Search in common widget container types (generic patterns only!)
+      const widgetSelectors = [
+        // Web component patterns (check FIRST - most specific)
+        'gs-report-widget-element',  // Gainsight (TEMPORARY for debugging)
+        '*[class$="-widget-element"]',
+        '*[class$="-report-element"]',
+        '*[class$="-widget"]',
+        // Generic patterns that work across different sites
+        '[class*="widget"]',
+        '[class*="card"]', 
+        '[class*="panel"]',
+        '[class*="report"]',
+        '[class*="dashboard-item"]',
+        '[class*="tile"]',
+        '[class*="module"]',
+        'gridster-item',
+        '[data-widget-id]',
+        '[data-widget]',
+        '[data-report-id]',
+        '[role="region"]',
+      ];
+      
+      let widgetsChecked = 0;
+      const uniqueTitles = new Set<string>();
+      
+      for (const selector of widgetSelectors) {
+        try {
+          const widgets = doc.querySelectorAll(selector);
+          for (const widget of Array.from(widgets)) {
+            widgetsChecked++;
+            
+            // Skip if widget is not visible
+            const rect = widget.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) continue;
+            
+            // Check title in heading elements (light DOM)
+            let titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
+            let title = titleEl?.textContent?.trim() || '';
+            
+            // If no title in light DOM, check shadow DOM!
+            if (!title && widget.shadowRoot) {
+              titleEl = widget.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
+              title = titleEl?.textContent?.trim() || '';
+            }
+            
+            if (!title) continue;
+            
+            // Track unique titles for debugging
+            const titleShort = title.substring(0, 60);
+            if (!uniqueTitles.has(titleShort)) {
+              uniqueTitles.add(titleShort);
+              console.log(`[Scope] 🔍 Unique widget ${uniqueTitles.size}: "${titleShort}"`);
+            }
+            
+            const titleLower = title.toLowerCase();
+            const titleStripped = titleLower.replace(/\d+$/g, '').trim();
+            
+            // BIDIRECTIONAL fuzzy matching: handles dynamic numbers like "STORE107" vs "STORE"
+            if (titleLower.includes(searchTitle) || searchTitle.includes(titleLower)) {
+              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (exact match)`);
+              return widget;
+            }
+            
+            // Strip trailing numbers for even more fuzzy matching
+            if (titleStripped && searchTitleStripped && titleStripped.length > 10 && 
+                (titleStripped.includes(searchTitleStripped) || searchTitleStripped.includes(titleStripped))) {
+              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - stripped numbers)`);
+              return widget;
+            }
+            
+            // Also check aria-label on the widget itself
+            const ariaLabel = widget.getAttribute('aria-label')?.toLowerCase() || '';
+            if (ariaLabel && (ariaLabel.includes(searchTitle) || searchTitle.includes(ariaLabel))) {
+              console.log(`[Scope] ✅ Found widget via aria-label`);
+              return widget;
+            }
+          }
+        } catch (e) {
+          // Invalid selector, continue
         }
       }
+      
+      console.log(`[Scope] 🔍 Checked ${widgetsChecked} widgets (${uniqueTitles.size} unique titles), none matched`);
+      console.log(`[Scope] 🔍 Unique titles found:`, Array.from(uniqueTitles).join(', '));
+      
+      // Method 2: Find heading with matching text and return its container
+      const headings = doc.querySelectorAll('h1, h2, h3, h4, h5, h6, [role="heading"]');
+      for (const heading of Array.from(headings)) {
+        const text = heading.textContent?.trim().toLowerCase() || '';
+        // Bidirectional fuzzy matching
+        if (text && (text.includes(searchTitle) || searchTitle.includes(text))) {
+          // Walk up to find a reasonable container
+          let container = heading.parentElement;
+          for (let i = 0; i < 5 && container; i++) {
+            // Stop if we hit something that looks like a widget container
+            const className = container.className?.toLowerCase() || '';
+            const tagName = container.tagName?.toLowerCase() || '';
+            if (className.includes('widget') || className.includes('card') || 
+                className.includes('panel') || className.includes('report') ||
+                tagName.includes('widget') || tagName.includes('report')) {
+              console.log(`[Scope] ✅ Found widget container via heading "${heading.textContent?.trim()}"`);
+              return container;
+            }
+            container = container.parentElement;
+          }
+          // Fallback: return the parent of the heading
+          console.log(`[Scope] ⚠️ Using heading parent as widget container for "${heading.textContent?.trim()}"`);
+          return heading.parentElement;
+        }
+      }
+      
+      console.log(`[Scope] ❌ Widget with title "${scope.title}" not found`);
       return null;
     }
     
@@ -267,6 +374,7 @@ function isElementVisible(element: Element): boolean {
   
   return true;
 }
+
 
 
 

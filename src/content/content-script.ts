@@ -487,6 +487,17 @@ function handleFullMessage(
 
       case 'EXECUTE_WORKFLOW_AGENT': {
         // AI Agent execution - observe-act loop
+        // ⚠️ CRITICAL: Only run agent in the MAIN FRAME (frameId === 0)
+        // If we run in iframes, we'll have multiple agents competing and looking at empty iframe content
+        if (currentFrameId !== 0) {
+          console.log(`[Content] Ignoring EXECUTE_WORKFLOW_AGENT in iframe (frameId: ${currentFrameId})`);
+          // IMPORTANT: Don't call sendResponse() in iframes!
+          // Chrome only accepts the first response, and if an iframe responds first,
+          // the main frame's response will be ignored. By returning false without
+          // responding, we let the main frame be the only responder.
+          return false;
+        }
+        
         // Check if AI Agent is enabled
         if (!FeatureFlags.AI_AGENT_LOOP) {
           sendResponse({
@@ -682,12 +693,14 @@ try {
   // Check if there's a pending workflow execution to resume after navigation
   const pendingExecutionStr = sessionStorage.getItem('ghostwriter_pending_execution');
   if (pendingExecutionStr) {
-    console.log('🚀 GhostWriter: Found pending workflow execution, resuming...');
+    console.log('🚀 GhostWriter: Found pending workflow execution in sessionStorage, resuming...');
+    console.log('⚠️ WARNING: This may be an OLD cached workflow! If you want to run a NEW workflow, run this in console: sessionStorage.clear()');
     sessionStorage.removeItem('ghostwriter_pending_execution');
     
     try {
       const pendingExecution = JSON.parse(pendingExecutionStr);
       const { steps, workflowId, variableValues } = pendingExecution;
+      console.log(`🆔 Resuming workflow ID: ${workflowId} (${steps.length} steps)`);
       
       // Wait for page to be fully loaded before starting execution
       const startExecution = async () => {

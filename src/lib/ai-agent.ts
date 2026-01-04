@@ -18,13 +18,14 @@ import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './
 import { VisionAssist } from './tier3-vision-assist';
 import { RecoveryEngine } from '../content/recovery-engine';
 import type { WorkflowStepPayload, SavedWorkflow } from '../types/workflow';
+import { isWorkflowStepPayload } from '../types/workflow';
 
 // ============================================================================
 // Types
 // ============================================================================
 
 /** Actions the agent can take */
-export type AgentActionType = 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip';
+export type AgentActionType = 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover';
 
 /** 
  * Semantic target for element identification (DOM-based, not coordinates)
@@ -50,6 +51,15 @@ export interface SemanticTarget {
   
   // Text matching mode
   textMatch?: 'exact' | 'contains' | 'startsWith' | 'fuzzy';
+  
+  /**
+   * Recorded fallback selectors WITH container context.
+   * These are CSS/XPath selectors that include the container/widget text.
+   * e.g., "//div[descendant::*[contains(normalize-space(.), 'Widget Title')]]//button"
+   * 
+   * CRITICAL: These should be tried FIRST as they provide the most reliable disambiguation!
+   */
+  recordedFallbackSelectors?: string[];
 }
 
 /** Expected outcome after an action (for verification) */
@@ -92,6 +102,7 @@ export interface AgentActionParams {
   direction?: 'up' | 'down' | 'left' | 'right';
   amount?: number;
   scrollTarget?: SemanticTarget; // Element to scroll within
+  scrollContainerSelector?: string; // CSS selector for scroll container (e.g., ".main-content")
   
   // For navigate
   url?: string;
@@ -105,6 +116,19 @@ export interface AgentActionParams {
   
   // For fail
   reason?: string;
+  
+  // For read - query element values
+  attribute?: 'value' | 'text' | 'checked' | 'selected' | 'count';
+  storeAs?: string;            // Optional: store in agent memory
+  
+  // For keyboard - Tab, Enter, Escape, shortcuts
+  key?: 'Tab' | 'Enter' | 'Escape' | 'ArrowDown' | 'ArrowUp' | 'ArrowLeft' | 'ArrowRight' | string;
+  modifiers?: Array<'ctrl' | 'shift' | 'alt' | 'meta'>;
+  repeat?: number;             // Press key N times
+  
+  // For hover - reveal menus
+  hoverDuration?: number;      // How long to hover (ms)
+  waitForMenu?: boolean;        // Wait for menu to appear
   
   // Expected outcome (for verification)
   expectedOutcome?: ExpectedOutcome;
@@ -144,7 +168,9 @@ export interface AgentHint {
   
   // New fields for candidate matching
   recordedSelector?: string;      // Primary CSS/XPath selector from recording
+  recordedFallbackSelectors?: string[];  // Fallback selectors WITH container context (XPaths like //div[contains(.,"Widget Title")]//button)
   recordedTestId?: string;        // data-testid if captured
+  recordedAriaLabel?: string;     // aria-label from recording (critical for exact matching)
   recordedScopeHint?: string;     // Scope from recording (e.g., "Accounts Table")
   recordedRowKey?: string;        // Row key if element was in a table row
   nearbyText?: string[];          // Nearby anchor text from recording
@@ -156,6 +182,11 @@ export interface AgentHint {
     expectedOutcome: string;  // "Dropdown opens with BOGO, FLAT options"
     dependencies: number[];   // [0] (depends on step 0 being complete)
   };
+  
+  // For SCROLL actions
+  scrollAmount?: number;      // Recorded scroll distance in pixels
+  scrollDirection?: 'up' | 'down' | 'left' | 'right';
+  scrollContainer?: string;   // CSS selector for scroll container (e.g., ".main-content")
 }
 
 /** Current observation of the page (DOM-first, screenshot optional) */
@@ -218,6 +249,7 @@ export interface AgentState {
   status: 'running' | 'completed' | 'failed' | 'paused';
   startTime: number;
   variableValues?: Record<string, string>;
+  memory?: Record<string, string | boolean | number>; // NEW: Store values read during execution
 }
 
 /** Result of agent execution */
@@ -273,6 +305,10 @@ export class AIAgent {
    */
   async run(workflow: SavedWorkflow, variableValues?: Record<string, string>): Promise<AgentResult> {
     console.log('[AIAgent] Starting workflow execution');
+    console.log(`[AIAgent] 🆔 Workflow ID: ${workflow.id}`);
+    console.log(`[AIAgent] 📝 Workflow Name: ${workflow.name || 'Unnamed'}`);
+    console.log(`[AIAgent] 📅 Created: ${workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : 'Unknown'}`);
+    console.log(`[AIAgent] 📊 Total steps: ${workflow.steps.length}`);
     
     // Initialize state
     this.state = {
@@ -284,6 +320,7 @@ export class AIAgent {
       status: 'running',
       startTime: Date.now(),
       variableValues,
+      memory: {}, // NEW: Initialize agent memory
     };
 
     console.log(`[AIAgent] Goal: ${this.state.goal}`);
@@ -352,6 +389,18 @@ export class AIAgent {
         
         if (currentHint) {
           console.log(`[AIAgent] 📍 Current hint: "${currentHint.description}", completed: ${currentHint.completed}`);
+          
+          // Safety check: Skip if this hint is already marked as skipped or completed
+          if (currentHint.skipped) {
+            console.warn(`[AIAgent] ⏭️ Current hint ${this.state.currentHintIndex} is already skipped, moving to next`);
+            this.state.currentHintIndex++;
+            continue;
+          }
+          if (currentHint.completed) {
+            console.warn(`[AIAgent] ⏭️ Current hint ${this.state.currentHintIndex} is already completed, moving to next`);
+            this.state.currentHintIndex++;
+            continue;
+          }
         }
         
         // FAST PATH DISABLED FOR AI AGENT
@@ -391,21 +440,26 @@ export class AIAgent {
         if (currentHint?.actionType === 'scroll') {
           console.log(`[AIAgent] 📜 Executing SCROLL hint deterministically`);
           
-          // Create scroll action based on hint description
-          // Extract direction from description (e.g., "Scroll down to the 'Continue' button")
-          const description = currentHint.description.toLowerCase();
-          const direction = description.includes('down') ? 'down' : 
-                           description.includes('up') ? 'up' : 'down'; // Default down
-          const amount = 300; // Standard scroll amount
+          // Use recorded scroll amount, direction, and container (critical for lazy-loaded widgets!)
+          const direction = currentHint.scrollDirection || 'down';
+          const amount = currentHint.scrollAmount || 300;
+          const containerSelector = currentHint.scrollContainer;
+          
+          if (containerSelector) {
+            console.log(`[AIAgent] 📜 Scroll: ${direction} by ${amount}px in "${containerSelector}" (recorded)`);
+          } else {
+            console.log(`[AIAgent] 📜 Scroll: ${direction} by ${amount}px on window (${currentHint.scrollAmount ? 'recorded' : 'default'})`);
+          }
           
           const scrollAction: AgentAction = {
             type: 'scroll',
             params: {
               direction,
               amount,
+              scrollContainerSelector: containerSelector,
               description: currentHint.description,
             },
-            reasoning: `Executing recorded scroll action: ${currentHint.description}`,
+            reasoning: `Executing recorded scroll action: ${direction} ${amount}px${containerSelector ? ` in ${containerSelector}` : ''}`,
             confidence: 1.0,
             hintStepIndex: this.state.currentHintIndex,
           };
@@ -430,7 +484,42 @@ export class AIAgent {
             this.state.hints[this.state.currentHintIndex].failureCount = 0;
             this.state.currentHintIndex++;
             console.log(`[AIAgent] ✅ Scroll completed, advanced to hint ${this.state.currentHintIndex}`);
-            await this.sleep(500); // Wait for scroll to complete
+            
+            // 🎯 CRITICAL: Wait for lazy-loaded content to render after scroll
+            // Check if the NEXT hint requires a specific widget/container
+            const nextHint = this.state.hints[this.state.currentHintIndex];
+            if (nextHint?.recordedScopeHint) {
+              console.log(`[AIAgent] ⏳ Waiting for widget "${nextHint.recordedScopeHint}" to become visible...`);
+              
+              const maxWaitMs = 5000; // Wait up to 5 seconds
+              const checkIntervalMs = 500;
+              const startWait = Date.now();
+              let widgetFound = false;
+              
+              while (Date.now() - startWait < maxWaitMs) {
+                // Check if the widget is now visible in the DOM
+                const { resolveScopeContainer } = await import('../types/scope');
+                const widgetElement = resolveScopeContainer({
+                  kind: 'WIDGET',
+                  title: nextHint.recordedScopeHint,
+                }, document);
+                
+                if (widgetElement) {
+                  console.log(`[AIAgent] ✅ Widget "${nextHint.recordedScopeHint}" is now visible (waited ${Date.now() - startWait}ms)`);
+                  widgetFound = true;
+                  break;
+                }
+                
+                await this.sleep(checkIntervalMs);
+              }
+              
+              if (!widgetFound) {
+                console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found after ${maxWaitMs}ms - continuing anyway`);
+              }
+            } else {
+              // No specific widget required, just wait for general page stability
+              await this.sleep(500);
+            }
           } else {
             // Scroll failed - increment failure count
             this.state.hints[this.state.currentHintIndex].failureCount = 
@@ -564,8 +653,22 @@ export class AIAgent {
                 this.state.currentHintIndex = nextIndex;
                 console.log(`[AIAgent] 📍 Advanced to next incomplete hint: ${nextIndex}`);
               } else {
-                // No more hints - might be done or stuck
-                console.log(`[AIAgent] 📍 No more incomplete hints`);
+                // No more hints - check if we completed enough to consider it a success
+                const completedCount = this.state.hints.filter(h => h.completed).length;
+                const skippedCount = this.state.hints.filter(h => h.skipped).length;
+                const totalCount = this.state.hints.length;
+                
+                console.log(`[AIAgent] 📍 No more incomplete hints (${completedCount} completed, ${skippedCount} skipped, ${totalCount} total)`);
+                
+                // If we completed at least 70% of hints, consider it a success
+                if (completedCount >= totalCount * 0.7) {
+                  console.log(`[AIAgent] ✅ Completed ${completedCount}/${totalCount} hints (>70%), marking as success`);
+                  this.state.status = 'completed';
+                } else {
+                  console.log(`[AIAgent] ❌ Only completed ${completedCount}/${totalCount} hints (<70%), marking as failed`);
+                  this.state.status = 'failed';
+                }
+                break; // Exit the loop!
               }
             } else {
               console.log(`[AIAgent] ⚠️ Hint ${failedIndex} failed (${hint.failureCount}/3 failures)`);
@@ -747,6 +850,14 @@ export class AIAgent {
         value: h.value,
         completed: h.completed,
         skipped: h.skipped,
+        failureCount: h.failureCount,
+        // Include recorded context for better matching (CRITICAL for disambiguation!)
+        recordedSelector: h.recordedSelector,
+        recordedTestId: h.recordedTestId,
+        recordedAriaLabel: h.recordedAriaLabel,
+        recordedScopeHint: h.recordedScopeHint,  // ⭐ KEY for widget/container disambiguation
+        recordedRowKey: h.recordedRowKey,
+        nearbyText: h.nearbyText,
         // Include natural language context if available
         naturalLanguage: h.naturalLanguage,
       })),
@@ -798,7 +909,9 @@ export class AIAgent {
       console.log('[AIAgent] 📤 Hints status:', payload.hints.map((h: any, i: number) => `${i}:${h.completed?'✅':'⬜'}`).join(' '));
       console.log('[AIAgent] 📤 Candidates:', (payload as any).currentCandidates?.length || 0, 'sent to LLM');
       if ((payload as any).currentCandidates?.length > 0) {
-        console.log('[AIAgent] 📤 Top 3 candidates:', (payload as any).currentCandidates.slice(0, 3).map((c: any) => `[${c.role}] "${c.name}" id="${c.id || 'none'}"`));
+        console.log('[AIAgent] 📤 Top 3 candidates:', (payload as any).currentCandidates.slice(0, 3).map((c: any, i: number) => 
+          `${i}: [${c.role}] "${c.name}" widget="${c.widgetTitle || 'none'}" (score: ${c.score})`
+        ));
       }
       console.log('[AIAgent] DOM map preview (FRESH):', freshDomMapText.substring(0, 300) + '...');
       
@@ -843,21 +956,84 @@ export class AIAgent {
         };
       }
       
+      // CRITICAL: If AI returned chooseCandidateIndex, convert to target
+      let resolvedTarget = result.target;
+      let candidateIndex: number | undefined = undefined;
+      
+      // Method 1: AI returned chooseCandidateIndex directly
+      if (typeof result.chooseCandidateIndex === 'number' && result.chooseCandidateIndex >= 0) {
+        candidateIndex = result.chooseCandidateIndex;
+        console.log(`[AIAgent] 🎯 AI returned chooseCandidateIndex: ${candidateIndex}`);
+      }
+      // Method 2: FALLBACK - Parse candidate index from reasoning (AI often says "Candidate X" in reasoning)
+      else if (result.reasoning && currentCandidates.length > 0) {
+        // Look for "I will choose candidate X" or "choose candidate X" (the final decision)
+        let match = result.reasoning.match(/(?:I will choose|choose)\s+[Cc]andidate\s*(\d+)/);
+        if (!match) {
+          // Fallback: Find last occurrence of "Candidate X" in reasoning
+          const allMatches = Array.from(result.reasoning.matchAll(/[Cc]andidate\s*(\d+)/g));
+          if (allMatches.length > 0) {
+            match = allMatches[allMatches.length - 1]; // Use LAST mention, not first!
+          }
+        }
+        if (match) {
+          candidateIndex = parseInt(match[1], 10);
+          console.log(`[AIAgent] 🔍 Extracted candidate index ${candidateIndex} from reasoning (last mention)`);
+        }
+      }
+      
+      // If we have a candidate index (from either method), resolve it
+      if (typeof candidateIndex === 'number' && candidateIndex >= 0 && candidateIndex < currentCandidates.length) {
+        const chosenCandidate = currentCandidates[candidateIndex];
+        if (chosenCandidate) {
+          console.log(`[AIAgent] 🎯 Using candidate ${candidateIndex}: [${chosenCandidate.role}] "${chosenCandidate.name}" widget="${chosenCandidate.widgetTitle || 'none'}"`);
+          resolvedTarget = {
+            role: chosenCandidate.role,
+            name: chosenCandidate.name,
+            text: chosenCandidate.text,
+            testId: chosenCandidate.attrs?.testId,
+            id: chosenCandidate.attrs?.id,
+            placeholder: chosenCandidate.attrs?.placeholder,
+            // CRITICAL: Include scope hint from candidate for disambiguation!
+            scopeHint: chosenCandidate.widgetTitle || chosenCandidate.scopePath?.[0],
+          };
+        }
+      } else if (typeof candidateIndex === 'number') {
+        console.warn(`[AIAgent] ⚠️ Candidate index ${candidateIndex} out of range (have ${currentCandidates.length} candidates)`);
+      }
+      
       // Build action with semantic target (not coordinates)
+      // CRITICAL: Include fallback selectors from the hint for reliable disambiguation!
+      const fallbackSelectorsFromHint = nextIncompleteHint?.recordedFallbackSelectors;
+      const scopeHintFromHint = nextIncompleteHint?.recordedScopeHint;
+      
+      // Log scope hint usage for debugging
+      if (scopeHintFromHint) {
+        console.log(`[AIAgent] 📌 Using RECORDED scope hint: "${scopeHintFromHint}"`);
+        if (resolvedTarget?.scopeHint && resolvedTarget.scopeHint !== scopeHintFromHint) {
+          console.warn(`[AIAgent] ⚠️ AI picked wrong widget "${resolvedTarget.scopeHint}" - overriding with recorded: "${scopeHintFromHint}"`);
+        }
+      }
+      
       const action: AgentAction = {
         type: result.action || 'fail',
         params: {
           // Semantic target for element identification
-          target: result.target ? {
-            role: result.target.role,
-            name: result.target.name,
-            text: result.target.text,
-            testId: result.target.testId,
-            id: result.target.id,
-            placeholder: result.target.placeholder,
-            scopeHint: result.target.scopeHint,
-            nearbyText: result.target.nearbyText,
-            index: result.target.index,
+          target: resolvedTarget ? {
+            role: resolvedTarget.role,
+            name: resolvedTarget.name,
+            text: resolvedTarget.text,
+            testId: resolvedTarget.testId,
+            id: resolvedTarget.id,
+            placeholder: resolvedTarget.placeholder,
+            // CRITICAL: ALWAYS use recorded scope hint over candidate's widget!
+            // The recorded scope hint is what the user actually clicked on during recording.
+            // The candidate's widget could be wrong if AI picked wrong candidate.
+            scopeHint: scopeHintFromHint || resolvedTarget.scopeHint,
+            nearbyText: resolvedTarget.nearbyText,
+            index: resolvedTarget.index,
+            // CRITICAL: Include recorded fallback selectors for reliable disambiguation!
+            recordedFallbackSelectors: resolvedTarget.recordedFallbackSelectors || fallbackSelectorsFromHint,
           } : undefined,
           description: result.description,
           
@@ -881,6 +1057,19 @@ export class AIAgent {
           amount: result.amount,
           duration: result.duration,
           reason: result.reason,
+          
+          // For read action
+          attribute: result.attribute,
+          storeAs: result.storeAs,
+          
+          // For keyboard action
+          key: result.key,
+          modifiers: result.modifiers,
+          repeat: result.repeat,
+          
+          // For hover action
+          hoverDuration: result.hoverDuration,
+          waitForMenu: result.waitForMenu,
         },
         reasoning: result.reasoning || 'No reasoning provided',
         confidence: result.confidence || 0,
@@ -922,6 +1111,16 @@ export class AIAgent {
       
       if (result.status === 'success') {
         console.log('[AIAgent] ✅ Action succeeded');
+        
+        // If this was a read action, store the value in memory
+        if (currentAction.type === 'read' && currentAction.params.storeAs && result.details?.value !== undefined) {
+          if (!this.state.memory) {
+            this.state.memory = {};
+          }
+          this.state.memory[currentAction.params.storeAs] = result.details.value;
+          console.log(`[AIAgent] 💾 Stored value in memory: ${currentAction.params.storeAs} = ${result.details.value}`);
+        }
+        
         return { success: true };
       }
       
@@ -1285,7 +1484,49 @@ export class AIAgent {
     // Score ALL interactive elements (don't filter first - let scoring decide)
     const allElements = [...domMap.interactiveElements, ...domMap.formFields];
     
-    const scored = allElements.map(el => ({
+    // 🎯 PRE-FILTER: If we have a recorded scope hint, only consider elements in that widget
+    // This ensures the AI ONLY sees candidates from the correct widget!
+    let candidatePool = allElements;
+    if (hint.recordedScopeHint) {
+      const scopeHint = hint.recordedScopeHint.toLowerCase();
+      const inScope = allElements.filter(el => {
+        // Check widgetTitle (exact match or contains)
+        if (el.widgetTitle && el.widgetTitle.toLowerCase().includes(scopeHint)) {
+          return true;
+        }
+        // Check scopePath (element's container hierarchy)
+        if (el.scopePath?.some(s => s.toLowerCase().includes(scopeHint))) {
+          return true;
+        }
+        // Fuzzy match for titles with dynamic numbers (e.g., "STORE...119" vs "STORE...")
+        if (el.widgetTitle) {
+          const baseScope = scopeHint.replace(/\d+$/g, '').trim();
+          const baseWidget = el.widgetTitle.toLowerCase().replace(/\d+$/g, '').trim();
+          if (baseScope.length > 10 && baseWidget.includes(baseScope)) {
+            return true;
+          }
+        }
+        return false;
+      });
+      
+      if (inScope.length > 0) {
+        candidatePool = inScope;
+        console.log(`[AIAgent] 🎯 Pre-filtered to ${inScope.length} elements in recorded scope "${hint.recordedScopeHint}" (from ${allElements.length} total)`);
+      } else {
+        console.warn(`[AIAgent] ⚠️ No elements found in recorded scope "${hint.recordedScopeHint}" - element may not be visible yet. Using all ${allElements.length} elements as fallback.`);
+      }
+    }
+    
+    // DEBUG: Log hint details
+    console.log(`[AIAgent] 🔍 Scoring ${candidatePool.length} elements for hint:`, {
+      targetText: hint.targetText,
+      targetRole: hint.targetRole,
+      recordedAriaLabel: hint.recordedAriaLabel,
+      recordedScopeHint: hint.recordedScopeHint,
+      expectedRole,
+    });
+    
+    const scored = candidatePool.map(el => ({
       ...el,
       score: this.computeCandidateScore(el, hint, expectedRole, dropdownIsOpen),
     }));
@@ -1298,6 +1539,17 @@ export class AIAgent {
     const topCandidates = scored.slice(0, 15);
     
     console.log(`[AIAgent] Found ${topCandidates.length} candidates, top 3 scores: [${topCandidates.slice(0, 3).map(c => c.score).join(', ')}]`);
+    
+    // DEBUG: If all scores are 0, log first 3 candidates to diagnose
+    if (topCandidates.length > 0 && topCandidates[0].score === 0) {
+      console.warn('[AIAgent] ⚠️ All candidates scored 0! First 3 candidates:', topCandidates.slice(0, 3).map(c => ({
+        role: c.role,
+        name: c.name,
+        text: c.text,
+        widgetTitle: c.widgetTitle,
+        scopePath: c.scopePath,
+      })));
+    }
     
     return topCandidates.map((s, i) => ({
       ...s,
@@ -1380,6 +1632,25 @@ export class AIAgent {
     // ============================================================
     if (hint.recordedTestId && el.attrs?.testId === hint.recordedTestId) {
       score += 100;
+    }
+    
+    // ============================================================
+    // ARIA-LABEL exact match (highest priority - 100 points)
+    // ============================================================
+    // aria-label is one of the most reliable identifiers
+    // It's used for accessibility and is usually stable
+    if (hint.recordedAriaLabel) {
+      const recordedAriaLabel = hint.recordedAriaLabel.toLowerCase().trim();
+      const elAriaLabel = el.name?.toLowerCase().trim(); // name comes from computeAccessibleName which uses aria-label
+      
+      if (elAriaLabel === recordedAriaLabel) {
+        score += 100; // Exact aria-label match - highest priority!
+        console.log(`[AIAgent] 🎯 Exact aria-label match: "${hint.recordedAriaLabel}" (+100 points)`);
+      } else if (elAriaLabel && elAriaLabel.includes(recordedAriaLabel)) {
+        score += 50; // Partial match (aria-label contains recorded value)
+      } else if (recordedAriaLabel.includes(elAriaLabel || '')) {
+        score += 30; // Reverse partial match
+      }
     }
     
     // ============================================================
@@ -1497,10 +1768,45 @@ export class AIAgent {
    * but the AI should adapt based on current page state and variable overrides.
    */
   private extractHints(workflow: SavedWorkflow, variableValues?: Record<string, string>): AgentHint[] {
-    const steps = workflow.optimizedSteps || workflow.steps;
+    // ⚠️ CRITICAL: For AI Agent, prefer original steps over optimized steps
+    // The optimizer may remove necessary UI interactions (e.g., opening menus before clicking)
+    // which the AI agent needs to perform in the correct order
+    // 
+    // Only use optimized steps if they didn't reduce the step count significantly
+    let steps = workflow.steps; // Default to original steps
+    
+    if (workflow.optimizedSteps && workflow.optimizedSteps.length >= workflow.steps.length * 0.5) {
+      // Optimization didn't remove more than 50% of steps - safe to use
+      steps = workflow.optimizedSteps;
+      console.log(`[AIAgent] Using optimized steps: ${workflow.optimizedSteps.length} steps (original: ${workflow.steps.length})`);
+    } else if (workflow.optimizedSteps) {
+      // Optimization was too aggressive - stick with original steps
+      console.warn(`[AIAgent] ⚠️ Optimization removed ${workflow.steps.length - workflow.optimizedSteps.length} steps (${Math.round((1 - workflow.optimizedSteps.length / workflow.steps.length) * 100)}%). Using original steps instead.`);
+    }
+    
+    const originalSteps = workflow.steps; // Keep reference to original steps for elementText lookup
     
     return steps.map((step, index) => {
       const payload = step.payload as WorkflowStepPayload;
+      
+      // If this is an optimized NAVIGATION step, try to find the original step's elementText
+      // The optimizer may have replaced multiple clicks with a single "Navigate directly to [URL]" step
+      let originalElementText = payload.elementText;
+      if (step.type === 'NAVIGATION' && !originalElementText && workflow.optimizationMetadata) {
+        // Find the original steps that were optimized into this step
+        const mapEntry = workflow.optimizationMetadata.optimizationMap.find(
+          entry => entry.optimizedIndex === index
+        );
+        if (mapEntry && mapEntry.originalIndices.length > 0) {
+          // Get elementText from the last original step (usually the one that triggered navigation)
+          const lastOriginalIndex = mapEntry.originalIndices[mapEntry.originalIndices.length - 1];
+          const originalStep = originalSteps[lastOriginalIndex];
+          if (originalStep && isWorkflowStepPayload(originalStep.payload)) {
+            originalElementText = originalStep.payload.elementText;
+            console.log(`[AIAgent] Found original elementText "${originalElementText}" from step ${lastOriginalIndex}`);
+          }
+        }
+      }
       
       // Determine action type
       let actionType: AgentHint['actionType'] = 'other';
@@ -1538,9 +1844,26 @@ export class AIAgent {
       let description = step.description;
       
       // For NAVIGATION steps, ALWAYS use elementText, not URL
-      if (step.type === 'NAVIGATION' && payload.elementText) {
-        description = `Click on "${payload.elementText}"`;
-        console.log(`[AIAgent] NAVIGATION hint: Using elementText "${payload.elementText}" instead of URL`);
+      // This is critical because optimized workflows may have "Navigate directly to [URL]" descriptions
+      // which confuse the AI into trying to navigate instead of clicking
+      if (step.type === 'NAVIGATION') {
+        // Use originalElementText if we found it from the original steps
+        const elementTextToUse = originalElementText || payload.elementText;
+        
+        if (elementTextToUse) {
+          description = `Click on "${elementTextToUse}"`;
+          console.log(`[AIAgent] NAVIGATION hint: Using elementText "${elementTextToUse}" instead of URL`);
+        } else if (payload.url) {
+          // If no elementText but we have a URL, try to extract meaningful text from the URL
+          // or use a generic description that encourages clicking through UI
+          const urlPath = payload.url.split('/').pop() || '';
+          description = `Navigate to ${urlPath} (click through UI, do not use direct URL navigation)`;
+          console.log(`[AIAgent] NAVIGATION hint: No elementText, using URL path "${urlPath}"`);
+        } else {
+          // Fallback: generic description that emphasizes clicking
+          description = `Click to navigate (do not use direct URL navigation)`;
+          console.log(`[AIAgent] NAVIGATION hint: No elementText or URL, using generic click description`);
+        }
       } else if (step.type === 'INPUT' && originalValue && originalValue !== value) {
         // User changed the value
         const fieldName = placeholder || payload.elementText || 'field';
@@ -1554,12 +1877,35 @@ export class AIAgent {
 
       // Extract recorded locator data for candidate matching
       const recordedSelector = payload.selector;
+      
+      // CRITICAL: Extract fallback selectors - these contain container-scoped XPaths!
+      // e.g., "//div[descendant::*[contains(normalize-space(.), 'Widget Title')]]//button"
+      // These are THE KEY to reliably finding the right element among duplicates!
+      const recordedFallbackSelectors = payload.fallbackSelectors || [];
+      
       const recordedTestId = payload.context?.uniqueAttributes?.['data-testid'] || 
                             payload.context?.uniqueAttributes?.['data-test-id'];
       
+      // Extract aria-label from semantic anchors (critical for exact matching)
+      const recordedAriaLabel = payload.aiEvidence?.semanticAnchors?.ariaLabel ||
+                                payload.context?.uniqueAttributes?.['aria-label'];
+      
       // Extract scope hint from context (e.g., widget/container title)
+      // 🎯 PRIORITY: Use DOM-based detection (proven reliable)
+      // AI Vision widget identification is still experimental and can return incorrect results
       const recordedScopeHint = payload.context?.container?.text || 
-                               payload.aiEvidence?.semanticAnchors?.textLabel;
+                                payload.aiEvidence?.semanticAnchors?.textLabel;
+      
+      // AI widget context available for future use when it's more reliable
+      const aiWidgetTitle = payload.aiWidgetContext?.widgetTitle;
+      const aiWidgetConfidence = payload.aiWidgetContext?.confidence || 0;
+      
+      if (recordedScopeHint) {
+        console.log(`[AIAgent] 📍 Using DOM-detected scope: "${recordedScopeHint}"`);
+        if (aiWidgetTitle && aiWidgetTitle !== recordedScopeHint) {
+          console.log(`[AIAgent] ℹ️ AI suggested "${aiWidgetTitle}" (confidence: ${aiWidgetConfidence.toFixed(2)}) but using DOM result`);
+        }
+      }
       
       // Extract row key if element was in a table
       const recordedRowKey = payload.context?.gridCoordinates?.rowHeader || 
@@ -1578,12 +1924,89 @@ export class AIAgent {
         expectedOutcome: stepWithNL.naturalLanguage.expectedOutcome,
         dependencies: stepWithNL.naturalLanguage.dependencies || [],
       } : undefined;
+      
+      // Extract scroll amount for SCROLL actions
+      let scrollAmount: number | undefined = undefined;
+      let scrollDirection: 'up' | 'down' | 'left' | 'right' | undefined = undefined;
+      let scrollContainer: string | undefined = undefined;
+      if (step.type === 'SCROLL') {
+        // Extract scroll container selector (critical for apps like Gainsight!)
+        // ALWAYS extract this, even if scroll amount is unknown
+        scrollContainer = (payload as any).elementScrollContainer?.selector ||
+                         (payload as any).scrollContainer?.selector;
+        
+        // Get viewport info which contains scroll delta
+        const viewport = payload.viewport;
+        const elementScrollContainer = viewport?.elementScrollContainer;
+        
+        // Debug: Show FULL payload to see what we're working with
+        console.log(`[AIAgent] 📜 SCROLL step payload:`, JSON.stringify({
+          viewport: viewport ? {
+            scrollDeltaX: viewport.scrollDeltaX,
+            scrollDeltaY: viewport.scrollDeltaY,
+            scrollX: viewport.scrollX,
+            scrollY: viewport.scrollY,
+            elementScrollContainer,
+          } : null,
+          // Legacy fields
+          deltaY: (payload as any).deltaY,
+          scrollAmount: (payload as any).scrollAmount,
+        }, null, 2));
+        
+        // 🎯 NEW: Extract scroll delta from viewport (recorded by new scroll capture)
+        // Priority: viewport.scrollDeltaY > container.scrollDeltaY > legacy deltaY > legacy scrollAmount
+        let scrollDelta: number | undefined = undefined;
+        
+        // Check container scroll delta first (for container scrolls)
+        if (elementScrollContainer?.scrollDeltaY !== undefined) {
+          scrollDelta = elementScrollContainer.scrollDeltaY;
+          console.log(`[AIAgent] ✅ Found container scrollDeltaY: ${scrollDelta}px`);
+        }
+        // Check viewport scroll delta (for window scrolls)
+        else if (viewport?.scrollDeltaY !== undefined) {
+          scrollDelta = viewport.scrollDeltaY;
+          console.log(`[AIAgent] ✅ Found viewport scrollDeltaY: ${scrollDelta}px`);
+        }
+        // Legacy: check old deltaY field
+        else if ((payload as any).deltaY !== undefined) {
+          scrollDelta = (payload as any).deltaY;
+          console.log(`[AIAgent] ✅ Found legacy deltaY: ${scrollDelta}px`);
+        }
+        // Legacy: check scrollAmount field
+        else if ((payload as any).scrollAmount !== undefined) {
+          scrollDelta = (payload as any).scrollAmount;
+          console.log(`[AIAgent] ✅ Found legacy scrollAmount: ${scrollDelta}px`);
+        }
+        
+        // If we have a delta, use it
+        if (typeof scrollDelta === 'number' && scrollDelta !== 0) {
+          scrollAmount = Math.abs(Math.round(scrollDelta));
+          scrollDirection = scrollDelta > 0 ? 'down' : 'up';
+          console.log(`[AIAgent] ✅ Using scroll delta: ${scrollAmount}px ${scrollDirection} in "${scrollContainer || 'window'}"`);
+        } else {
+          // Fallback: use a reasonable default scroll amount
+          console.log(`[AIAgent] ⚠️ No scroll delta in payload, using default 400px in "${scrollContainer || 'window'}"`);
+          const desc = description.toLowerCase();
+          scrollDirection = desc.includes('up') ? 'up' : 
+                           desc.includes('left') ? 'left' :
+                           desc.includes('right') ? 'right' : 'down';
+          scrollAmount = 400; // Reasonable default for scrolling in dashboards
+        }
+        
+        // CRITICAL: Always log the scroll container so we can debug
+        if (scrollContainer) {
+          console.log(`[AIAgent] ✅ Found scroll container: "${scrollContainer}"`);
+        } else {
+          console.warn('[AIAgent] ⚠️ No scroll container recorded - will scroll window');
+        }
+      }
 
       return {
         stepNumber: index + 1,
         description,
         actionType,
-        targetText: payload.elementText,
+        // For NAVIGATION steps, prefer originalElementText if we found it
+        targetText: (step.type === 'NAVIGATION' && originalElementText) ? originalElementText : payload.elementText,
         targetRole: payload.elementRole,
         targetPlaceholder: placeholder,
         targetSelector: payload.selector,
@@ -1594,10 +2017,17 @@ export class AIAgent {
         
         // New fields for candidate matching
         recordedSelector,
+        recordedFallbackSelectors: recordedFallbackSelectors.length > 0 ? recordedFallbackSelectors : undefined,
         recordedTestId,
+        recordedAriaLabel,
         recordedScopeHint,
         recordedRowKey,
         nearbyText: nearbyText.length > 0 ? nearbyText : undefined,
+        
+        // For SCROLL actions
+        scrollAmount,
+        scrollDirection,
+        scrollContainer,
         
         // Natural language context
         naturalLanguage,
