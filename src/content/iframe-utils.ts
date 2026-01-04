@@ -4,11 +4,23 @@
 
 import { SelectorEngine } from './selector-engine';
 
+// Import getCurrentFrameId - will be available after content-script initializes
+let getCurrentFrameId: (() => number) | null = null;
+(async () => {
+  try {
+    const module = await import('./content-script');
+    getCurrentFrameId = module.getCurrentFrameId;
+  } catch (e) {
+    console.warn('IframeUtils: Could not import getCurrentFrameId:', e);
+  }
+})();
+
 export interface IframeContext {
   selector: string;
   src?: string;
   name?: string;
   index?: number;
+  frameId?: number; // Chrome's internal frame ID - used for cross-frame execution
 }
 
 export class IframeUtils {
@@ -67,11 +79,16 @@ export class IframeUtils {
         }
       }
 
+      // Get current frameId - this identifies which Chrome frame this element is in
+      // This is critical for cross-frame execution during replay
+      const frameId = getCurrentFrameId ? getCurrentFrameId() : 0;
+
       return {
         selector,
         src,
         name,
         index: index > 0 ? index : undefined,
+        frameId: frameId !== 0 ? frameId : undefined, // Only include if not main frame
       };
     } catch (error) {
       console.warn('GhostWriter: Error getting iframe context:', error);

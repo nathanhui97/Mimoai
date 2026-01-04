@@ -204,6 +204,9 @@ export interface AgentHint {
       firstEmptyRow?: number;
     };
   };
+  
+  // Iframe context - for cross-frame execution
+  iframeContext?: import('../types/workflow').IframeContext;
 }
 
 /** Current observation of the page (DOM-first, screenshot optional) */
@@ -1339,6 +1342,62 @@ export class AIAgent {
     const maxRecoveryAttempts = 3;
     let currentAction = action;
     
+    // ============================================================================
+    // 🖼️ FRAME ROUTING: Check if action needs to execute in an iframe
+    // ============================================================================
+    const currentHint = this.state.hints[this.state.currentHintIndex];
+    if (currentHint?.iframeContext?.frameId) {
+      const targetFrameId = currentHint.iframeContext.frameId;
+      const { getCurrentFrameId } = await import('../content/content-script');
+      const currentFrameId = getCurrentFrameId();
+      
+      if (targetFrameId !== currentFrameId) {
+        console.log(`[AIAgent] 🖼️ Action requires execution in frame ${targetFrameId} (current frame: ${currentFrameId})`);
+        console.log(`[AIAgent] 🖼️ Iframe context:`, currentHint.iframeContext);
+        
+        try {
+          // Send message to target frame to execute the action
+          await chrome.tabs.sendMessage(
+            (await chrome.tabs.getCurrent())?.id || 0,
+            {
+              type: 'EXECUTE_ACTION_IN_FRAME',
+              payload: { action: currentAction },
+            },
+            { frameId: targetFrameId }
+          );
+          
+          // Wait for result from iframe via runtime message
+          const frameResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+            const listener = (message: any) => {
+              if (message.type === 'FRAME_ACTION_COMPLETED' && message.payload?.frameId === targetFrameId) {
+                chrome.runtime.onMessage.removeListener(listener);
+                resolve({
+                  success: message.payload.success,
+                  error: message.payload.error,
+                });
+              }
+            };
+            chrome.runtime.onMessage.addListener(listener);
+            
+            // Timeout after 10 seconds
+            setTimeout(() => {
+              chrome.runtime.onMessage.removeListener(listener);
+              resolve({ success: false, error: 'Iframe execution timeout' });
+            }, 10000);
+          });
+          
+          console.log(`[AIAgent] 🖼️ Iframe execution result:`, frameResult);
+          return frameResult;
+        } catch (error) {
+          console.error('[AIAgent] 🖼️ Cross-frame execution failed:', error);
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Cross-frame execution failed',
+          };
+        }
+      }
+    }
+    
     for (let attempt = 1; attempt <= maxRecoveryAttempts; attempt++) {
       console.log(`[AIAgent] 🎯 Attempt ${attempt}/${maxRecoveryAttempts}`);
       
@@ -2318,6 +2377,9 @@ export class AIAgent {
         
         // Natural language context
         naturalLanguage,
+        
+        // Iframe context - for cross-frame execution
+        iframeContext: payload.iframeContext,
       };
     });
   }

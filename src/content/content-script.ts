@@ -33,6 +33,11 @@ let isReady = false;
 let recordingManager: any = null;
 let currentFrameId: number = 0; // Will be set after initialization
 
+// Export getCurrentFrameId for use by other modules
+export function getCurrentFrameId(): number {
+  return currentFrameId;
+}
+
 // Now do imports
 import type { ExtensionMessage, MessageResponse, PongMessage } from '../types/messages';
 import { RecordingManager } from './recording-manager';
@@ -565,6 +570,50 @@ function handleFullMessage(
           success: true,
           data: { message: 'AI Agent started in background' },
         });
+        return false;
+      }
+
+      case 'EXECUTE_ACTION_IN_FRAME': {
+        // Cross-frame execution - this frame should execute an action
+        // This is called when the main frame agent needs to interact with an iframe element
+        console.log(`[Content] Executing action in frame ${currentFrameId}:`, message.payload?.action);
+        
+        (async () => {
+          try {
+            const { Tier1Executor } = await import('../lib/tier1-executor');
+            const action = message.payload?.action;
+            
+            if (!action) {
+              throw new Error('No action provided for cross-frame execution');
+            }
+            
+            // Execute the action in this frame
+            const result = await Tier1Executor.execute(action);
+            
+            // Send result back to main frame via runtime message
+            chrome.runtime.sendMessage({
+              type: 'FRAME_ACTION_COMPLETED',
+              payload: {
+                frameId: currentFrameId,
+                success: result.status === 'success',
+                result,
+              },
+            });
+            
+          } catch (error) {
+            console.error(`[Content] Error executing action in frame ${currentFrameId}:`, error);
+            chrome.runtime.sendMessage({
+              type: 'FRAME_ACTION_COMPLETED',
+              payload: {
+                frameId: currentFrameId,
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
+              },
+            });
+          }
+        })();
+        
+        sendResponse({ success: true, data: { message: 'Action execution started in frame' } });
         return false;
       }
 

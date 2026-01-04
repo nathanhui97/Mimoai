@@ -87,6 +87,7 @@ export interface IframeContext {
   src?: string;
   name?: string;
   index?: number; // if multiple iframes
+  frameId?: number; // Chrome's internal frame ID - used for cross-frame execution
 }
 
 export interface TimingInfo {

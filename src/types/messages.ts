@@ -46,7 +46,9 @@ export type MessageType =
   | 'ADD_TAB'
   | 'RESUME_RECORDING'
   | 'DEBUGGER_CLICK'
-  | 'DEBUGGER_DETACH';
+  | 'DEBUGGER_DETACH'
+  | 'EXECUTE_ACTION_IN_FRAME' // Cross-frame execution - execute action in specific iframe
+  | 'FRAME_ACTION_COMPLETED'; // Response from iframe after action execution
 
 /**
  * Base message interface for all extension messages
