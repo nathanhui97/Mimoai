@@ -1949,9 +1949,12 @@ export class AIAgent {
                                 payload.context?.uniqueAttributes?.['aria-label'];
       
       // Extract scope hint from context (e.g., widget/container title)
-      // 🎯 PRIORITY: Use DOM-based detection (proven reliable)
-      // AI Vision widget identification is still experimental and can return incorrect results
-      const recordedScopeHint = payload.context?.container?.text || 
+      // 🎯 PRIORITY ORDER:
+      // 1. payload.scope.title (from locatorBundle - MOST RELIABLE, if kind=WIDGET)
+      // 2. payload.context?.container?.text (legacy DOM-based detection)
+      // 3. payload.aiEvidence?.semanticAnchors?.textLabel (AI-detected, LEAST RELIABLE)
+      const recordedScopeHint = (payload.scope?.kind === 'WIDGET' ? payload.scope.title : null) ||
+                                payload.context?.container?.text || 
                                 payload.aiEvidence?.semanticAnchors?.textLabel;
       
       // AI widget context available for future use when it's more reliable
