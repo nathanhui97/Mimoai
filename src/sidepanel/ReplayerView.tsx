@@ -257,26 +257,39 @@ export function ReplayerView({
         ? workflow.steps[0].payload.url
         : undefined;
       
-      // Navigate if needed
-      if (startingUrl && tab.url !== startingUrl) {
-        await chrome.tabs.update(tab.id, { url: startingUrl });
+      // Navigate to starting page OR refresh if already there (to reset page state)
+      if (startingUrl) {
+        const needsNavigation = tab.url !== startingUrl;
+        const needsRefresh = tab.url === startingUrl;
         
-        // Wait for page load
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error('Navigation timeout'));
-          }, 15000);
-          
-          const listener = (tabId: number, changeInfo: { status?: string }) => {
-            if (tabId === tab.id && changeInfo.status === 'complete') {
-              clearTimeout(timeout);
+        if (needsNavigation) {
+          console.log('[ReplayerView] Navigating to starting page:', startingUrl);
+          await chrome.tabs.update(tab.id, { url: startingUrl });
+        } else if (needsRefresh) {
+          console.log('[ReplayerView] Refreshing page to reset state');
+          await chrome.tabs.reload(tab.id);
+        }
+        
+        if (needsNavigation || needsRefresh) {
+          // Wait for page load
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => {
               chrome.tabs.onUpdated.removeListener(listener);
-              setTimeout(() => resolve(), 1000);
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-        });
+              reject(new Error('Page load timeout'));
+            }, 15000);
+            
+            const listener = (tabId: number, changeInfo: { status?: string }) => {
+              if (tabId === tab.id && changeInfo.status === 'complete') {
+                clearTimeout(timeout);
+                chrome.tabs.onUpdated.removeListener(listener);
+                setTimeout(() => resolve(), 1000);
+              }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+          });
+          
+          console.log(`[ReplayerView] Page ${needsNavigation ? 'loaded' : 'refreshed'} successfully`);
+        }
       }
       
       // Start execution using Universal Execution Engine

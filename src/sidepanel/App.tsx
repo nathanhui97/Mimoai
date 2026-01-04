@@ -887,33 +887,44 @@ function App() {
         throw new Error('No active tab found');
       }
       
-      // Navigate to starting page if needed
+      // Navigate to starting page OR refresh if already there
       const startingUrl = workflow.steps.length > 0 && isWorkflowStepPayload(workflow.steps[0].payload)
         ? workflow.steps[0].payload.url
         : undefined;
       
-      if (startingUrl && tab.url !== startingUrl) {
-        addLog(`Navigating to starting page: ${startingUrl}`, 'info');
+      if (startingUrl) {
+        const needsNavigation = tab.url !== startingUrl;
+        const needsRefresh = tab.url === startingUrl; // Refresh to reset page state
         
-        await chrome.tabs.update(tab.id, { url: startingUrl });
+        if (needsNavigation) {
+          addLog(`Navigating to starting page: ${startingUrl}`, 'info');
+          await chrome.tabs.update(tab.id, { url: startingUrl });
+        } else if (needsRefresh) {
+          addLog('Refreshing page to reset state...', 'info');
+          await chrome.tabs.reload(tab.id);
+        }
         
-        // Wait for page load
-        await new Promise<void>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            chrome.tabs.onUpdated.removeListener(listener);
-            reject(new Error('Navigation timeout'));
-          }, 15000);
-          
-          const listener = (tabId: number, changeInfo: { status?: string }) => {
-            if (tabId === tab.id && changeInfo.status === 'complete') {
-              clearTimeout(timeout);
+        if (needsNavigation || needsRefresh) {
+          // Wait for page load
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => {
               chrome.tabs.onUpdated.removeListener(listener);
-              // Wait a bit more for Salesforce Lightning to fully load
-              setTimeout(() => resolve(), 1500);
-            }
-          };
-          chrome.tabs.onUpdated.addListener(listener);
-        });
+              reject(new Error('Page load timeout'));
+            }, 15000);
+            
+            const listener = (tabId: number, changeInfo: { status?: string }) => {
+              if (tabId === tab.id && changeInfo.status === 'complete') {
+                clearTimeout(timeout);
+                chrome.tabs.onUpdated.removeListener(listener);
+                // Wait a bit more for Salesforce Lightning to fully load
+                setTimeout(() => resolve(), 1500);
+              }
+            };
+            chrome.tabs.onUpdated.addListener(listener);
+          });
+          
+          addLog(`Page ${needsNavigation ? 'loaded' : 'refreshed'} successfully`, 'info');
+        }
       }
       
       addLog('Starting AI Agent execution...', 'info');
