@@ -1096,6 +1096,15 @@ export class Tier1Executor {
               const isDropdownOption = role === 'option' || role === 'menuitem' || role === 'menuitemradio';
               
               const textMatches = expectedText.some(expected => {
+                // 🛡️ CRITICAL: Reject elements with excessively long text (likely containers, not the target element)
+                // Example: DIV with textContent = "Skip to Navigation...New...Accounts..." (entire page)
+                // should NOT match when looking for "New" button
+                const MAX_TEXT_LENGTH = 200; // Buttons/links/inputs rarely exceed this
+                if (elementText.length > MAX_TEXT_LENGTH) {
+                  console.log(`[Tier1] ⚠️ Element text too long (${elementText.length} chars) - likely a container, not target element`);
+                  return false;
+                }
+                
                 // Exact or contains match (forward direction)
                 const forwardMatch = 
                   elementText === expected ||
