@@ -182,6 +182,58 @@ function handleFullMessage(
         return false;
       }
 
+      case 'START_RECORDING_ALL_FRAMES': {
+        // Broadcast message to start recording in all frames (including iframes)
+        if (!recordingManager) {
+          sendResponse({
+            success: false,
+            error: 'RecordingManager not initialized. Please wait a moment and try again.',
+          });
+          return false;
+        }
+        try {
+          recordingManager.start();
+          console.log(`[Content] Recording started in frame ${currentFrameId}`);
+          sendResponse({
+            success: true,
+            data: { message: `Recording started in frame ${currentFrameId}` },
+          });
+        } catch (error) {
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to start recording',
+          });
+        }
+        return false;
+      }
+
+      case 'STOP_RECORDING_ALL_FRAMES': {
+        // Broadcast message to stop recording in all frames (including iframes)
+        if (!recordingManager) {
+          sendResponse({
+            success: false,
+            error: 'RecordingManager not initialized',
+          });
+          return false;
+        }
+        (async () => {
+          try {
+            await recordingManager.stop();
+            console.log(`[Content] Recording stopped in frame ${currentFrameId}`);
+            sendResponse({
+              success: true,
+              data: { message: `Recording stopped in frame ${currentFrameId}` },
+            });
+          } catch (error) {
+            sendResponse({
+              success: false,
+              error: error instanceof Error ? error.message : 'Failed to stop recording',
+            });
+          }
+        })();
+        return true; // Keep channel open for async
+      }
+
       case 'STOP_RECORDING_IN_TAB': {
         // Internal message from service worker to stop recording in this tab
         if (!recordingManager) {
@@ -571,6 +623,40 @@ function handleFullMessage(
           data: { message: 'AI Agent started in background' },
         });
         return false;
+      }
+
+      case 'GET_IFRAME_DOM_MAP': {
+        // Request for DOM map from this iframe
+        console.log(`[Content] Generating DOM map for frame ${currentFrameId}`);
+        
+        (async () => {
+          try {
+            const { generateDOMMap } = await import('./dom-map');
+            const domMap = generateDOMMap();
+            
+            // Send response back via runtime message
+            chrome.runtime.sendMessage({
+              type: 'IFRAME_DOM_MAP_RESPONSE',
+              payload: {
+                frameId: currentFrameId,
+                domMap,
+              },
+            });
+            
+            sendResponse({
+              success: true,
+              data: { message: 'DOM map generated' },
+            });
+          } catch (error) {
+            console.error(`[Content] Error generating DOM map in frame ${currentFrameId}:`, error);
+            sendResponse({
+              success: false,
+              error: error instanceof Error ? error.message : 'Failed to generate DOM map',
+            });
+          }
+        })();
+        
+        return true; // Keep channel open for async
       }
 
       case 'EXECUTE_ACTION_IN_FRAME': {

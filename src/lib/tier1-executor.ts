@@ -1371,11 +1371,11 @@ export class Tier1Executor {
           return { element: inScope[0].element, reason: `only one in scope "${bundle.scopeHint}"` };
         }
       } else {
-        // FAIL SAFELY: Don't click on wrong widget!
-        console.error(`[Tier1] ❌ CRITICAL: No candidates found in recorded scope "${bundle.scopeHint}"`);
-        console.error(`[Tier1] ❌ Refusing to proceed - element may be in wrong widget/container`);
-        console.error(`[Tier1] 💡 Suggestion: Scroll to make the widget visible, or re-record the workflow`);
-        return null; // Fail - let upstream handle the error
+        // Scope hint not found - log warning but CONTINUE with normal disambiguation
+        // The scope hint is a preference, not a hard requirement
+        console.warn(`[Tier1] ⚠️ Scope hint "${bundle.scopeHint}" not found - proceeding with normal disambiguation`);
+        console.warn(`[Tier1] 💡 Note: Will use visibility, position, and other signals to pick best candidate`);
+        // Don't modify scopeFiltered - continue with all visible candidates
       }
     }
     

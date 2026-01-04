@@ -25,19 +25,40 @@ export interface IframeContext {
 
 export class IframeUtils {
   /**
-   * Check if an element is inside an iframe
+   * Check if the current window is inside an iframe
+   * @returns true if we're in an iframe, false if main frame
    */
-  static isInIframe(element: Element): boolean {
+  static isInIframe(): boolean {
     try {
-      return window.self !== window.top && this.getIframeElement(element) !== null;
+      return window.self !== window.top;
     } catch (e) {
-      // Cross-origin iframe - can't access parent
+      // Cross-origin - if we can't access parent, we ARE in an iframe
       return true;
     }
   }
 
   /**
+   * Get iframe context for the current frame
+   * @param frameId Chrome's internal frame ID
+   * @returns IframeContext if we're in an iframe, null if main frame
+   */
+  static getCurrentFrameContext(frameId: number): IframeContext | null {
+    if (!this.isInIframe()) {
+      return null; // Main frame has no iframe context
+    }
+    
+    return {
+      selector: '', // Cannot determine from inside the iframe
+      src: window.location.href,
+      name: window.name || undefined,
+      frameId: frameId !== 0 ? frameId : undefined,
+    };
+  }
+
+  /**
    * Get the iframe element that contains the given element
+   * @deprecated This method doesn't work when called from inside an iframe
+   * Use getCurrentFrameContext() instead
    */
   static getIframeElement(element: Element): HTMLIFrameElement | null {
     let current: Element | null = element;
@@ -56,9 +77,19 @@ export class IframeUtils {
   }
 
   /**
-   * Get iframe context for an element
+   * Get iframe context for an element (legacy method)
+   * @deprecated Use getCurrentFrameContext() instead for proper cross-frame support
    */
   static getIframeContext(element: Element): IframeContext | null {
+    // NEW: Use the fixed detection method
+    const frameId = getCurrentFrameId ? getCurrentFrameId() : 0;
+    
+    // If we're inside an iframe, return the current frame context
+    if (this.isInIframe()) {
+      return this.getCurrentFrameContext(frameId);
+    }
+    
+    // If we're in the main frame, try the old approach (looking for iframe elements)
     const iframe = this.getIframeElement(element);
     if (!iframe) {
       return null;
@@ -78,10 +109,6 @@ export class IframeUtils {
           break;
         }
       }
-
-      // Get current frameId - this identifies which Chrome frame this element is in
-      // This is critical for cross-frame execution during replay
-      const frameId = getCurrentFrameId ? getCurrentFrameId() : 0;
 
       return {
         selector,

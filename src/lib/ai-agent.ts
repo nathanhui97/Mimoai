@@ -27,7 +27,29 @@ import { isWorkflowStepPayload } from '../types/workflow';
 // ============================================================================
 
 /** Actions the agent can take */
-export type AgentActionType = 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover';
+export type AgentActionType = 
+  | 'click' 
+  | 'type' 
+  | 'select' 
+  | 'scroll' 
+  | 'navigate' 
+  | 'wait' 
+  | 'assert' 
+  | 'done' 
+  | 'fail' 
+  | 'skip' 
+  | 'read' 
+  | 'keyboard' 
+  | 'hover'
+  // Spreadsheet-specific actions
+  | 'click_cell'
+  | 'find_and_click_empty'
+  | 'find_by_header'
+  | 'type_in_cell'
+  | 'type_in_header_column'
+  | 'type_in_next_empty'
+  | 'read_cell'
+  | 'batch_type';
 
 /** 
  * Semantic target for element identification (DOM-based, not coordinates)
@@ -131,6 +153,13 @@ export interface AgentActionParams {
   // For hover - reveal menus
   hoverDuration?: number;      // How long to hover (ms)
   waitForMenu?: boolean;        // Wait for menu to appear
+  
+  // For spreadsheet actions
+  cellRef?: string;            // Cell reference like "B5", "A10"
+  column?: string;             // Column letter like "A", "B"
+  headerText?: string;         // Column header text
+  rowOffset?: number;          // Row offset from header
+  cells?: Array<{ cellRef: string; text: string }>;  // For batch operations
   
   // Expected outcome (for verification)
   expectedOutcome?: ExpectedOutcome;
@@ -555,6 +584,154 @@ export class AIAgent {
           continue; // Move to next iteration of the loop
         }
         
+        // ============================================================================
+        // 📊 SPREADSHEET TYPE HINTS - BYPASS AI ENTIRELY
+        // If on spreadsheet + type hint + cell reference → execute directly
+        // This is simple and reliable - no AI skip decisions to worry about
+        // ============================================================================
+        if (SheetStateExtractor.isSpreadsheetDomain() && currentHint?.actionType === 'type' && currentHint?.value) {
+          console.log(`[AIAgent] 📊 SPREADSHEET TYPE HINT detected: "${currentHint.value}"`);
+          
+          // Extract cell reference from hint
+          let cellRef: string | undefined;
+          
+          // Try recordedAriaLabel first (e.g., "A2", "B3")
+          if (currentHint.recordedAriaLabel) {
+            const match = currentHint.recordedAriaLabel.match(/^([A-Z]+\d+)$/i);
+            if (match) {
+              cellRef = match[1].toUpperCase();
+            }
+          }
+          
+          // Try fallback selectors (e.g., [aria-label="A2"])
+          if (!cellRef && currentHint.recordedFallbackSelectors) {
+            for (const selector of currentHint.recordedFallbackSelectors) {
+              const ariaMatch = selector.match(/\[aria-label=["']([A-Z]+\d+)["']\]/i);
+              if (ariaMatch) {
+                cellRef = ariaMatch[1].toUpperCase();
+                break;
+              }
+            }
+          }
+          
+          if (cellRef) {
+            console.log(`[AIAgent] 📊 Executing SPREADSHEET TYPE: ${cellRef} = "${currentHint.value}" (NO AI)`);
+            
+            try {
+              const result = await SpreadsheetExecutor.execute({
+                action: 'type_in_cell',
+                cellRef: cellRef,
+                text: currentHint.value,
+                clearFirst: true,
+              });
+              
+              // Record result
+              const spreadsheetAction: AgentAction = {
+                type: 'type_in_cell',
+                params: { cellRef, text: currentHint.value },
+                reasoning: `Direct spreadsheet execution: type "${currentHint.value}" in ${cellRef}`,
+                confidence: 1.0,
+                hintStepIndex: this.state.currentHintIndex,
+              };
+              
+              this.state.history.push({
+                stepNumber: currentHint.stepNumber,
+                action: spreadsheetAction,
+                observation,
+                result: result.success ? 'success' : 'failed',
+                error: result.error,
+                timestamp: Date.now(),
+              });
+              
+              if (result.success) {
+                console.log(`[AIAgent] ✅ Spreadsheet type completed: ${cellRef} = "${currentHint.value}"`);
+                this.state.hints[this.state.currentHintIndex].completed = true;
+                this.state.currentHintIndex++;
+                this.onProgress?.(this.state.currentHintIndex - 1, spreadsheetAction, 'completed');
+              } else {
+                console.error(`[AIAgent] ❌ Spreadsheet type failed: ${result.error}`);
+                this.state.hints[this.state.currentHintIndex].failureCount = 
+                  (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
+              }
+              
+              continue; // Move to next hint
+            } catch (error) {
+              console.error(`[AIAgent] ❌ Spreadsheet type error:`, error);
+            }
+          } else {
+            console.warn(`[AIAgent] ⚠️ Could not extract cell reference for spreadsheet type hint`);
+          }
+        }
+        
+        // ============================================================================
+        // 📊 SPREADSHEET CLICK HINTS - BYPASS AI ENTIRELY
+        // If on spreadsheet + click hint + cell reference → execute directly
+        // ============================================================================
+        if (SheetStateExtractor.isSpreadsheetDomain() && currentHint?.actionType === 'click') {
+          let cellRef: string | undefined;
+          
+          // Try recordedAriaLabel
+          if (currentHint.recordedAriaLabel) {
+            const match = currentHint.recordedAriaLabel.match(/^([A-Z]+\d+)$/i);
+            if (match) {
+              cellRef = match[1].toUpperCase();
+            }
+          }
+          
+          // Try fallback selectors
+          if (!cellRef && currentHint.recordedFallbackSelectors) {
+            for (const selector of currentHint.recordedFallbackSelectors) {
+              const ariaMatch = selector.match(/\[aria-label=["']([A-Z]+\d+)["']\]/i);
+              if (ariaMatch) {
+                cellRef = ariaMatch[1].toUpperCase();
+                break;
+              }
+            }
+          }
+          
+          if (cellRef) {
+            console.log(`[AIAgent] 📊 Executing SPREADSHEET CLICK: ${cellRef} (NO AI)`);
+            
+            try {
+              const result = await SpreadsheetExecutor.execute({
+                action: 'click_cell',
+                cellRef: cellRef,
+              });
+              
+              const spreadsheetAction: AgentAction = {
+                type: 'click_cell',
+                params: { cellRef },
+                reasoning: `Direct spreadsheet execution: click cell ${cellRef}`,
+                confidence: 1.0,
+                hintStepIndex: this.state.currentHintIndex,
+              };
+              
+              this.state.history.push({
+                stepNumber: currentHint.stepNumber,
+                action: spreadsheetAction,
+                observation,
+                result: result.success ? 'success' : 'failed',
+                error: result.error,
+                timestamp: Date.now(),
+              });
+              
+              if (result.success) {
+                console.log(`[AIAgent] ✅ Spreadsheet click completed: ${cellRef}`);
+                this.state.hints[this.state.currentHintIndex].completed = true;
+                this.state.currentHintIndex++;
+                this.onProgress?.(this.state.currentHintIndex - 1, spreadsheetAction, 'completed');
+              } else {
+                console.error(`[AIAgent] ❌ Spreadsheet click failed: ${result.error}`);
+              }
+              
+              continue; // Move to next hint
+            } catch (error) {
+              console.error(`[AIAgent] ❌ Spreadsheet click error:`, error);
+            }
+          }
+          // If no cell reference found, fall through to normal AI flow
+        }
+        
         // NOTE: NAVIGATION hints are now always converted to 'click' in extractHints()
         // This ensures the agent always clicks through the UI instead of navigating to URLs
         // which could be stale or point to wrong records (e.g., different account IDs)
@@ -832,9 +1009,41 @@ export class AIAgent {
   private async observe(): Promise<AgentObservation> {
     console.log('[AIAgent] 🔍 Observing page state...');
     
-    // Generate DOM map (fast, structured, cheap for LLM)
-    const domMap = generateDOMMap();
-    const domMapText = domMapToText(domMap);
+    // Generate DOM map with iframe content (fast, structured, cheap for LLM)
+    // This will scan iframes if we're in the main frame
+    const { getCurrentFrameId } = await import('../content/content-script');
+    const currentFrameId = getCurrentFrameId();
+    
+    let domMap;
+    if (currentFrameId === 0) {
+      // Main frame - scan with iframes
+      const { generateDOMMapWithIframes } = await import('../content/dom-map');
+      domMap = await generateDOMMapWithIframes();
+      console.log('[AIAgent] 🖼️ Generated DOM map with iframe content');
+    } else {
+      // We're in an iframe - just scan this frame
+      const { generateDOMMap } = await import('../content/dom-map');
+      domMap = generateDOMMap();
+      console.log(`[AIAgent] Generated DOM map for iframe (frameId: ${currentFrameId})`);
+    }
+    
+    let domMapText = domMapToText(domMap);
+    
+    // NEW: If on a spreadsheet, extract and append spreadsheet state
+    if (SheetStateExtractor.isSpreadsheetDomain()) {
+      try {
+        const sheetState = await SheetStateExtractor.extract();
+        if (sheetState) {
+          console.log(`[AIAgent] 📊 Extracted spreadsheet state: ${sheetState.columns.length} columns`);
+          
+          // Append spreadsheet context to DOM map
+          const sheetContext = this.formatSheetStateForLLM(sheetState);
+          domMapText += `\n\n${sheetContext}`;
+        }
+      } catch (error) {
+        console.warn('[AIAgent] Failed to extract sheet state:', error);
+      }
+    }
     
     console.log(`[AIAgent] DOM map: ${domMap.interactiveElements.length} interactive elements, ${domMap.formFields.length} form fields`);
     
@@ -890,6 +1099,60 @@ export class AIAgent {
       },
       timestamp: Date.now(),
     };
+  }
+
+  /**
+   * Format spreadsheet state for LLM understanding
+   */
+  private formatSheetStateForLLM(sheetState: import('../content/sheet-state-extractor').SheetState): string {
+    const lines: string[] = [];
+    
+    lines.push('## 📊 SPREADSHEET DETECTED (Google Sheets / Excel Online)');
+    lines.push('');
+    lines.push(`Sheet: "${sheetState.sheetName}"`);
+    lines.push(`Active Cell: ${sheetState.activeCell.reference} (${sheetState.activeCell.isEmpty ? 'empty' : `value: "${sheetState.activeCell.value}"`})`);
+    lines.push('');
+    
+    if (sheetState.headers.length > 0) {
+      lines.push('**Column Headers**:');
+      lines.push(sheetState.headers.map(h => `  ${h.column}: "${h.text}"`).join('\n'));
+      lines.push('');
+    }
+    
+    if (sheetState.columns.length > 0) {
+      lines.push('**Column Data**:');
+      for (const col of sheetState.columns.slice(0, 10)) { // Limit to 10 columns
+        lines.push(`  Column ${col.letter} ("${col.header}"):`);
+        lines.push(`    - Data type: ${col.dataType}`);
+        lines.push(`    - Last data row: ${col.lastDataRow}`);
+        lines.push(`    - Next empty row: ${col.firstEmptyRow}`);
+        if (col.sampleValues.length > 0) {
+          lines.push(`    - Sample values: ${col.sampleValues.slice(0, 2).join(', ')}`);
+        }
+      }
+      lines.push('');
+    }
+    
+    lines.push('**📊 SPREADSHEET ACTIONS AVAILABLE**:');
+    lines.push('When you need to type in a spreadsheet cell, use these specialized actions instead of regular "type":');
+    lines.push('');
+    lines.push('1. **type_in_cell**: Type directly into a specific cell');
+    lines.push('   Example: {"action": "type_in_cell", "cellRef": "B5", "text": "Hello World"}');
+    lines.push('');
+    lines.push('2. **type_in_header_column**: Type in cell by finding column header');
+    lines.push('   Example: {"action": "type_in_header_column", "headerText": "Email", "rowOffset": 1, "text": "john@test.com"}');
+    lines.push('   Note: rowOffset 1 = first data row (row 2 if headers in row 1)');
+    lines.push('');
+    lines.push('3. **type_in_next_empty**: Type in next empty cell of a column');
+    lines.push('   Example: {"action": "type_in_next_empty", "column": "A", "text": "New entry"}');
+    lines.push('');
+    lines.push('4. **read_cell**: Read value from a cell');
+    lines.push('   Example: {"action": "read_cell", "cellRef": "C5"}');
+    lines.push('');
+    lines.push('⚠️ IMPORTANT: When working with spreadsheets, prefer these actions over regular click+type!');
+    lines.push('These actions handle cell navigation, verification, and retries automatically.');
+    
+    return lines.join('\n');
   }
 
   /**
@@ -1024,9 +1287,10 @@ export class AIAgent {
       }
     }
 
-    // NEW: Extract fresh spreadsheet context if current hint is a spreadsheet action
+    // NEW: Extract fresh spreadsheet context if on a spreadsheet domain
+    // Extract ALWAYS when on spreadsheet, not just when hint has spreadsheetContext
     let spreadsheetContext: any = undefined;
-    if (nextIncompleteHint?.spreadsheetContext && SheetStateExtractor.isSpreadsheetDomain()) {
+    if (SheetStateExtractor.isSpreadsheetDomain()) {
       try {
         console.log('[AIAgent] 📊 Extracting fresh spreadsheet state for AI decision...');
         const freshSheetState = await SheetStateExtractor.extract();
@@ -1035,14 +1299,19 @@ export class AIAgent {
           spreadsheetContext = {
             isSpreadsheet: true,
             sheetState: freshSheetState,
-            recordedIntent: nextIncompleteHint.spreadsheetContext.recordedIntent,
+            recordedIntent: nextIncompleteHint?.spreadsheetContext?.recordedIntent || {
+              cellRef: 'unknown',
+              column: 'unknown',
+              columnHeader: 'unknown',
+              wasEmpty: true,
+              wasAppendPosition: false,
+              reasoning: 'Spreadsheet detected during execution',
+            },
           };
           console.log('[AIAgent] 📊 Spreadsheet context ready:', {
-            recorded: nextIncompleteHint.spreadsheetContext.recordedIntent.cellRef,
-            wasAppend: nextIncompleteHint.spreadsheetContext.recordedIntent.wasAppendPosition,
-            currentFirstEmpty: freshSheetState.columns.find(
-              c => c.letter === nextIncompleteHint.spreadsheetContext?.recordedIntent.column
-            )?.firstEmptyRow,
+            columns: freshSheetState.columns.length,
+            activeCell: freshSheetState.activeCell.reference,
+            headers: freshSheetState.headers.map(h => `${h.column}:${h.text}`).join(', '),
           });
         }
       } catch (error) {
@@ -1309,6 +1578,14 @@ export class AIAgent {
           // For hover action
           hoverDuration: result.hoverDuration,
           waitForMenu: result.waitForMenu,
+          
+          // For spreadsheet actions
+          cellRef: result.cellRef,
+          column: result.column,
+          headerText: result.headerText,
+          rowOffset: result.rowOffset,
+          cells: result.cells,
+          clearFirst: result.clearFirst,
         },
         reasoning: result.reasoning || 'No reasoning provided',
         confidence: result.confidence || 0,
@@ -1320,6 +1597,26 @@ export class AIAgent {
         console.log('[AIAgent] 📝 Type action - fieldTarget:', action.params.fieldTarget ? 
           `${action.params.fieldTarget.role}:${action.params.fieldTarget.name}` : 'NOT SET (will use activeElement!)');
       }
+      
+      // ============================================================================
+      // 🚀 SPREADSHEET INTERCEPTION - DISABLED
+      // After extensive testing, spreadsheet interception causes more problems:
+      // 1. Confuses Name Box workflows (converts Name Box clicks to cell clicks)
+      // 2. AI skips steps thinking cells are already filled
+      // 3. Duplicate clicks on same cell
+      // 4. Complex logic prone to edge cases
+      //
+      // SOLUTION: Users should record with Tab navigation:
+      //   - Click A2 → type → Tab → type → Tab → type → Enter
+      //   - Simple, reliable, works in Google Sheets and Excel
+      //   - No special handling needed - just replays keyboard events
+      //
+      // Future: Re-enable with better workflow type detection
+      // ============================================================================
+      if (false && SheetStateExtractor.isSpreadsheetDomain()) {
+        // Interception code disabled
+      }
+      
       return action;
     } catch (error) {
       console.error('[AIAgent] Think error:', error);
@@ -1356,18 +1653,10 @@ export class AIAgent {
         console.log(`[AIAgent] 🖼️ Iframe context:`, currentHint.iframeContext);
         
         try {
-          // Send message to target frame to execute the action
-          await chrome.tabs.sendMessage(
-            (await chrome.tabs.getCurrent())?.id || 0,
-            {
-              type: 'EXECUTE_ACTION_IN_FRAME',
-              payload: { action: currentAction },
-            },
-            { frameId: targetFrameId }
-          );
-          
-          // Wait for result from iframe via runtime message
+          // Route through service worker for reliable cross-frame execution
+          // Service worker has the correct tab context
           const frameResult = await new Promise<{ success: boolean; error?: string }>((resolve) => {
+            // Set up listener for response BEFORE sending request
             const listener = (message: any) => {
               if (message.type === 'FRAME_ACTION_COMPLETED' && message.payload?.frameId === targetFrameId) {
                 chrome.runtime.onMessage.removeListener(listener);
@@ -1378,6 +1667,22 @@ export class AIAgent {
               }
             };
             chrome.runtime.onMessage.addListener(listener);
+            
+            // Send request via runtime (service worker will route to correct frame)
+            chrome.runtime.sendMessage({
+              type: 'EXECUTE_IN_FRAME',
+              payload: { 
+                action: currentAction, 
+                targetFrameId: targetFrameId 
+              },
+            }).catch((error) => {
+              console.error('[AIAgent] 🖼️ Failed to send EXECUTE_IN_FRAME message:', error);
+              chrome.runtime.onMessage.removeListener(listener);
+              resolve({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to send cross-frame message',
+              });
+            });
             
             // Timeout after 10 seconds
             setTimeout(() => {
@@ -1398,22 +1703,37 @@ export class AIAgent {
       }
     }
     
+    // NOTE: Spreadsheet handling is now done BEFORE AI call in continueExecution()
+    // See "SPREADSHEET TYPE HINTS - BYPASS AI ENTIRELY" section
+    
     for (let attempt = 1; attempt <= maxRecoveryAttempts; attempt++) {
       console.log(`[AIAgent] 🎯 Attempt ${attempt}/${maxRecoveryAttempts}`);
       
-      // NEW: Handle spreadsheet actions (click_cell, find_and_click_empty, find_by_header)
-      // SAFEGUARD: Only route to SpreadsheetExecutor if on a spreadsheet domain
-      const spreadsheetActions = ['click_cell', 'find_and_click_empty', 'find_by_header'];
+      // Handle explicit spreadsheet actions (click_cell, type_in_cell, etc.)
+      // These are routed to SpreadsheetExecutor if on a spreadsheet domain
+      const spreadsheetActions = [
+        'click_cell', 
+        'find_and_click_empty', 
+        'find_by_header',
+        'type_in_cell',
+        'type_in_header_column',
+        'type_in_next_empty',
+        'read_cell',
+        'batch_type',
+      ];
       if (spreadsheetActions.includes(currentAction.type) && SheetStateExtractor.isSpreadsheetDomain()) {
         console.log(`[AIAgent] 📊 Routing to SpreadsheetExecutor: ${currentAction.type}`);
         
         try {
           const spreadsheetResult = await SpreadsheetExecutor.execute({
-            action: currentAction.type,
+            action: currentAction.type as any,
             cellRef: (currentAction.params as any).cellRef,
             column: (currentAction.params as any).column,
             headerText: (currentAction.params as any).headerText,
             rowOffset: (currentAction.params as any).rowOffset,
+            text: (currentAction.params as any).text || currentAction.params.text,
+            cells: (currentAction.params as any).cells,
+            clearFirst: (currentAction.params as any).clearFirst,
           });
           
           if (spreadsheetResult.success) {

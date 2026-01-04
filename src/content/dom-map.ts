@@ -14,6 +14,7 @@
 
 import { computeAccessibleName } from '../lib/accessible-name';
 import { ShadowDOMUtils } from './shadow-dom-utils';
+import { isRealModal, isNavigationContext, isSaaSAppContainer, detectModalWithFormHeuristic } from './modal-detector';
 
 // ============================================================================
 // Types
@@ -133,28 +134,7 @@ export function generateDOMMap(): DOMMap {
   // Check for active modal (only if no dropdown found)
   let modal: Element | null = null;
   if (!dropdown) {
-    modal = findActiveModal();
-    
-    // HEURISTIC: If no modal found by traditional means, but we have many form fields (15+),
-    // try to infer a modal by looking for a container with lots of inputs
-    if (!modal) {
-      const allFormFields = document.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
-      if (allFormFields.length >= 15) {
-        // Find the closest common ancestor that contains most of these fields
-        const containers = document.querySelectorAll('[class*="container"], [class*="form"], [class*="panel"], section, main');
-        for (const container of containers) {
-          if (!isVisible(container)) continue;
-          
-          const fieldsInContainer = container.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
-          // If this container has 80%+ of all fields, it's likely a modal
-          if (fieldsInContainer.length >= allFormFields.length * 0.8) {
-            modal = container;
-            console.log('[DOMMap] 🔔 Modal inferred by form field heuristic:', fieldsInContainer.length, 'fields');
-            break;
-          }
-        }
-      }
-    }
+    modal = findActiveModalWithStructuralDetection();
   } else {
     console.log('[DOMMap] ⏭️ Skipping modal detection - dropdown takes priority');
   }
@@ -361,119 +341,88 @@ export function domMapToText(map: DOMMap): string {
 // Helper Functions
 // ============================================================================
 
-function findActiveModal(): Element | null {
-  // EXCLUSION: Skip known non-modal patterns (app headers, nav bars, etc.)
-  const excludePatterns = [
-    '[class*="global-header"]',
-    '[class*="header_container"]',
-    '[class*="context-bar"]',
-    '[class*="slds-global-header"]',
-    '[class*="navigation"]',
-    '[class*="navbar"]',
-    '[class*="nav-bar"]',
-    'header',
-    'nav',
-    '[role="banner"]',
-    '[role="navigation"]',
-  ];
-  
-  // Look for visible modals/dialogs
-  const modals = document.querySelectorAll([
+/**
+ * Find active modal using universal structural detection
+ * Works across all websites (Salesforce, Gainsight, etc.)
+ */
+function findActiveModalWithStructuralDetection(): Element | null {
+  // Look for potential modal candidates
+  const candidates = document.querySelectorAll([
     '[role="dialog"]',
     '[role="alertdialog"]',
     '[aria-modal="true"]',
     '.modal',
     '.dialog',
     '[data-modal]',
-    // Common modal class patterns
     '[class*="Modal"]',
     '[class*="popup"]',
-    '[class*="overlay"]',
     '[class*="Popup"]',
-    // MUI/React patterns
     '[class*="MuiDialog"]',
     '[class*="Dialog-root"]',
-    // Base UI / React portals
     '[class*="BaseModal"]',
     '[data-baseweb="modal"]',
-    // Salesforce patterns
     '[class*="slds-modal"]',
     '[class*="forceModal"]',
+    '[class*="overlay"]',
   ].join(', '));
   
-  for (const modal of modals) {
-    if (!isVisible(modal)) continue;
+  // Also check for form-heavy containers as potential modals
+  const formContainers = document.querySelectorAll('[class*="container"], [class*="form"], [class*="panel"], section, main');
+  const allCandidates = [...Array.from(candidates), ...Array.from(formContainers)];
+  
+  let bestModal: Element | null = null;
+  let bestScore = 0;
+  
+  for (const candidate of allCandidates) {
+    if (!isVisible(candidate)) continue;
     
-    // Skip if matches exclusion pattern
-    let shouldExclude = false;
-    for (const pattern of excludePatterns) {
-      if (modal.matches(pattern) || modal.closest(pattern)) {
-        console.log(`[DOMMap] ⏭️ Skipping modal candidate - matches exclusion pattern:`, pattern);
-        shouldExclude = true;
-        break;
+    // Use universal structural detection
+    const modalResult = isRealModal(candidate);
+    
+    if (modalResult.isModal && modalResult.score > bestScore) {
+      // Double-check: not a navigation context or SaaS app container
+      if (!isNavigationContext(candidate) && !isSaaSAppContainer(candidate)) {
+        bestModal = candidate;
+        bestScore = modalResult.score;
+        console.log(`[DOMMap] 🔔 Modal candidate (score ${modalResult.score}):`, modalResult.reasons);
+      } else {
+        console.log(`[DOMMap] ⚠️ Rejected modal candidate (score ${modalResult.score}): Navigation context or SaaS app container detected`);
       }
-    }
-    if (shouldExclude) continue;
-    
-    const style = window.getComputedStyle(modal);
-    const zIndex = parseInt(style.zIndex) || 0;
-    const position = style.position;
-    
-    // LENIENT criteria: Check multiple signals (not all required)
-    let modalScore = 0;
-    
-    // Positioned (fixed/absolute) +30
-    if (position === 'fixed' || position === 'absolute') modalScore += 30;
-    
-    // Z-index > 50 (lowered from 100) +30
-    if (zIndex > 50) modalScore += 30;
-    
-    // Has backdrop/overlay sibling +20
-    const hasBackdrop = !!document.querySelector('[class*="backdrop"], [class*="overlay"], [class*="Backdrop"]');
-    if (hasBackdrop) modalScore += 20;
-    
-    // Has explicit role +40
-    const role = modal.getAttribute('role');
-    if (role === 'dialog' || role === 'alertdialog') modalScore += 40;
-    
-    // Has aria-modal="true" +40
-    if (modal.getAttribute('aria-modal') === 'true') modalScore += 40;
-    
-    // Contains many form fields (likely a form modal) +20
-    const formFieldCount = modal.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]').length;
-    if (formFieldCount >= 3) modalScore += 20;
-    
-    // Large size (covers >40% of viewport) +10
-    const rect = modal.getBoundingClientRect();
-    const viewportArea = window.innerWidth * window.innerHeight;
-    const modalArea = rect.width * rect.height;
-    const coverage = (modalArea / viewportArea) * 100;
-    if (coverage > 40) modalScore += 10;
-    
-    // Require at least ONE strong signal for modal detection
-    const hasStrongSignal = 
-      role === 'dialog' ||
-      role === 'alertdialog' ||
-      modal.getAttribute('aria-modal') === 'true' ||
-      zIndex > 100;
-    
-    // Decision: score >= 60 AND has strong signal means it's likely a modal
-    // Increased threshold from 50 to 60 to reduce false positives
-    if (modalScore >= 60 && hasStrongSignal) {
-      console.log(`[DOMMap] 🔔 Modal detected with score ${modalScore}:`, {
-        zIndex,
-        position,
-        role,
-        formFields: formFieldCount,
-        coverage: coverage.toFixed(1) + '%',
-        hasStrongSignal,
-      });
-      return modal;
     }
   }
   
-  return null;
+  // If no clear winner, try form field heuristic as fallback
+  if (!bestModal) {
+    const allFormFields = document.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
+    if (allFormFields.length >= 15) {
+      for (const container of formContainers) {
+        if (!isVisible(container)) continue;
+        
+        const fieldsInContainer = container.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
+        const formFieldCount = fieldsInContainer.length;
+        
+        // If this container has 80%+ of all fields, check with structural + form heuristic
+        if (formFieldCount >= allFormFields.length * 0.8) {
+          const result = detectModalWithFormHeuristic(container, formFieldCount);
+          if (result.isModal) {
+            console.log('[DOMMap] 🔔 Modal detected via form heuristic tiebreaker:', result.reason);
+            bestModal = container;
+            break;
+          }
+        }
+      }
+    }
+  }
+  
+  if (bestModal) {
+    console.log(`[DOMMap] ✅ Final modal selected with score ${bestScore}`);
+  }
+  
+  return bestModal;
 }
+
+// Note: Old findActiveModal implementation replaced with findActiveModalWithStructuralDetection
+// The new implementation uses universal structural signals instead of fragile heuristics
 
 /**
  * Find an active/open dropdown listbox
@@ -481,20 +430,23 @@ function findActiveModal(): Element | null {
  * before doing any other action (like typing) which would close it
  */
 function findActiveDropdown(): { triggerName?: string; options: DOMMapElement[] } | null {
+  // SAFEGUARD: Skip dropdown detection on Google Sheets toolbar
+  // Google Sheets has visible listbox elements in toolbar that are NOT open dropdowns
+  const isGoogleSheets = window.location.hostname.includes('docs.google.com') && 
+                          window.location.href.includes('/spreadsheets');
+  
   // Look for visible listbox, menu, or options
+  // IMPORTANT: Only match elements that are truly popup/floating menus, not inline toolbar items
   const listboxSelectors = [
-    '[role="listbox"]',
-    '[role="menu"]',
+    // Only match expanded listboxes (not static toolbar items)
     '[role="listbox"][aria-expanded="true"]',
-    'ul[role="listbox"]',
-    'div[role="listbox"]',
-    // MUI/React patterns
+    '[role="menu"][aria-expanded="true"]',
+    // Popup/floating elements (high z-index or positioned)
+    '[data-popper-placement]', // Popper.js managed popups
+    // MUI/React patterns - these are typically real popups
     '[class*="MuiMenu-list"]',
     '[class*="MuiAutocomplete-listbox"]',
-    '[class*="Dropdown-menu"]',
-    '[class*="dropdown-menu"]',
-    '[class*="select-menu"]',
-    '[class*="listbox"]',
+    '[class*="MuiPopper-root"] [role="listbox"]',
     // Ant Design
     '[class*="ant-select-dropdown"]',
     '[class*="ant-dropdown"]',
@@ -507,13 +459,70 @@ function findActiveDropdown(): { triggerName?: string; options: DOMMapElement[] 
     '[id*="navMenuList"]',
     // Other common patterns
     '.dropdown-content:not([hidden])',
-    '[data-popper-placement]', // Popper.js managed popups
+    '[class*="Dropdown-menu"]',
+    '[class*="dropdown-menu"]:not([hidden])',
+    '[class*="select-menu"]',
   ];
   
-  for (const selector of listboxSelectors) {
-    const candidates = document.querySelectorAll(selector);
+  // On Google Sheets, only look for actual popup menus (not toolbar)
+  // Actual Google Sheets dropdown menus have specific patterns
+  const sheetsPopupSelectors = isGoogleSheets ? [
+    // Google Sheets actual popup menus
+    '[class*="goog-menu"][style*="display"]',
+    '[class*="picker-dialog"]',
+    '.docs-gm [role="menu"]',
+  ] : [];
+  
+  const selectorsToUse = isGoogleSheets ? sheetsPopupSelectors : listboxSelectors;
+  
+  for (const selector of selectorsToUse) {
+    if (!selector) continue;
+    
+    let candidates: NodeListOf<Element>;
+    try {
+      candidates = document.querySelectorAll(selector);
+    } catch (e) {
+      continue; // Skip invalid selectors
+    }
+    
     for (const listbox of candidates) {
       if (!isVisible(listbox)) continue;
+      
+      // SAFEGUARD: Skip Google Sheets toolbar elements
+      if (isGoogleSheets) {
+        // Skip if element is inside the toolbar (not a popup)
+        const isInToolbar = listbox.closest('[role="toolbar"]') || 
+                            listbox.closest('.docs-titlebar') ||
+                            listbox.closest('.docs-material-menu-button-caption') ||
+                            listbox.closest('#docs-chrome');
+        if (isInToolbar) continue;
+        
+        // Skip if it's one of the known toolbar dropdown triggers (not actual menus)
+        const ariaLabel = listbox.getAttribute('aria-label') || '';
+        if (ariaLabel.includes('Font list') || 
+            ariaLabel.includes('Font size list') ||
+            ariaLabel.includes('Zoom list')) {
+          continue;
+        }
+      }
+      
+      // Check if this is truly a floating/popup element (has high z-index or is in a portal)
+      const style = window.getComputedStyle(listbox);
+      const zIndex = parseInt(style.zIndex || '0', 10);
+      const position = style.position;
+      
+      // Truly open dropdowns are usually position:fixed/absolute with high z-index
+      // Skip static elements that are just part of the page layout
+      if (!isGoogleSheets && position === 'static' && zIndex < 100) {
+        // Check if it has aria-expanded="true" on its trigger
+        const triggerId = listbox.getAttribute('aria-controls') || listbox.getAttribute('id');
+        if (triggerId) {
+          const trigger = document.querySelector(`[aria-controls="${triggerId}"][aria-expanded="true"]`);
+          if (!trigger) continue; // No expanded trigger found, skip
+        } else {
+          continue; // No way to verify it's open, skip
+        }
+      }
       
       // Find options within the listbox
       const optionElements = listbox.querySelectorAll(
@@ -1222,5 +1231,122 @@ function formatElement(el: DOMMapElement): string {
   }
   
   return line;
+}
+
+/**
+ * Generate DOM map with iframe content included
+ * This function scans the main frame and all accessible iframes
+ */
+export async function generateDOMMapWithIframes(): Promise<DOMMap> {
+  const mainMap = generateDOMMap();
+  
+  // Find all iframes in the main frame
+  const iframes = document.querySelectorAll('iframe');
+  
+  if (iframes.length === 0) {
+    // No iframes, return main map as-is
+    return mainMap;
+  }
+  
+  console.log(`[DOMMap] Found ${iframes.length} iframes, attempting to scan content`);
+  
+  let iframesScanned = 0;
+  let iframeElementsAdded = 0;
+  
+  for (let i = 0; i < iframes.length && iframesScanned < 3; i++) {
+    const iframe = iframes[i];
+    
+    try {
+      // Try same-origin access first
+      if (iframe.contentDocument && iframe.contentDocument.body) {
+        console.log(`[DOMMap] Scanning same-origin iframe ${i}`);
+        
+        // Get the iframe's frameId (we'll need to request it)
+        // For now, use index as approximation
+        const iframeFrameId = i + 1;
+        
+        // Scan iframe content
+        const iframeInteractiveElements = getInteractiveElements(iframe.contentDocument.body);
+        const iframeFormFields = getFormFields(iframe.contentDocument.body);
+        
+        // Tag all elements with the iframe's frameId
+        iframeInteractiveElements.forEach(el => {
+          el.frameId = iframeFrameId;
+        });
+        iframeFormFields.forEach(el => {
+          el.frameId = iframeFrameId;
+        });
+        
+        // Merge into main map
+        mainMap.interactiveElements.push(...iframeInteractiveElements);
+        mainMap.formFields.push(...iframeFormFields);
+        
+        iframeElementsAdded += iframeInteractiveElements.length + iframeFormFields.length;
+        iframesScanned++;
+        
+        console.log(`[DOMMap] Added ${iframeInteractiveElements.length} interactive + ${iframeFormFields.length} form fields from iframe ${i}`);
+      }
+    } catch (e) {
+      // Cross-origin or access denied - try messaging approach
+      console.log(`[DOMMap] Iframe ${i} is cross-origin, requesting via message`);
+      
+      try {
+        // Request DOM map from iframe via messaging
+        const iframeDOMMap = await requestIframeDOMMap(i + 1);
+        
+        if (iframeDOMMap) {
+          // Merge the iframe's DOM map into main map
+          mainMap.interactiveElements.push(...iframeDOMMap.interactiveElements);
+          mainMap.formFields.push(...iframeDOMMap.formFields);
+          
+          iframeElementsAdded += iframeDOMMap.interactiveElements.length + iframeDOMMap.formFields.length;
+          iframesScanned++;
+          
+          console.log(`[DOMMap] Added ${iframeDOMMap.interactiveElements.length} interactive + ${iframeDOMMap.formFields.length} form fields from cross-origin iframe ${i}`);
+        }
+      } catch (messageError) {
+        console.warn(`[DOMMap] Failed to get DOM map from iframe ${i} via messaging:`, messageError);
+      }
+    }
+  }
+  
+  console.log(`[DOMMap] Scanned ${iframesScanned} iframes, added ${iframeElementsAdded} total elements`);
+  
+  return mainMap;
+}
+
+/**
+ * Request DOM map from an iframe via messaging
+ * @param frameId The Chrome frame ID of the iframe
+ * @returns Promise that resolves with the iframe's DOM map
+ */
+async function requestIframeDOMMap(frameId: number): Promise<DOMMap | null> {
+  return new Promise((resolve) => {
+    // Set up listener for response
+    const listener = (message: any) => {
+      if (message.type === 'IFRAME_DOM_MAP_RESPONSE' && message.payload?.frameId === frameId) {
+        chrome.runtime.onMessage.removeListener(listener);
+        resolve(message.payload.domMap);
+      }
+    };
+    
+    chrome.runtime.onMessage.addListener(listener);
+    
+    // Send request via runtime (will be routed by service worker)
+    chrome.runtime.sendMessage({
+      type: 'GET_IFRAME_DOM_MAP',
+      payload: { frameId },
+    }).catch((error) => {
+      console.warn(`[DOMMap] Failed to request DOM map from iframe ${frameId}:`, error);
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve(null);
+    });
+    
+    // Timeout after 2 seconds
+    setTimeout(() => {
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve(null);
+    }, 2000);
+  });
 }
 

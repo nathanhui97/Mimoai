@@ -1642,7 +1642,10 @@ export class RecordingManager {
         } : undefined;
 
         // Capture iframe context (Phase 2: Important)
-        const iframeContext = IframeUtils.getIframeContext(target);
+        // Use getCurrentFrameContext to properly detect if we're inside an iframe
+        const { getCurrentFrameId } = await import('./content-script');
+        const frameId = getCurrentFrameId();
+        const iframeContext = IframeUtils.getCurrentFrameContext(frameId);
 
         // Capture retry strategy (Phase 3: Minor) - omitted (always defaults, replayer uses fallbackSelectors)
         // Retry strategy removed - replayer uses fallbackSelectors directly with default retry logic
@@ -3084,7 +3087,10 @@ export class RecordingManager {
       const pageState: import('../types/workflow').PageState | undefined = undefined;
 
       // Capture iframe context (Phase 2: Important)
-      const iframeContext = IframeUtils.getIframeContext(element);
+      // Use getCurrentFrameContext to properly detect if we're inside an iframe
+      const { getCurrentFrameId } = await import('./content-script');
+      const frameId = getCurrentFrameId();
+      const iframeContext = IframeUtils.getCurrentFrameContext(frameId);
 
       // Capture timing information (Phase 2: Important) - only include if delayAfter exists
       // Use the synchronously captured timestamp (when input event fired, not when debounce completed)

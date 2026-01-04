@@ -48,7 +48,12 @@ export type MessageType =
   | 'DEBUGGER_CLICK'
   | 'DEBUGGER_DETACH'
   | 'EXECUTE_ACTION_IN_FRAME' // Cross-frame execution - execute action in specific iframe
-  | 'FRAME_ACTION_COMPLETED'; // Response from iframe after action execution
+  | 'FRAME_ACTION_COMPLETED' // Response from iframe after action execution
+  | 'START_RECORDING_ALL_FRAMES' // Broadcast to all frames to start recording
+  | 'STOP_RECORDING_ALL_FRAMES' // Broadcast to all frames to stop recording
+  | 'GET_IFRAME_DOM_MAP' // Request DOM map from an iframe
+  | 'IFRAME_DOM_MAP_RESPONSE' // Response with DOM map from iframe
+  | 'EXECUTE_IN_FRAME'; // Route action execution through service worker to specific frame
 
 /**
  * Base message interface for all extension messages
@@ -330,6 +335,54 @@ export interface ResumeRecordingMessage extends ExtensionMessage {
     fromUrl: string; // Last recorded tab URL
     fromTabIndex?: number; // Logical index of source tab
     toTabIndex?: number; // Logical index of target tab (will be assigned)
+  };
+}
+
+/**
+ * START_RECORDING_ALL_FRAMES message - broadcast to all frames to start recording
+ */
+export interface StartRecordingAllFramesMessage extends ExtensionMessage {
+  type: 'START_RECORDING_ALL_FRAMES';
+  payload?: {
+    options?: Record<string, any>;
+  };
+}
+
+/**
+ * STOP_RECORDING_ALL_FRAMES message - broadcast to all frames to stop recording
+ */
+export interface StopRecordingAllFramesMessage extends ExtensionMessage {
+  type: 'STOP_RECORDING_ALL_FRAMES';
+  payload?: {};
+}
+
+/**
+ * GET_IFRAME_DOM_MAP message - request DOM map from an iframe
+ */
+export interface GetIframeDOMMapMessage extends ExtensionMessage {
+  type: 'GET_IFRAME_DOM_MAP';
+  payload?: {};
+}
+
+/**
+ * IFRAME_DOM_MAP_RESPONSE message - response with DOM map from iframe
+ */
+export interface IframeDOMMapResponseMessage extends ExtensionMessage {
+  type: 'IFRAME_DOM_MAP_RESPONSE';
+  payload: {
+    frameId: number;
+    domMap: any; // DOMMap type from dom-map.ts
+  };
+}
+
+/**
+ * EXECUTE_IN_FRAME message - route action execution through service worker to specific frame
+ */
+export interface ExecuteInFrameMessage extends ExtensionMessage {
+  type: 'EXECUTE_IN_FRAME';
+  payload: {
+    action: any; // AgentAction type
+    targetFrameId: number;
   };
 }
 

@@ -417,42 +417,47 @@ The hints show RECORDED values, but variable overrides are what the user WANTS N
   if (payload.spreadsheetContext?.isSpreadsheet) {
     const ctx = payload.spreadsheetContext;
     spreadsheetSection = `
-## 📊 SPREADSHEET CONTEXT (Google Sheets / Excel)
+## 📊 SPREADSHEET MODE - MANDATORY CELLREF REQUIRED
 
-You are working in a spreadsheet. You can see the full sheet structure and make intelligent decisions about where to place data.
+You are working in a spreadsheet (Google Sheets / Excel).
 
-### Current Sheet State
+### Current State
+Active cell: ${ctx.sheetState.activeCell?.reference || 'unknown'}
 Sheet: "${ctx.sheetState.sheetName}"
-Data Range: ${ctx.sheetState.dataRange.firstColumn}${ctx.sheetState.dataRange.firstRow} to ${ctx.sheetState.dataRange.lastColumn}${ctx.sheetState.dataRange.lastRow}
 
-### Column Structure
-${ctx.sheetState.columns.map(col => 
-  `${col.letter} "${col.header}": ${col.rowCount} rows of ${col.dataType}, last data at row ${col.lastDataRow}, next empty: row ${col.firstEmptyRow}`
-).join('\n')}
+### 🚨 CRITICAL: YOU MUST RETURN cellRef FOR ALL SPREADSHEET ACTIONS
 
-### Recorded Action
-User clicked: ${ctx.recordedIntent.cellRef} (${ctx.recordedIntent.wasEmpty ? 'was empty' : 'had data'})
-Column header: "${ctx.recordedIntent.columnHeader || 'unknown'}"
-${ctx.recordedIntent.wasAppendPosition ? '>>> This was an APPEND operation (first empty after data)' : ''}
-Reasoning: ${ctx.recordedIntent.reasoning}
+When the hint says "Enter X" or "Type Y" on a spreadsheet:
+1. **Extract the cell reference** from the hint's recordedAriaLabel (like "A2", "B3", "C5")
+2. **Return it as cellRef** in your response
 
-### Your Task
-Decide the BEST cell to click based on CURRENT sheet state:
-- If the recorded cell is still the right choice, use it
-- If data has changed, find the new appropriate cell
-- For append operations, find the current first empty row in that column
+### RESPONSE FORMAT FOR SPREADSHEETS
 
-### Spreadsheet Actions Available
-- **click_cell**: Click a specific cell reference
-  Example: {"action": "click_cell", "cellRef": "B8", "reasoning": "Current next empty row in column B"}
-  
-- **find_and_click_empty**: Find next empty in column and click
-  Example: {"action": "find_and_click_empty", "column": "B", "reasoning": "Appending to column B"}
-  
-- **find_by_header**: Find cell by column header name
-  Example: {"action": "find_by_header", "headerText": "Monthly Sales", "rowOffset": 1, "reasoning": "First data row under header"}
+For typing text into a cell:
+{"action": "type", "cellRef": "A2", "text": "the value to type"}
 
-IMPORTANT: Use your judgment like a human would. If the user was appending data and now there's more data, find the NEW next empty row.
+For clicking a cell:
+{"action": "click", "cellRef": "B3"}
+
+### How to Find the Cell Reference
+
+Look at the current hint's information:
+- recordedAriaLabel might say "A2" or "Cell B3" → Extract the cell reference
+- Check fallback selectors for patterns like [aria-label="C5"]
+- Use the active cell if no cell reference in hint
+
+### Example Workflow
+
+Hint: "Enter 'nathan' in field", recordedAriaLabel: "A2"
+→ Response: {"action": "type", "cellRef": "A2", "text": "nathan"}
+
+Hint: "CLICK on element", recordedAriaLabel: "B3"
+→ Response: {"action": "click", "cellRef": "B3"}
+
+### NEVER SKIP!
+- Always execute the typing action
+- Don't assume cells are already filled
+- The hardcoded engine will handle the actual typing
 `;
   }
 
@@ -671,6 +676,35 @@ PRIORITY ORDER (follow strictly):
 - **skip**: Skip current hint (element doesn't exist or already complete)
 - **done**: All steps complete
 - **fail**: Cannot proceed (LAST RESORT)
+
+📊 SPREADSHEET ACTIONS (Google Sheets / Excel Online only):
+These actions are automatically enabled when on sheets.google.com or excel.office.com domains.
+
+- **type_in_cell**: Type text directly into a specific cell (atomic: navigate + type)
+  - Example: {"action": "type_in_cell", "cellRef": "B5", "text": "Hello World"}
+  - Example: {"action": "type_in_cell", "cellRef": "A1", "text": "Name", "clearFirst": true}
+  - Use when user says: "Type X in cell Y", "Enter value in A5", "Put 'text' in cell B2"
+  
+- **type_in_header_column**: Type in a cell by finding column header
+  - Example: {"action": "type_in_header_column", "headerText": "Email", "rowOffset": 1, "text": "john@test.com"}
+  - Example: {"action": "type_in_header_column", "headerText": "Price", "rowOffset": 2, "text": "29.99"}
+  - Use when user says: "In the Email column, row 2, type...", "Enter value in Name column"
+  - rowOffset: 1 = first data row (row 2 if headers in row 1), 2 = second data row, etc.
+  
+- **type_in_next_empty**: Type in the next empty cell of a column
+  - Example: {"action": "type_in_next_empty", "column": "A", "text": "New entry"}
+  - Use when user says: "Add to next empty row", "Append to column A", "Add new item"
+  
+- **read_cell**: Read the value from a specific cell
+  - Example: {"action": "read_cell", "cellRef": "C5"}
+  - Use when user says: "Read cell B5", "What's in cell A1?", "Get value from C10"
+  
+- **batch_type**: Fill multiple cells at once (efficient for bulk data entry)
+  - Example: {"action": "batch_type", "cells": [{"cellRef": "A2", "text": "John"}, {"cellRef": "B2", "text": "john@test.com"}]}
+  - Use when user provides multiple cell values in one request
+  
+NOTE: For spreadsheets, prefer these specialized actions over generic click+type sequences.
+They handle navigation, verification, and retries automatically.
 
 Respond with a JSON object:
 ${currentCandidates.length > 0 ? `

@@ -410,6 +410,42 @@ chrome.runtime.onMessage.addListener(
       return false;
     }
 
+    // Handle EXECUTE_IN_FRAME - route action execution to specific frame
+    if (message.type === 'EXECUTE_IN_FRAME' && sender.tab?.id) {
+      const { action, targetFrameId } = message.payload || {};
+      
+      if (!action || typeof targetFrameId !== 'number') {
+        sendResponse({
+          success: false,
+          error: 'Missing action or targetFrameId in EXECUTE_IN_FRAME message',
+        });
+        return false;
+      }
+      
+      const tabId = sender.tab.id;
+      console.log(`[ServiceWorker] Routing action to frame ${targetFrameId} in tab ${tabId}`);
+      
+      // Send to the target frame
+      chrome.tabs.sendMessage(
+        tabId,
+        {
+          type: 'EXECUTE_ACTION_IN_FRAME',
+          payload: { action },
+        },
+        { frameId: targetFrameId }
+      ).then(() => {
+        sendResponse({ success: true });
+      }).catch((error) => {
+        console.error('[ServiceWorker] Failed to route action to frame:', error);
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to route action to frame',
+        });
+      });
+      
+      return true; // Keep channel open for async
+    }
+
     // Handle START_RECORDING - coordinate multi-tab recording
     if (message.type === 'START_RECORDING') {
       (async () => {
@@ -606,8 +642,33 @@ chrome.runtime.onMessage.addListener(
     }
 
     // Forward RECORDED_STEP messages from content scripts to sidepanel
-    if (message.type === 'RECORDED_STEP' && sender.tab) {
-      // Forward to sidepanel (if it's listening)
+    if (message.type === 'RECORDED_STEP' && sender.tab?.id) {
+      // Check if this step came from an iframe (frameId !== 0)
+      const frameId = sender.frameId ?? 0;
+      const tabId = sender.tab.id;
+      
+      if (frameId !== 0) {
+        // Step recorded in iframe - relay to main frame first, then to sidepanel
+        console.log(`[ServiceWorker] Step recorded in iframe (frameId: ${frameId}), relaying to main frame`);
+        
+        // Send to main frame (frameId 0) of the same tab
+        chrome.tabs.sendMessage(
+          tabId,
+          {
+            type: 'RECORDED_STEP',
+            payload: {
+              ...message.payload,
+              fromIframe: true,
+              iframeFrameId: frameId,
+            },
+          },
+          { frameId: 0 }
+        ).catch((error) => {
+          console.warn('[ServiceWorker] Failed to relay iframe step to main frame:', error);
+        });
+      }
+      
+      // Always forward to sidepanel (if it's listening)
       chrome.runtime.sendMessage(message).catch(() => {
         // Sidepanel might not be open, that's okay
       });
