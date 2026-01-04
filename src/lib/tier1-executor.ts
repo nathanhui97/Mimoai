@@ -1017,10 +1017,42 @@ export class Tier1Executor {
     console.log('[Tier1] Resolving element with', bundle.strategies.length, 'strategies');
     
     // PRIORITY 1: Try recorded fallback selectors FIRST!
-    // These contain container context like "//div[contains(., 'Widget Title')]//button"
-    // which provides the most reliable disambiguation
+    // But sort them by SPECIFICITY - specific selectors should come before broad container XPaths
     if (bundle.recordedFallbackSelectors && bundle.recordedFallbackSelectors.length > 0) {
-      console.log(`[Tier1] 🎯 Trying ${bundle.recordedFallbackSelectors.length} recorded fallback selectors FIRST...`);
+      console.log(`[Tier1] 🎯 Trying ${bundle.recordedFallbackSelectors.length} recorded fallback selectors...`);
+      
+      // 🎯 CRITICAL: Sort selectors by specificity (high to low)
+      // This ensures we try [aria-label="X"] BEFORE //section[contains(.,"Y")]//button
+      const sortedSelectors = [...bundle.recordedFallbackSelectors].sort((a, b) => {
+        const scoreSelector = (sel: string): number => {
+          // Highest priority: Attribute-based selectors (very specific)
+          if (sel.includes('[aria-label=')) return 100;
+          if (sel.includes('[title=')) return 95;
+          if (sel.includes('[data-testid=') || sel.includes('[data-test-id=')) return 90;
+          if (sel.includes('[id=')) return 85;
+          if (sel.includes('[name=')) return 80;
+          
+          // Medium priority: XPath with exact text match
+          if (sel.includes('[normalize-space(text())=') || sel.includes('[text()=')) return 70;
+          if (sel.includes("normalize-space(.)=\"") || sel.includes("text()=\"")) return 65;
+          
+          // Lower priority: Contains-based selectors (can match multiple)
+          if (sel.includes('contains(normalize-space(.)') && !sel.includes('//button') && !sel.includes('//a')) return 50;
+          
+          // Lowest priority: Container + element type (e.g., //section[...]//button)
+          // These are the MOST DANGEROUS - they match the first element in a container!
+          if ((sel.includes('//section') || sel.includes('//div')) && 
+              (sel.includes('//button') || sel.includes('//a') || sel.includes('//input'))) {
+            return 10; // Very low - try last
+          }
+          
+          // Default: medium-low priority
+          return 40;
+        };
+        return scoreSelector(b) - scoreSelector(a); // Higher score first
+      });
+      
+      console.log(`[Tier1] 📊 Sorted selectors by specificity (first 3):`, sortedSelectors.slice(0, 3).map(s => s.substring(0, 50)));
       
       // 🎯 CRITICAL: Get expected text from bundle for verification
       // Fallback selectors can match the wrong element (e.g., first button in a section)
@@ -1030,7 +1062,7 @@ export class Tier1Executor {
         .map(s => s.value.toLowerCase().trim())
         .filter(Boolean);
       
-      for (const selector of bundle.recordedFallbackSelectors) {
+      for (const selector of sortedSelectors) {
         try {
           let element: Element | null = null;
           
