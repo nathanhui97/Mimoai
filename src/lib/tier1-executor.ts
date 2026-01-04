@@ -1089,14 +1089,36 @@ export class Tier1Executor {
               const ariaLabel = (element.getAttribute('aria-label') || '').toLowerCase().trim();
               const title = (element.getAttribute('title') || '').toLowerCase().trim();
               
-              const textMatches = expectedText.some(expected => 
-                elementText === expected ||
-                elementText.includes(expected) ||
-                ariaLabel === expected ||
-                ariaLabel.includes(expected) ||
-                title === expected ||
-                title.includes(expected)
-              );
+              // CRITICAL: For dropdown options, use FUZZY matching (bidirectional)
+              // Example: Dropdown says "Accounts", but expected is "AM - My Accounts"
+              // Both "accounts".includes("accounts") AND "am - my accounts".includes("accounts") should match
+              const role = element.getAttribute('role');
+              const isDropdownOption = role === 'option' || role === 'menuitem' || role === 'menuitemradio';
+              
+              const textMatches = expectedText.some(expected => {
+                // Exact or contains match (forward direction)
+                const forwardMatch = 
+                  elementText === expected ||
+                  elementText.includes(expected) ||
+                  ariaLabel === expected ||
+                  ariaLabel.includes(expected) ||
+                  title === expected ||
+                  title.includes(expected);
+                
+                if (forwardMatch) return true;
+                
+                // For dropdown options: Also check reverse (element text is subset of expected)
+                // This handles: Dropdown option "Accounts" vs expected "AM - My Accounts"
+                if (isDropdownOption && elementText.length >= 3) {
+                  const reverseMatch = expected.includes(elementText);
+                  if (reverseMatch) {
+                    console.log(`[Tier1] ✅ Fuzzy match for dropdown option: "${elementText}" is contained in expected "${expected}"`);
+                    return true;
+                  }
+                }
+                
+                return false;
+              });
               
               if (!textMatches) {
                 console.log(`[Tier1] ⚠️ Fallback selector found element but text doesn't match. Expected: "${expectedText[0]}", found: "${ariaLabel || elementText.substring(0, 50)}"`);

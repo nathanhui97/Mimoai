@@ -1485,9 +1485,9 @@ export class AIAgent {
     const allElements = [...domMap.interactiveElements, ...domMap.formFields];
     
     // 🎯 PRE-FILTER: If we have a recorded scope hint, only consider elements in that widget
-    // This ensures the AI ONLY sees candidates from the correct widget!
+    // EXCEPTION: Skip scope filtering when dropdown is open - dropdown options are transient!
     let candidatePool = allElements;
-    if (hint.recordedScopeHint) {
+    if (hint.recordedScopeHint && !dropdownIsOpen) {
       const scopeHint = hint.recordedScopeHint.toLowerCase();
       const inScope = allElements.filter(el => {
         // Check widgetTitle (exact match or contains)
@@ -1515,6 +1515,8 @@ export class AIAgent {
       } else {
         console.warn(`[AIAgent] ⚠️ No elements found in recorded scope "${hint.recordedScopeHint}" - element may not be visible yet. Using all ${allElements.length} elements as fallback.`);
       }
+    } else if (dropdownIsOpen) {
+      console.log(`[AIAgent] 🔽 Dropdown is open - skipping scope filtering to include dropdown options`);
     }
     
     // DEBUG: Log hint details
@@ -1598,9 +1600,10 @@ export class AIAgent {
     // ============================================================
     // DROPDOWN CONTEXT: If dropdown is open, massively boost options
     // ============================================================
-    if (dropdownIsOpen && el.role === 'option') {
-      score += 100; // Massive boost for dropdown options when dropdown is open!
-      console.log(`[AIAgent] 🔽 Boosting dropdown option: "${el.text || el.name}" (+100 points)`);
+    const isDropdownOption = el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio';
+    if (dropdownIsOpen && isDropdownOption) {
+      score += 150; // Massive boost for dropdown options when dropdown is open!
+      console.log(`[AIAgent] 🔽 Boosting dropdown option: "${el.text || el.name}" (+150 points)`);
     }
     
     // ============================================================
@@ -1618,9 +1621,9 @@ export class AIAgent {
       const validRoles = roleAliases[expectedRole] || [expectedRole];
       if (validRoles.includes(el.role)) {
         score += 50; // Role match!
-      } else if (dropdownIsOpen && el.role === 'option') {
+      } else if (dropdownIsOpen && isDropdownOption) {
         // Don't penalize options when dropdown is open, even if hint expects button
-        score += 0; // Neutral (already got +100 boost above)
+        score += 0; // Neutral (already got +150 boost above)
       } else {
         // Role mismatch - significant penalty
         score -= 20;
