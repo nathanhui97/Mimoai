@@ -1022,6 +1022,14 @@ export class Tier1Executor {
     if (bundle.recordedFallbackSelectors && bundle.recordedFallbackSelectors.length > 0) {
       console.log(`[Tier1] 🎯 Trying ${bundle.recordedFallbackSelectors.length} recorded fallback selectors FIRST...`);
       
+      // 🎯 CRITICAL: Get expected text from bundle for verification
+      // Fallback selectors can match the wrong element (e.g., first button in a section)
+      // We MUST verify the element text/aria-label matches before accepting!
+      const expectedText = bundle.strategies
+        .filter(s => s.type === 'aria' || s.type === 'text')
+        .map(s => s.value.toLowerCase().trim())
+        .filter(Boolean);
+      
       for (const selector of bundle.recordedFallbackSelectors) {
         try {
           let element: Element | null = null;
@@ -1042,6 +1050,28 @@ export class Tier1Executor {
           }
           
           if (element && this.isElementVisible(element)) {
+            // 🛡️ VERIFICATION: Check if element matches expected text
+            // This prevents fallback selectors from picking wrong elements!
+            if (expectedText.length > 0) {
+              const elementText = (element.textContent || '').toLowerCase().trim();
+              const ariaLabel = (element.getAttribute('aria-label') || '').toLowerCase().trim();
+              const title = (element.getAttribute('title') || '').toLowerCase().trim();
+              
+              const textMatches = expectedText.some(expected => 
+                elementText === expected ||
+                elementText.includes(expected) ||
+                ariaLabel === expected ||
+                ariaLabel.includes(expected) ||
+                title === expected ||
+                title.includes(expected)
+              );
+              
+              if (!textMatches) {
+                console.log(`[Tier1] ⚠️ Fallback selector found element but text doesn't match. Expected: "${expectedText[0]}", found: "${ariaLabel || elementText.substring(0, 50)}"`);
+                continue; // Try next fallback selector
+              }
+            }
+            
             console.log(`[Tier1] ✅ Found via recorded fallback selector: "${selector.substring(0, 60)}..."`);
             return {
               status: 'success',

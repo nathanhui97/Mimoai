@@ -125,28 +125,38 @@ export function generateDOMMap(): DOMMap {
     timestamp: Date.now(),
   };
   
-  // Check for active modal first
-  let modal = findActiveModal();
+  // CRITICAL: Check for dropdown FIRST, before modal
+  // Dropdowns (like navigation menus) should take precedence over modals
+  // This prevents search modals from blocking navigation menu interactions
+  const dropdown = findActiveDropdown();
   
-  // HEURISTIC: If no modal found by traditional means, but we have many form fields (15+),
-  // try to infer a modal by looking for a container with lots of inputs
-  if (!modal) {
-    const allFormFields = document.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
-    if (allFormFields.length >= 15) {
-      // Find the closest common ancestor that contains most of these fields
-      const containers = document.querySelectorAll('[class*="container"], [class*="form"], [class*="panel"], section, main');
-      for (const container of containers) {
-        if (!isVisible(container)) continue;
-        
-        const fieldsInContainer = container.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
-        // If this container has 80%+ of all fields, it's likely a modal
-        if (fieldsInContainer.length >= allFormFields.length * 0.8) {
-          modal = container;
-          console.log('[DOMMap] 🔔 Modal inferred by form field heuristic:', fieldsInContainer.length, 'fields');
-          break;
+  // Check for active modal (only if no dropdown found)
+  let modal: Element | null = null;
+  if (!dropdown) {
+    modal = findActiveModal();
+    
+    // HEURISTIC: If no modal found by traditional means, but we have many form fields (15+),
+    // try to infer a modal by looking for a container with lots of inputs
+    if (!modal) {
+      const allFormFields = document.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
+      if (allFormFields.length >= 15) {
+        // Find the closest common ancestor that contains most of these fields
+        const containers = document.querySelectorAll('[class*="container"], [class*="form"], [class*="panel"], section, main');
+        for (const container of containers) {
+          if (!isVisible(container)) continue;
+          
+          const fieldsInContainer = container.querySelectorAll('input, textarea, select, [role="combobox"], [role="textbox"]');
+          // If this container has 80%+ of all fields, it's likely a modal
+          if (fieldsInContainer.length >= allFormFields.length * 0.8) {
+            modal = container;
+            console.log('[DOMMap] 🔔 Modal inferred by form field heuristic:', fieldsInContainer.length, 'fields');
+            break;
+          }
         }
       }
     }
+  } else {
+    console.log('[DOMMap] ⏭️ Skipping modal detection - dropdown takes priority');
   }
   
   if (modal) {
@@ -207,21 +217,14 @@ export function generateDOMMap(): DOMMap {
   // Update state tracking
   previousFormFieldCount = currentFormFieldCount;
   
-  // CRITICAL: Check for open dropdown/listbox AFTER getting interactive elements
-  // Skip dropdown detection if:
-  // 1. UI transition just happened (old dropdown is stale)
-  // 2. Modal is active (dropdowns inside modal are scoped, not global)
-  if (!uiTransitionDetected && !modal) {
-    const dropdown = findActiveDropdown();
-    if (dropdown) {
-      map.activeDropdown = dropdown;
-      console.log('[DOMMap] 🔽 Active dropdown detected with', dropdown.options.length, 'options:', 
-        dropdown.options.map(o => o.name || o.text).join(', '));
-    }
+  // Set active dropdown if found (already detected earlier, before modal check)
+  // Skip if UI transition just happened (old dropdown is stale)
+  if (dropdown && !uiTransitionDetected) {
+    map.activeDropdown = dropdown;
+    console.log('[DOMMap] 🔽 Active dropdown detected with', dropdown.options.length, 'options:', 
+      dropdown.options.map(o => o.name || o.text).join(', '));
   } else if (uiTransitionDetected) {
     console.log('[DOMMap] ⏭️ Skipping dropdown detection due to UI transition');
-  } else if (modal) {
-    console.log('[DOMMap] ⏭️ Skipping dropdown detection due to active modal (dropdowns scoped to modal)');
   }
   
   // Get focused element
