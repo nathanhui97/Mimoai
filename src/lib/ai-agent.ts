@@ -630,6 +630,55 @@ export class AIAgent {
             
             console.log(`[AIAgent] ✅ Marked hint ${completedIndex} as completed, advanced to hint ${this.state.currentHintIndex}`);
             console.log(`[AIAgent] Completed hints: ${this.state.hints.filter(h => h.completed).length}/${this.state.hints.length}`);
+            
+            // 🎯 CRITICAL: If we just clicked something that likely navigated/changed the page,
+            // wait for the new content to load before continuing
+            const completedHint = this.state.hints[completedIndex];
+            const wasNavigationClick = action.type === 'click' && 
+              (completedHint?.actionType === 'click' || completedHint?.description?.toLowerCase().includes('navigate'));
+            
+            if (wasNavigationClick && this.state.currentHintIndex < this.state.hints.length) {
+              const nextHint = this.state.hints[this.state.currentHintIndex];
+              console.log(`[AIAgent] ⏳ Navigation click detected, waiting for new content to load...`);
+              
+              // Wait for page stability (no more DOM changes)
+              await this.sleep(800); // Initial wait for navigation to start
+              
+              // If next hint has a scope, wait for that widget to appear
+              if (nextHint?.recordedScopeHint) {
+                console.log(`[AIAgent] ⏳ Waiting for widget/content "${nextHint.recordedScopeHint}" to become visible...`);
+                const maxWaitMs = 5000;
+                const checkIntervalMs = 500;
+                const startWait = Date.now();
+                let contentReady = false;
+                
+                while (Date.now() - startWait < maxWaitMs) {
+                  // Re-generate DOM map to check if content is ready
+                  const { generateDOMMap } = await import('../content/dom-map');
+                  const currentMap = generateDOMMap();
+                  
+                  // Check if we have interactive elements with matching text
+                  const hasMatchingElements = currentMap.interactiveElements.some(el => {
+                    const targetText = nextHint.targetText?.toLowerCase() || '';
+                    const elName = (el.name || '').toLowerCase();
+                    const elText = (el.text || '').toLowerCase();
+                    return elName.includes(targetText) || elText.includes(targetText) || targetText.includes(elName);
+                  });
+                  
+                  if (hasMatchingElements) {
+                    console.log(`[AIAgent] ✅ Content ready - found matching elements (waited ${Date.now() - startWait}ms)`);
+                    contentReady = true;
+                    break;
+                  }
+                  
+                  await this.sleep(checkIntervalMs);
+                }
+                
+                if (!contentReady) {
+                  console.warn(`[AIAgent] ⚠️ Content not ready after ${maxWaitMs}ms - continuing anyway`);
+                }
+              }
+            }
           }
         } else if (!result.success) {
           // Track failures for currentHintIndex - skip hint after 3 consecutive failures
@@ -1485,9 +1534,17 @@ export class AIAgent {
     const allElements = [...domMap.interactiveElements, ...domMap.formFields];
     
     // 🎯 PRE-FILTER: If we have a recorded scope hint, only consider elements in that widget
-    // EXCEPTION: Skip scope filtering when dropdown is open - dropdown options are transient!
+    // CRITICAL: If dropdown is open, ONLY include dropdown options (ignore scope filtering entirely)
     let candidatePool = allElements;
-    if (hint.recordedScopeHint && !dropdownIsOpen) {
+    if (dropdownIsOpen) {
+      // DROPDOWN OPEN: Only consider dropdown options, ignore everything else!
+      const isDropdownOption = (el: DOMMapElement) => 
+        el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio' || el.role === 'menuitemcheckbox';
+      
+      candidatePool = allElements.filter(isDropdownOption);
+      console.log(`[AIAgent] 🔽 Dropdown is open - filtered to ${candidatePool.length} dropdown options ONLY (ignoring ${allElements.length - candidatePool.length} non-dropdown elements)`);
+    } else if (hint.recordedScopeHint) {
+      // Normal scope filtering when no dropdown
       const scopeHint = hint.recordedScopeHint.toLowerCase();
       const inScope = allElements.filter(el => {
         // Check widgetTitle (exact match or contains)
@@ -1515,8 +1572,6 @@ export class AIAgent {
       } else {
         console.warn(`[AIAgent] ⚠️ No elements found in recorded scope "${hint.recordedScopeHint}" - element may not be visible yet. Using all ${allElements.length} elements as fallback.`);
       }
-    } else if (dropdownIsOpen) {
-      console.log(`[AIAgent] 🔽 Dropdown is open - skipping scope filtering to include dropdown options`);
     }
     
     // DEBUG: Log hint details
