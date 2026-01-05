@@ -106,11 +106,6 @@ function App() {
     status: 'success' | 'failed' | 'info';
     reasoning?: string;
   }>>([]);
-  // Mode selection: 'selector' (legacy) or 'agent' (AI-powered)
-  // Default to selector if agent is disabled
-  const [executionMode, setExecutionMode] = useState<'selector' | 'agent'>(
-    FeatureFlags.AI_AGENT_LOOP ? 'agent' : 'selector'
-  );
 
   // Ping content script on mount
   useEffect(() => {
@@ -915,17 +910,19 @@ function App() {
 
   /**
    * Execute workflow with optional variable values
-   * Uses the new Universal Execution Engine for reliable clicks and dropdown handling
+   * Always uses AI Agent mode for the best adaptive execution
    */
   const executeWorkflowWithVariables = async (
     steps: WorkflowStep[],
     workflow: SavedWorkflow,
     variableValues?: Record<string, string>
   ) => {
-    // Route to appropriate execution mode (if agent is enabled)
-    if (FeatureFlags.AI_AGENT_LOOP && executionMode === 'agent') {
+    // Always use AI Agent for the best adaptive execution
+    // Selector mode is kept as fallback code if AI Agent is disabled via feature flag
+    if (FeatureFlags.AI_AGENT_LOOP) {
       await executeWithAgent(workflow, variableValues);
     } else {
+      // Fallback to Universal Execution if AI Agent is disabled
       await executeWithSelectors(steps, workflow, variableValues);
     }
   };
@@ -1803,64 +1800,6 @@ function App() {
           </div>
         )}
 
-        {/* Execution Mode Toggle */}
-        {savedWorkflows.length > 0 && (
-          <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-            <h2 className="text-lg font-semibold mb-3 text-card-foreground flex items-center gap-2">
-              <svg className="h-5 w-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-              </svg>
-              Execution Mode
-            </h2>
-            <div className="flex gap-2">
-              {FeatureFlags.AI_AGENT_LOOP && (
-                <button
-                  onClick={() => setExecutionMode('agent')}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    executionMode === 'agent'
-                      ? 'bg-purple-600 text-white'
-                      : 'bg-muted text-muted-foreground hover:bg-muted/80'
-                  }`}
-                >
-                  <div className="flex items-center justify-center gap-2">
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                    </svg>
-                    AI Agent
-                  </div>
-                  <div className="text-xs opacity-80 mt-0.5">Observe → Think → Act</div>
-                </button>
-              )}
-              <button
-                onClick={() => setExecutionMode('selector')}
-                className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  executionMode === 'selector'
-                    ? 'bg-blue-600 text-white'
-                    : 'bg-muted text-muted-foreground hover:bg-muted/80'
-                }`}
-              >
-                <div className="flex items-center justify-center gap-2">
-                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-                  </svg>
-                  Selectors
-                </div>
-                <div className="text-xs opacity-80 mt-0.5">CSS/XPath based</div>
-              </button>
-            </div>
-            {FeatureFlags.AI_AGENT_LOOP ? (
-              <p className="text-xs text-muted-foreground mt-2">
-                {executionMode === 'agent' 
-                  ? '🤖 AI Agent: Understands the page and decides actions. Works on complex sites like Salesforce.'
-                  : '⚡ Selector Mode: Uses recorded selectors directly. Faster for simple pages.'}
-              </p>
-            ) : (
-              <p className="text-xs text-muted-foreground mt-2">
-                ⚡ Uses recorded CSS selectors with AI recovery fallback. Fast and reliable.
-              </p>
-            )}
-          </div>
-        )}
 
         {/* AI Agent Log */}
         {agentLog.length > 0 && (

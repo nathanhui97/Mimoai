@@ -53,7 +53,11 @@ export type MessageType =
   | 'STOP_RECORDING_ALL_FRAMES' // Broadcast to all frames to stop recording
   | 'GET_IFRAME_DOM_MAP' // Request DOM map from an iframe
   | 'IFRAME_DOM_MAP_RESPONSE' // Response with DOM map from iframe
-  | 'EXECUTE_IN_FRAME'; // Route action execution through service worker to specific frame
+  | 'EXECUTE_IN_FRAME' // Route action execution through service worker to specific frame
+  | 'ACTIVATE_TAB' // Switch to a specific tab during multi-tab execution
+  | 'CREATE_TAB' // Create a new tab during multi-tab execution
+  | 'NAVIGATE_TAB' // Navigate a tab to a URL during multi-tab execution
+  | 'GET_CURRENT_TAB_ID'; // Get the current tab's ID (from service worker)
 
 /**
  * Base message interface for all extension messages

@@ -13,6 +13,7 @@ import type {
   ComponentPattern,
   ElementSignature,
 } from '../../types/universal-types';
+import type { TabSwitchPayload } from '../../types/workflow';
 import { resolveElement, resolveAcrossBoundaries } from './element-resolver';
 import { waitForDOMStable } from './state-verifier';
 import { executeHumanClick } from './action-primitives/human-click';
@@ -22,6 +23,7 @@ import { isDropdownPattern, isSimpleClickPattern, isTextInputPattern } from './c
 import { aiConfig } from '../../lib/ai-config';
 import { AIVisualClickService, type WorkflowContext } from '../../lib/ai-visual-click';
 import { FeatureFlags } from '../../lib/feature-flags';
+import { TabManager } from './tab-manager';
 
 // ============================================================================
 // Main Orchestrator
@@ -45,6 +47,20 @@ export async function executeWorkflow(
 
   const stepResults: StepResult[] = [];
   let stepsCompleted = 0;
+
+  // Initialize TabManager for multi-tab workflow execution
+  // Get current tab ID from chrome API
+  let currentTabId: number;
+  try {
+    const tabs = await chrome.tabs.getCurrent();
+    currentTabId = tabs?.id || 0;
+    console.log(`[UniversalOrchestrator] Current tab ID: ${currentTabId}`);
+  } catch (error) {
+    console.warn('[UniversalOrchestrator] Failed to get current tab ID, using 0:', error);
+    currentTabId = 0;
+  }
+  
+  const tabManager = new TabManager(currentTabId);
 
   console.log(`[UniversalOrchestrator] Starting workflow with ${steps.length} steps`);
 
@@ -80,7 +96,7 @@ export async function executeWorkflow(
       const result = await executeStep(step, {
         timeout: stepTimeout,
         variableValues,
-      }, workflowContext);
+      }, workflowContext, tabManager);
 
       // Record result
       stepResults.push({
@@ -156,10 +172,77 @@ interface StepOptions {
 async function executeStep(
   step: UniversalStep,
   options: StepOptions,
-  workflowContext?: WorkflowContext
+  workflowContext?: WorkflowContext,
+  tabManager?: TabManager
 ): Promise<Omit<StepResult, 'stepIndex' | 'patternType'>> {
   const startTime = Date.now();
   const { pattern, domPath, expectedOutcomes } = step;
+
+  // Handle TAB_SWITCH steps before the normal pattern switch
+  if ((pattern as any).type === 'TAB_SWITCH') {
+    // Handle tab switching
+    console.log('[UniversalOrchestrator] Executing TAB_SWITCH step');
+    
+    if (!tabManager) {
+      return {
+        success: false,
+        elapsedMs: Date.now() - startTime,
+        error: 'TabManager not initialized for multi-tab workflow',
+      };
+    }
+
+    const tabSwitchData = (pattern as any).data;
+    const toTabIndex = tabSwitchData.toTabIndex;
+    const toUrl = tabSwitchData.toUrl;
+    
+    if (toTabIndex === undefined) {
+      return {
+        success: false,
+        elapsedMs: Date.now() - startTime,
+        error: 'TAB_SWITCH step missing toTabIndex',
+      };
+    }
+
+    // Check if tab already exists
+    if (tabManager.hasTab(toTabIndex)) {
+      // Switch to existing tab
+      console.log(`[UniversalOrchestrator] Switching to existing tab ${toTabIndex}`);
+      const switchSuccess = await tabManager.switchToTab(toTabIndex);
+      
+      if (!switchSuccess) {
+        return {
+          success: false,
+          elapsedMs: Date.now() - startTime,
+          error: `Failed to switch to tab ${toTabIndex}`,
+        };
+      }
+    } else {
+      // Open new tab
+      console.log(`[UniversalOrchestrator] Opening new tab ${toTabIndex} at ${toUrl}`);
+      const newTabId = await tabManager.openNewTab(toTabIndex, toUrl);
+      
+      if (!newTabId) {
+        return {
+          success: false,
+          elapsedMs: Date.now() - startTime,
+          error: `Failed to open new tab at ${toUrl}`,
+        };
+      }
+    }
+
+    return {
+      success: true,
+      elapsedMs: Date.now() - startTime,
+      action: {
+        success: true,
+        actionType: 'tab-switch',
+        elapsedMs: Date.now() - startTime,
+        strategiesTried: ['tab-switch'],
+        successfulStrategy: 'tab-switch',
+        details: { tabIndex: toTabIndex, url: toUrl },
+      },
+    };
+  }
 
   // Handle different pattern types
   switch (pattern.type) {
@@ -714,6 +797,32 @@ export function convertLegacyStep(
   }
 ): UniversalStep {
   const payload = legacyStep.payload;
+  
+  // Handle TAB_SWITCH steps specially - they don't have element signatures
+  if (legacyStep.type === 'TAB_SWITCH') {
+    const tabSwitchPayload = payload as TabSwitchPayload;
+    return {
+      type: 'TAB_SWITCH',
+      description: legacyStep.description || `Switch to tab: ${tabSwitchPayload.toTitle || tabSwitchPayload.toUrl}`,
+      pattern: {
+        type: 'TAB_SWITCH',
+        data: {
+          fromTabIndex: tabSwitchPayload.fromTabIndex,
+          toTabIndex: tabSwitchPayload.toTabIndex,
+          toUrl: tabSwitchPayload.toUrl,
+          toTitle: tabSwitchPayload.toTitle,
+        },
+      } as any,
+      domPath: {
+        boundaryType: 'none',
+        steps: [],
+      },
+      metadata: {
+        timestamp: tabSwitchPayload.timestamp || Date.now(),
+        url: tabSwitchPayload.toUrl,
+      },
+    };
+  }
   
   // Build a basic signature from legacy data
   const signature: ElementSignature = {

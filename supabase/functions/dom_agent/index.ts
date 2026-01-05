@@ -187,7 +187,7 @@ interface ExpectedOutcome {
 
 interface DOMAgentResponse {
   // Note: 'navigate' is deprecated - all navigation should use 'click' on UI elements
-  action?: 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover' | 'click_cell' | 'find_and_click_empty' | 'find_by_header';
+  action?: 'click' | 'type' | 'select' | 'scroll' | 'navigate' | 'wait' | 'assert' | 'done' | 'fail' | 'skip' | 'read' | 'keyboard' | 'hover' | 'open_tab' | 'click_cell' | 'find_and_click_empty' | 'find_by_header';
   target?: SemanticTarget;
   description?: string;
   text?: string;
@@ -660,6 +660,11 @@ PRIORITY ORDER (follow strictly):
 - **scroll**: Scroll to reveal hidden elements (use when needed element isn't visible)
   - Use with "direction": "down" or "up" and "amount": pixels (e.g., 300)
   - Example: {"action": "scroll", "direction": "down", "amount": 300}
+- **open_tab**: Open a new browser tab and navigate to a URL
+  - Use when you need to access a different website or page in a new tab
+  - Example: {"action": "open_tab", "url": "https://example.com/page"}
+  - The system will open the tab and switch to it automatically
+  - After opening, subsequent actions will execute in the new tab
 - **read**: Query element values (check if field already filled, read text, etc.)
   - Use to verify state before acting
   - Example: {"action": "read", "target": {...}, "attribute": "value", "storeAs": "accountName"}
@@ -736,7 +741,7 @@ THE "target" FIELD IS FORBIDDEN WHEN CANDIDATES EXIST. DO NOT INCLUDE IT.
 ` : `
 WHEN NO CANDIDATES (free-form target):
 {
-  "action": "click" | "type" | "select" | "scroll" | "read" | "keyboard" | "hover" | "wait" | "done" | "fail" | "skip",
+  "action": "click" | "type" | "select" | "scroll" | "read" | "keyboard" | "hover" | "open_tab" | "wait" | "done" | "fail" | "skip",
   "target": {
     "testId": "test-id if shown in DOM map (MOST RELIABLE)",
     "role": "button" | "link" | "textbox" | "combobox" | "option" | etc.,
@@ -747,6 +752,7 @@ WHEN NO CANDIDATES (free-form target):
   },
   "text": "text to type (for type action)",
   "option": "option text (for select action)",
+  "url": "https://example.com (for open_tab action)",
   "direction": "down" | "up" (for scroll action),
   "amount": 300 (for scroll action, pixels),
   "attribute": "value" | "text" | "checked" | "selected" | "count" (for read action),
@@ -990,7 +996,7 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     }
     
     // Regular action response
-    const validActions = ['click', 'type', 'select', 'scroll', 'navigate', 'wait', 'assert', 'done', 'fail', 'skip', 'read', 'keyboard', 'hover', 'click_cell', 'find_and_click_empty', 'find_by_header'];
+    const validActions = ['click', 'type', 'select', 'scroll', 'navigate', 'wait', 'assert', 'done', 'fail', 'skip', 'read', 'keyboard', 'hover', 'open_tab', 'click_cell', 'find_and_click_empty', 'find_by_header'];
     const action = validActions.includes(parsed.action) ? parsed.action : 'fail';
     
     // Build response

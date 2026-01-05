@@ -41,6 +41,8 @@ export type AgentActionType =
   | 'read' 
   | 'keyboard' 
   | 'hover'
+  | 'tab_switch' // Multi-tab workflow support (for recorded TAB_SWITCH steps)
+  | 'open_tab' // Open a new tab and navigate to URL
   // Spreadsheet-specific actions
   | 'click_cell'
   | 'find_and_click_empty'
@@ -141,6 +143,11 @@ export interface AgentActionParams {
   // For fail
   reason?: string;
   
+  // For tab_switch
+  toTabIndex?: number;      // Logical tab index to switch to
+  toUrl?: string;           // URL of the tab to switch to
+  toTitle?: string;         // Title of the tab
+  
   // For read - query element values
   attribute?: 'value' | 'text' | 'checked' | 'selected' | 'count';
   storeAs?: string;            // Optional: store in agent memory
@@ -236,6 +243,10 @@ export interface AgentHint {
   
   // Iframe context - for cross-frame execution
   iframeContext?: import('../types/workflow').IframeContext;
+  
+  // TAB_SWITCH context
+  stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION';
+  recordedPayload?: any; // Full recorded payload for TAB_SWITCH steps
 }
 
 /** Current observation of the page (DOM-first, screenshot optional) */
@@ -386,9 +397,18 @@ export class AIAgent {
     this.state = savedState;
     this.state.status = 'running';
     
-    // Move to next hint after navigation
-    if (this.state.currentHintIndex < this.state.hints.length - 1) {
-      this.state.currentHintIndex++;
+    // Check if this is a tab transfer (not a navigation)
+    const isTabTransfer = (savedState as any).transferredToTab !== undefined;
+    
+    if (isTabTransfer) {
+      console.log('[AIAgent] 🔄 Resuming after tab switch - NOT incrementing hint index');
+      console.log(`[AIAgent] Will continue from hint ${this.state.currentHintIndex}`);
+    } else {
+      // Move to next hint after navigation (page reload)
+      console.log('[AIAgent] 🔄 Resuming after navigation - incrementing hint index');
+      if (this.state.currentHintIndex < this.state.hints.length - 1) {
+        this.state.currentHintIndex++;
+      }
     }
     
     return this.continueExecution();
@@ -482,6 +502,107 @@ export class AIAgent {
               timestamp: Date.now(),
             });
             continue; // Move to next iteration of the loop
+          }
+        }
+
+        // 1.5 Handle TAB_SWITCH hints deterministically (bypass LLM)
+        if (currentHint?.stepType === 'TAB_SWITCH') {
+          console.log(`[AIAgent] 🔄 Executing TAB_SWITCH hint deterministically`);
+          
+          const tabSwitchPayload = currentHint.recordedPayload;
+          const toTabIndex = tabSwitchPayload?.toTabIndex;
+          const toUrl = tabSwitchPayload?.toUrl;
+          const toTitle = tabSwitchPayload?.toTitle;
+          
+          if (toTabIndex === undefined || !toUrl) {
+            console.error('[AIAgent] ❌ TAB_SWITCH hint missing required data');
+            this.state.hints[this.state.currentHintIndex].failureCount = (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
+            this.state.currentHintIndex++;
+            continue;
+          }
+          
+          console.log(`[AIAgent] 🔄 Switching to tab ${toTabIndex}: ${toTitle || toUrl}`);
+          
+          const tabSwitchAction: AgentAction = {
+            type: 'tab_switch',
+            params: {
+              toTabIndex,
+              toUrl,
+              toTitle,
+              description: currentHint.description,
+            },
+            reasoning: `Switching to tab ${toTabIndex}: ${toTitle || toUrl}`,
+            confidence: 1.0,
+            hintStepIndex: this.state.currentHintIndex,
+          };
+          
+          // STEP 1: Mark as completed and advance FIRST
+          this.state.hints[this.state.currentHintIndex].completed = true;
+          this.state.hints[this.state.currentHintIndex].failureCount = 0;
+          this.state.currentHintIndex++;
+          console.log(`[AIAgent] ✅ TAB_SWITCH marked complete, advanced to hint ${this.state.currentHintIndex}`);
+          
+          // STEP 1.5: Clear spreadsheet cache when switching tabs
+          // Each sheet may have different data/empty rows!
+          if (this.state.memory?.spreadsheetTargetRow) {
+            console.log(`[AIAgent] 🧹 Clearing spreadsheet target row cache (was: ${this.state.memory.spreadsheetTargetRow})`);
+            delete this.state.memory.spreadsheetTargetRow;
+          }
+          
+          // STEP 2: Save state for new tab to resume
+          const stateToSave = {
+            ...this.state,
+            status: 'running' as const,
+            transferredToTab: true,
+          };
+          
+          console.log(`[AIAgent] 💾 Saving state BEFORE tab switch:`, {
+            currentHintIndex: stateToSave.currentHintIndex,
+            totalHints: stateToSave.hints.length,
+            nextHint: stateToSave.hints[stateToSave.currentHintIndex]?.description,
+          });
+          
+          await chrome.storage.local.set({ agentState: stateToSave });
+          
+          // Wait for storage to commit
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          // Verify
+          const verification = await chrome.storage.local.get(['agentState']);
+          if (verification.agentState) {
+            console.log(`[AIAgent] ✅ State saved and verified!`);
+          } else {
+            console.error(`[AIAgent] ❌ State save verification failed!`);
+          }
+          
+          // STEP 3: Now execute the actual tab switch
+          this.onProgress?.(this.state.currentHintIndex - 1, tabSwitchAction, 'acting');
+          const tabSwitchResult = await this.act(tabSwitchAction);
+          
+          // Record result
+          this.state.history.push({
+            stepNumber: currentHint.stepNumber,
+            action: tabSwitchAction,
+            observation,
+            result: tabSwitchResult.success ? 'success' : 'failed',
+            error: tabSwitchResult.error,
+            timestamp: Date.now(),
+          });
+          
+          if (tabSwitchResult.success) {
+            console.log(`[AIAgent] 🔄 Tab switched successfully, stopping execution in this tab`);
+            return {
+              success: true,
+              stepsCompleted: this.state.currentHintIndex,
+              totalSteps: this.state.hints.length,
+              history: this.state.history,
+              elapsedMs: Date.now() - this.state.startTime,
+              finalStatus: 'running' as const,
+            };
+          } else {
+            console.error(`[AIAgent] ❌ Tab switch failed: ${tabSwitchResult.error}`);
+            this.state.hints[this.state.currentHintIndex].failureCount = (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
+            continue;
           }
         }
 
@@ -1788,6 +1909,108 @@ export class AIAgent {
         }
       }
       
+      // Handle tab_switch action (not supported by Tier1Executor)
+      if (currentAction.type === 'tab_switch') {
+        console.log(`[AIAgent] 🔄 Executing tab_switch action`);
+        
+        try {
+          const { TabManager } = await import('../content/universal-execution/tab-manager');
+          
+          const toTabIndex = (currentAction.params as any).toTabIndex;
+          const toUrl = (currentAction.params as any).toUrl;
+          
+          // Get or create TabManager instance (singleton pattern)
+          let tabManager: typeof TabManager.prototype;
+          if (!(window as any).__ghostwriter_tab_manager) {
+            // Get current tab ID from service worker
+            // chrome.tabs.getCurrent() doesn't work in content scripts!
+            const tabIdResponse = await chrome.runtime.sendMessage({ type: 'GET_CURRENT_TAB_ID' });
+            const currentTabId = tabIdResponse?.data?.tabId || 0;
+            console.log(`[AIAgent] Got current tab ID from service worker: ${currentTabId}`);
+            (window as any).__ghostwriter_tab_manager = new TabManager(currentTabId);
+          }
+          tabManager = (window as any).__ghostwriter_tab_manager;
+          
+          // Check if tab exists or needs to be created
+          if (tabManager.hasTab(toTabIndex)) {
+            console.log(`[AIAgent] 🔄 Switching to existing tab ${toTabIndex}`);
+            const switchSuccess = await tabManager.switchToTab(toTabIndex);
+            if (!switchSuccess) {
+              console.error(`[AIAgent] ❌ Tab switch failed`);
+              return {
+                success: false,
+                error: `Failed to switch to tab ${toTabIndex}`,
+              };
+            }
+          } else {
+            console.log(`[AIAgent] 🔄 Opening new tab ${toTabIndex} at ${toUrl}`);
+            const newTabId = await tabManager.openNewTab(toTabIndex, toUrl);
+            if (!newTabId) {
+              console.error(`[AIAgent] ❌ Failed to open new tab`);
+              return {
+                success: false,
+                error: `Failed to open new tab at ${toUrl}`,
+              };
+            }
+          }
+          
+          console.log(`[AIAgent] ✅ Tab switch succeeded`);
+          return { success: true };
+        } catch (error) {
+          console.error('[AIAgent] ❌ Tab switch error:', error);
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Tab switch error',
+          };
+        }
+      }
+      
+      // Handle open_tab action - open a new tab and navigate to URL
+      if (currentAction.type === 'open_tab') {
+        console.log(`[AIAgent] 🆕 Executing open_tab action`);
+        
+        try {
+          const url = currentAction.params.url;
+          
+          if (!url) {
+            return {
+              success: false,
+              error: 'open_tab action requires a URL',
+            };
+          }
+          
+          console.log(`[AIAgent] 🆕 Opening new tab at: ${url}`);
+          
+          // Request service worker to create a new tab
+          const response = await chrome.runtime.sendMessage({
+            type: 'CREATE_TAB',
+            payload: { url },
+          });
+
+          if (response?.success && response.data?.tabId) {
+            const newTabId = response.data.tabId;
+            console.log(`[AIAgent] ✅ Created new tab ${newTabId}`);
+            
+            // Wait for tab to load
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            return { success: true };
+          } else {
+            console.error(`[AIAgent] ❌ Failed to create tab:`, response?.error);
+            return {
+              success: false,
+              error: response?.error || 'Failed to create tab',
+            };
+          }
+        } catch (error) {
+          console.error('[AIAgent] ❌ Open tab error:', error);
+          return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Open tab error',
+          };
+        }
+      }
+      
       // Tier 1: Execute with deterministic executor (non-spreadsheet actions)
       const result: Tier1ExecutionResult = await Tier1Executor.execute(currentAction);
       
@@ -2499,6 +2722,22 @@ export class AIAgent {
     }
     
     return steps.map((step, index) => {
+      // Handle TAB_SWITCH steps specially
+      if (step.type === 'TAB_SWITCH') {
+        const tabSwitchPayload = step.payload;
+        const toTitle = (tabSwitchPayload as any).toTitle;
+        const toUrl = (tabSwitchPayload as any).toUrl;
+        
+        return {
+          stepNumber: index + 1,
+          description: step.description || `Switch to tab: ${toTitle || toUrl}`,
+          actionType: 'other',
+          completed: false,
+          stepType: 'TAB_SWITCH',
+          recordedPayload: tabSwitchPayload,
+        } as AgentHint;
+      }
+      
       const payload = step.payload as WorkflowStepPayload;
       
       // If this is an optimized NAVIGATION step, try to find the original step's elementText

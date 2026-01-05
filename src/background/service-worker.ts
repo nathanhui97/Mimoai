@@ -722,6 +722,115 @@ chrome.runtime.onMessage.addListener(
       return false;
     }
 
+    // Handle ACTIVATE_TAB - switch to a specific tab during multi-tab execution
+    if (message.type === 'ACTIVATE_TAB') {
+      const { tabId } = message.payload || {};
+      
+      if (typeof tabId !== 'number') {
+        sendResponse({
+          success: false,
+          error: 'tabId is required for ACTIVATE_TAB',
+        });
+        return false;
+      }
+
+      chrome.tabs.update(tabId, { active: true }, () => {
+        if (chrome.runtime.lastError) {
+          sendResponse({
+            success: false,
+            error: chrome.runtime.lastError.message,
+          });
+        } else {
+          console.log(`[ServiceWorker] Activated tab ${tabId}`);
+          sendResponse({
+            success: true,
+            data: { tabId },
+          });
+        }
+      });
+      
+      return true; // Keep channel open for async
+    }
+
+    // Handle CREATE_TAB - create a new tab during multi-tab execution
+    if (message.type === 'CREATE_TAB') {
+      const { url } = message.payload || {};
+      
+      if (!url) {
+        sendResponse({
+          success: false,
+          error: 'url is required for CREATE_TAB',
+        });
+        return false;
+      }
+
+      chrome.tabs.create({ url, active: true }, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          sendResponse({
+            success: false,
+            error: chrome.runtime.lastError?.message || 'Failed to create tab',
+          });
+        } else {
+          console.log(`[ServiceWorker] Created new tab ${tab.id} at ${url}`);
+          sendResponse({
+            success: true,
+            data: { tabId: tab.id, url: tab.url },
+          });
+        }
+      });
+      
+      return true; // Keep channel open for async
+    }
+
+    // Handle NAVIGATE_TAB - navigate a tab to a URL during multi-tab execution
+    if (message.type === 'NAVIGATE_TAB') {
+      const { tabId, url } = message.payload || {};
+      
+      if (typeof tabId !== 'number' || !url) {
+        sendResponse({
+          success: false,
+          error: 'tabId and url are required for NAVIGATE_TAB',
+        });
+        return false;
+      }
+
+      chrome.tabs.update(tabId, { url }, () => {
+        if (chrome.runtime.lastError) {
+          sendResponse({
+            success: false,
+            error: chrome.runtime.lastError.message,
+          });
+        } else {
+          console.log(`[ServiceWorker] Navigated tab ${tabId} to ${url}`);
+          sendResponse({
+            success: true,
+            data: { tabId, url },
+          });
+        }
+      });
+      
+      return true; // Keep channel open for async
+    }
+
+    // Handle GET_CURRENT_TAB_ID - get the sender's tab ID
+    if (message.type === 'GET_CURRENT_TAB_ID') {
+      const tabId = sender.tab?.id;
+      
+      if (tabId) {
+        sendResponse({
+          success: true,
+          data: { tabId },
+        });
+      } else {
+        sendResponse({
+          success: false,
+          error: 'Could not determine tab ID',
+        });
+      }
+      
+      return false;
+    }
+
     // If message comes from content script, forward to sidepanel
     if (sender.tab) {
       // Message from content script - could forward to sidepanel if needed

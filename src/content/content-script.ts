@@ -75,13 +75,52 @@ import { executeWorkflow as executeUniversalWorkflow, convertLegacyStep } from '
       return;
     }
     
+    // Add a delay to let the page load first
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    console.log('[Content] 🔍 Checking for saved agent state...');
     const result = await chrome.storage.local.get(['agentState']);
     const savedState = result.agentState as any;
+    
+    if (savedState) {
+      console.log('[Content] 📦 Found saved state:', {
+        status: savedState.status,
+        currentHintIndex: savedState.currentHintIndex,
+        totalHints: savedState.hints?.length,
+        transferredToTab: savedState.transferredToTab,
+      });
+    } else {
+      console.log('[Content] ℹ️ No saved agent state found');
+    }
+    
     if (savedState && savedState.status === 'running') {
-      console.log('[Content] Resuming agent after navigation');
+      const transferType = savedState.transferredToTab ? 'tab switch' : 'navigation';
+      console.log(`[Content] 🔄 Resuming agent after ${transferType}`);
+      console.log(`[Content] Current hint index: ${savedState.currentHintIndex}, Total hints: ${savedState.hints?.length}`);
+      console.log(`[Content] Current frameId: ${currentFrameId}, URL: ${window.location.href}`);
+      console.log(`[Content] Next hint:`, savedState.hints?.[savedState.currentHintIndex]?.description);
       
       // Small delay to ensure page is ready
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      
+      // CRITICAL: Double-check we're in the main frame
+      if (currentFrameId !== 0) {
+        console.error(`[Content] ❌ Agent state found but we're in iframe! frameId: ${currentFrameId}`);
+        return;
+      }
+      
+      // CRITICAL: Verify we're on a real page, not an iframe URL
+      const currentUrl = window.location.href;
+      if (currentUrl.includes('/offline/iframeapi') ||
+          currentUrl.includes('RotateCookiesPage') ||
+          currentUrl.includes('/_/og/bscframe')) {
+        console.error(`[Content] ❌ Agent resume blocked - we're on an iframe URL: ${currentUrl}`);
+        // Don't clear state - let the actual main frame resume
+        return;
+      }
+      
+      console.log('[Content] ✅ Confirmed in main frame on real page, creating agent...');
+      console.log(`[Content] Current URL: ${currentUrl}`);
       
       // Dynamically import and resume
       const { AIAgent } = await import('../lib/ai-agent');
@@ -92,6 +131,8 @@ import { executeWorkflow as executeUniversalWorkflow, convertLegacyStep } from '
           console.log(`[Content] Agent step ${stepNumber} - ${status}:`, action.type);
         },
       });
+      
+      console.log(`[Content] 🚀 Starting agent resumption...`);
       
       // Resume from saved state
       const agentResult = await agent.resume(savedState);
@@ -607,11 +648,18 @@ function handleFullMessage(
             
             console.log('GhostWriter: Agent execution completed:', result);
             
-            // Send final result via runtime message (not via sendResponse which would be closed)
-            chrome.runtime.sendMessage({
-              type: 'AGENT_EXECUTION_COMPLETED',
-              payload: result,
-            });
+            // Only send completion message if agent actually finished
+            // Don't send if it transferred to another tab (still running)
+            if (result.finalStatus !== 'running') {
+              console.log('GhostWriter: Sending AGENT_EXECUTION_COMPLETED message');
+              // Send final result via runtime message (not via sendResponse which would be closed)
+              chrome.runtime.sendMessage({
+                type: 'AGENT_EXECUTION_COMPLETED',
+                payload: result,
+              });
+            } else {
+              console.log('GhostWriter: Agent transferred to another tab - not sending completion message yet');
+            }
             
           } catch (error) {
             console.error('GhostWriter: Error in AI Agent execution:', error);
