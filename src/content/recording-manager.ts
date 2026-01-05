@@ -59,6 +59,7 @@ export class RecordingManager {
   private currentUrl: string = window.location.href;
   private currentTabUrl: string | null = null; // Tab URL (stable identifier, not tabId)
   private currentTabTitle: string | null = null; // Tab title for context
+  private currentTabIndex: number | null = null; // Logical tab index (0, 1, 2...)
   private readonly DEBOUNCE_DELAY = 500; // 500ms debounce for input events
   private readonly SCROLL_DEBOUNCE_DELAY = 300; // 300ms debounce for scroll events
   private readonly CLICK_DEDUP_WINDOW = 500; // 500ms - ignore duplicate clicks on same element within this window (reduced from 2s to allow rapid different clicks)
@@ -89,7 +90,7 @@ export class RecordingManager {
   /**
    * Start recording - attach event listeners
    */
-  start(): void {
+  start(tabIndex?: number): void {
     if (this.isRecording) {
       console.warn('Recording already started');
       return;
@@ -99,6 +100,7 @@ export class RecordingManager {
     this.currentUrl = window.location.href;
     this.currentTabUrl = window.location.href;
     this.currentTabTitle = document.title;
+    this.currentTabIndex = tabIndex !== undefined ? tabIndex : null;
 
     // Add visual indicator
     if (document.body) {
@@ -510,6 +512,7 @@ export class RecordingManager {
       url: url,
       tabUrl: this.currentTabUrl || undefined,
       tabTitle: this.currentTabTitle || undefined,
+      tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
       tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
       viewport,
       timing,
@@ -1945,6 +1948,7 @@ export class RecordingManager {
             url: isNavigation ? this.currentUrl : url,
             tabUrl: this.currentTabUrl || undefined,
             tabTitle: this.currentTabTitle || undefined,
+            tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
             tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
             shadowPath: selectors.shadowPath,
             elementState: elementState || undefined,
@@ -2552,6 +2556,7 @@ export class RecordingManager {
         url: url,
         tabUrl: this.currentTabUrl || undefined,
         tabTitle: this.currentTabTitle || undefined,
+        tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
         tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
         shadowPath: selectors.shadowPath,
         // Phase 2: Important fixes
@@ -2813,6 +2818,7 @@ export class RecordingManager {
           url: url,
           tabUrl: this.currentTabUrl || undefined,
           tabTitle: this.currentTabTitle || undefined,
+          tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
           tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
           viewport,
           timing,
@@ -3260,11 +3266,12 @@ export class RecordingManager {
         label: label || undefined,
         value: value,
         timestamp: stepTimestamp,
-        url: url,
-        tabUrl: this.currentTabUrl || undefined,
-        tabTitle: this.currentTabTitle || undefined,
-        tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
-        shadowPath: selectors.shadowPath,
+          url: url,
+          tabUrl: this.currentTabUrl || undefined,
+          tabTitle: this.currentTabTitle || undefined,
+          tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+          tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
+          shadowPath: selectors.shadowPath,
         elementState: elementState || undefined,
         // Phase 2: Important fixes
         inputDetails,
@@ -3442,6 +3449,7 @@ export class RecordingManager {
           step,
           tabUrl: this.currentTabUrl || undefined,
           tabTitle: this.currentTabTitle || undefined,
+          tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
         },
       } as import('../types/messages').RecordedStepMessage);
       

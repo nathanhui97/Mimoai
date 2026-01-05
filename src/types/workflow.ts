@@ -193,6 +193,7 @@ export interface WorkflowStepPayload {
   tabUrl?: string; // Tab URL where this step was recorded (stable identifier, not tabId)
   tabTitle?: string; // Tab title for additional context
   tabInfo?: { url: string; title: string }; // Tab context (URL-based, not ID-based)
+  tabIndex?: number; // Logical tab index for multi-tab workflows (Tab 0, Tab 1, etc.)
   shadowPath?: ShadowPath[]; // Path through shadow boundaries
   elementState?: ElementState; // Element state at time of recording
   elementText?: string; // Exact text content of the element (for buttons, links, labels)

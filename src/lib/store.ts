@@ -14,6 +14,10 @@ interface ExtensionStore extends ExtensionStateData {
   pendingAIValidations: Set<string>; // Set of stepIds being validated
   enhancedSteps: Set<string>; // Set of stepIds that have been enhanced with AI
 
+  // Multi-tab recording state
+  recordedTabs: Map<number, { url: string; title: string; stepCount: number }>;
+  excludedTabIndices: Set<number>; // Tabs user wants to exclude
+
   // Actions
   setState: (state: ExtensionState) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
@@ -32,6 +36,10 @@ interface ExtensionStore extends ExtensionStateData {
   setExecutionMode: (mode: 'exact' | 'adaptive' | 'auto') => void;
   setAIValuationPending: (stepId: string, pending: boolean) => void;
   setStepEnhanced: (stepId: string) => void;
+  addRecordedTab: (tabIndex: number, url: string, title: string) => void;
+  incrementTabStepCount: (tabIndex: number) => void;
+  toggleTabExclusion: (tabIndex: number) => void;
+  removeWorkflowStep: (index: number) => void;
   reset: () => void;
 }
 
@@ -55,6 +63,10 @@ export const useExtensionStore = create<ExtensionStore>((set) => ({
   // AI validation state
   pendingAIValidations: new Set<string>(),
   enhancedSteps: new Set<string>(),
+
+  // Multi-tab recording state
+  recordedTabs: new Map<number, { url: string; title: string; stepCount: number }>(),
+  excludedTabIndices: new Set<number>(),
 
   setState: (state: ExtensionState) => {
     set({ state, error: null }); // Clear error when state changes
@@ -114,6 +126,8 @@ export const useExtensionStore = create<ExtensionStore>((set) => ({
       currentWorkflowName: null,
       pendingAIValidations: new Set<string>(),
       enhancedSteps: new Set<string>(),
+      recordedTabs: new Map<number, { url: string; title: string; stepCount: number }>(),
+      excludedTabIndices: new Set<number>(),
     });
   },
 
@@ -186,6 +200,51 @@ export const useExtensionStore = create<ExtensionStore>((set) => ({
     });
   },
 
+  addRecordedTab: (tabIndex: number, url: string, title: string) => {
+    set((state) => {
+      const newTabs = new Map(state.recordedTabs);
+      const existing = newTabs.get(tabIndex);
+      if (existing) {
+        // Tab already exists, just update info
+        newTabs.set(tabIndex, { ...existing, url, title });
+      } else {
+        // New tab
+        newTabs.set(tabIndex, { url, title, stepCount: 0 });
+      }
+      return { recordedTabs: newTabs };
+    });
+  },
+
+  incrementTabStepCount: (tabIndex: number) => {
+    set((state) => {
+      const newTabs = new Map(state.recordedTabs);
+      const existing = newTabs.get(tabIndex);
+      if (existing) {
+        newTabs.set(tabIndex, { ...existing, stepCount: existing.stepCount + 1 });
+      }
+      return { recordedTabs: newTabs };
+    });
+  },
+
+  toggleTabExclusion: (tabIndex: number) => {
+    set((state) => {
+      const newExcluded = new Set(state.excludedTabIndices);
+      if (newExcluded.has(tabIndex)) {
+        newExcluded.delete(tabIndex);
+      } else {
+        newExcluded.add(tabIndex);
+      }
+      return { excludedTabIndices: newExcluded };
+    });
+  },
+
+  removeWorkflowStep: (index: number) => {
+    set((state) => {
+      const newSteps = state.workflowSteps.filter((_, i) => i !== index);
+      return { workflowSteps: newSteps };
+    });
+  },
+
   reset: () => {
     set({
       ...initialState,
@@ -193,6 +252,8 @@ export const useExtensionStore = create<ExtensionStore>((set) => ({
       savedWorkflows: [],
       pendingAIValidations: new Set<string>(),
       enhancedSteps: new Set<string>(),
+      recordedTabs: new Map<number, { url: string; title: string; stepCount: number }>(),
+      excludedTabIndices: new Set<number>(),
       currentWorkflowName: null,
       isRecording: false,
       executionMode: 'auto',

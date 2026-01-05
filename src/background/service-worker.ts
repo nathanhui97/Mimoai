@@ -17,6 +17,10 @@ const sessionTabMap: Map<number, number> = new Map();
 let lastRecordedTabUrl: string | null = null; // Track last tab URL before pause
 let lastRecordedTabIndex: number | null = null; // Track last tab's logical index before pause
 
+// Tab switch debouncing: prevents recording rapid tab switches
+let tabSwitchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+const TAB_SWITCH_DEBOUNCE_MS = 500;
+
 /**
  * Broadcast message to all tabs currently being recorded
  * Note: This function is currently unused but kept for future multi-tab coordination
@@ -75,10 +79,11 @@ async function startRecordingInTab(tabId: number, tabUrl: string, tabTitle?: str
       console.log(`Assigned logical index ${logicalIndex} to tab ${tabId}`);
     }
 
-    // 4. Now send START_RECORDING_IN_TAB message
+    // 4. Now send START_RECORDING_IN_TAB message with tab index
+    const tabIndex = sessionTabMap.get(tabId) ?? sessionTabMap.size - 1;
     const message: StartRecordingInTabMessage = {
       type: 'START_RECORDING_IN_TAB',
-      payload: { tabId, tabUrl, tabTitle },
+      payload: { tabId, tabUrl, tabTitle, tabIndex },
     };
     
     await chrome.tabs.sendMessage(tabId, message);
@@ -86,7 +91,6 @@ async function startRecordingInTab(tabId: number, tabUrl: string, tabTitle?: str
     tabUrlMap.set(tabId, { url: tabUrl, title: tabTitle });
     
     // 5. Store tab info for pause/resume
-    const tabIndex = sessionTabMap.get(tabId) ?? sessionTabMap.size - 1;
     lastRecordedTabUrl = tabUrl;
     lastRecordedTabIndex = tabIndex;
     
@@ -448,10 +452,19 @@ chrome.runtime.onMessage.addListener(
 
     // Handle START_RECORDING - coordinate multi-tab recording
     if (message.type === 'START_RECORDING') {
+      console.log('[ServiceWorker] 🔴 START_RECORDING message received');
       (async () => {
         try {
+          console.log('[ServiceWorker] Querying for active tab...');
           const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          console.log('[ServiceWorker] Active tab query result:', { 
+            tabId: activeTab?.id, 
+            url: activeTab?.url, 
+            title: activeTab?.title 
+          });
+          
           if (!activeTab?.id || !activeTab.url) {
+            console.error('[ServiceWorker] ❌ No active tab found');
             sendResponse({
               success: false,
               error: 'No active tab found',
@@ -464,15 +477,37 @@ chrome.runtime.onMessage.addListener(
               activeTab.url.startsWith('chrome-extension://') || 
               activeTab.url.startsWith('about:') ||
               activeTab.url.startsWith('edge://')) {
+            console.error('[ServiceWorker] ❌ Restricted page type:', activeTab.url);
             sendResponse({
               success: false,
               error: `Content scripts cannot run on this page type: ${activeTab.url}`,
             });
             return;
           }
+          
+          console.log('[ServiceWorker] ✅ Tab validation passed, starting recording...');
 
-          // Generate session ID
-          recordingSessionId = `recording-${Date.now()}`;
+          // Check if recording session already exists (e.g., after a spreadsheet refresh)
+          if (recordingSessionId) {
+            console.log('[ServiceWorker] Recording session already exists:', recordingSessionId);
+            
+            // If this tab is already being recorded, don't start again
+            if (activeRecordingTabs.has(activeTab.id)) {
+              console.log('[ServiceWorker] Tab already in recording session, skipping');
+              sendResponse({
+                success: true,
+                data: { message: 'Already recording', sessionId: recordingSessionId },
+              });
+              return;
+            }
+            
+            // Tab is not in session yet, add it
+            console.log('[ServiceWorker] Adding tab to existing recording session');
+          } else {
+            // Generate new session ID
+            recordingSessionId = `recording-${Date.now()}`;
+            console.log('[ServiceWorker] Created new recording session:', recordingSessionId);
+          }
           
           // Initialize sessionTabMap with first tab as Index 0
           if (sessionTabMap.size === 0) {
@@ -488,11 +523,22 @@ chrome.runtime.onMessage.addListener(
           lastRecordedTabUrl = activeTab.url;
           lastRecordedTabIndex = initialTabIndex;
           
+          console.log('[ServiceWorker] Recording started:', {
+            tabId: activeTab.id,
+            url: activeTab.url,
+            title: activeTab.title,
+            tabIndex: initialTabIndex,
+            sessionId: recordingSessionId,
+            activeRecordingTabs: Array.from(activeRecordingTabs),
+            lastActiveTabId,
+          });
+          
           sendResponse({
             success: true,
             data: { message: 'Recording started', sessionId: recordingSessionId },
           });
         } catch (error) {
+          console.error('[ServiceWorker] ❌ START_RECORDING error:', error);
           sendResponse({
             success: false,
             error: error instanceof Error ? error.message : 'Failed to start recording',
@@ -761,31 +807,70 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 // Listen for tab updates to track URL changes during recording
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   // Content script will be injected automatically via manifest
   if (changeInfo.status === 'complete' && tab.url) {
-    console.log(`Tab ${tabId} loaded: ${tab.url}`);
+    console.log(`[ServiceWorker] Tab ${tabId} loaded: ${tab.url}`);
     
-    // Update URL map if this tab is being recorded
-    if (activeRecordingTabs.has(tabId) && tab.url) {
+    // If this tab was being recorded before the reload, re-establish the recording connection
+    if (recordingSessionId && sessionTabMap.has(tabId) && tab.url) {
+      console.log(`[ServiceWorker] Tab ${tabId} was in recording session, re-establishing connection...`);
+      
+      // Update URL map with new page info
       tabUrlMap.set(tabId, { url: tab.url, title: tab.title });
+      
+      // Re-send START_RECORDING_IN_TAB to re-establish connection with fresh content script
+      // Note: The content script may have already started locally via auto-start,
+      // but we need to ensure service worker can communicate with it
+      try {
+        const tabIndex = sessionTabMap.get(tabId);
+        const message: StartRecordingInTabMessage = {
+          type: 'START_RECORDING_IN_TAB',
+          payload: { tabId, tabUrl: tab.url, tabTitle: tab.title, tabIndex },
+        };
+        
+        await chrome.tabs.sendMessage(tabId, message);
+        activeRecordingTabs.add(tabId); // Re-add to active set
+        console.log(`[ServiceWorker] Re-established recording connection with tab ${tabId}`);
+      } catch (error) {
+        console.warn(`[ServiceWorker] Failed to re-establish recording in tab ${tabId}:`, error);
+      }
     }
   }
 });
 
 // Listen for tab activation to detect tab switches during recording
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  // Only auto-detect when actively recording (not paused)
-  if (recordingSessionId && activeRecordingTabs.size > 0) {
-    const newTabId = activeInfo.tabId;
-    // windowId is available but not currently used - kept for future window management
+  // Clear previous debounce timer to prevent recording rapid tab switches
+  if (tabSwitchDebounceTimer) {
+    clearTimeout(tabSwitchDebounceTimer);
+  }
+  
+  // Debounce tab switch detection to avoid noise from rapid switching
+  tabSwitchDebounceTimer = setTimeout(async () => {
+    console.log('[ServiceWorker] Tab activated:', {
+      newTabId: activeInfo.tabId,
+      lastActiveTabId,
+      recordingSessionId,
+      activeRecordingTabsSize: activeRecordingTabs.size,
+      isRecording: !!(recordingSessionId && activeRecordingTabs.size > 0),
+    });
     
-    // Check if the newly activated tab is already being recorded
-    if (!activeRecordingTabs.has(newTabId)) {
+    // Only auto-detect when actively recording (not paused)
+    if (recordingSessionId && activeRecordingTabs.size > 0) {
+      const newTabId = activeInfo.tabId;
+      // windowId is available but not currently used - kept for future window management
+      
+      // Skip if switching to the same tab (shouldn't happen, but guard)
+      if (newTabId === lastActiveTabId) {
+        console.log('[ServiceWorker] Skipping: same tab as last active');
+        return;
+      }
+      
       try {
         const newTab = await chrome.tabs.get(newTabId);
         
-        // Only start recording if it's not a restricted page
+        // Only handle if it's not a restricted page
         if (newTab.url && 
             !newTab.url.startsWith('chrome://') && 
             !newTab.url.startsWith('chrome-extension://') && 
@@ -795,21 +880,49 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
           // Get the previous active tab's URL for TAB_SWITCH step
           let fromUrl = '';
           let fromTitle = '';
+          let fromTabIndex: number | undefined;
+          let toTabIndex: number | undefined;
+          
+          console.log('[ServiceWorker] Getting previous tab info:', {
+            lastActiveTabId,
+            isInActiveRecordingTabs: lastActiveTabId ? activeRecordingTabs.has(lastActiveTabId) : false,
+            tabUrlMapHasEntry: lastActiveTabId ? tabUrlMap.has(lastActiveTabId) : false,
+          });
+          
           if (lastActiveTabId && activeRecordingTabs.has(lastActiveTabId)) {
             const prevTabInfo = tabUrlMap.get(lastActiveTabId);
             if (prevTabInfo) {
               fromUrl = prevTabInfo.url;
               fromTitle = prevTabInfo.title || '';
+              console.log('[ServiceWorker] Found previous tab info:', { fromUrl, fromTitle });
+            } else {
+              console.warn('[ServiceWorker] Previous tab in activeRecordingTabs but not in tabUrlMap!');
             }
+            fromTabIndex = sessionTabMap.get(lastActiveTabId);
+          } else {
+            console.log('[ServiceWorker] No previous tab info available (lastActiveTabId not in activeRecordingTabs)');
           }
           
-          // Start recording in new tab
-          await startRecordingInTab(newTabId, newTab.url, newTab.title);
+          // Check if the newly activated tab needs recording started
+          const isNewTab = !activeRecordingTabs.has(newTabId);
           
-          // Update last active tab
+          if (isNewTab) {
+            // Start recording in new tab
+            await startRecordingInTab(newTabId, newTab.url, newTab.title);
+          } else {
+            // Tab already being recorded - just update URL map in case it changed
+            tabUrlMap.set(newTabId, { url: newTab.url, title: newTab.title });
+          }
+          
+          // Get the tab's logical index (may have been assigned when started or now)
+          toTabIndex = sessionTabMap.get(newTabId);
+          
+          // Update last active tab BEFORE sending messages
+          const previousActiveTabId = lastActiveTabId;
           lastActiveTabId = newTabId;
           
-          // Create and send TAB_SWITCH step
+          // ALWAYS create and send TAB_SWITCH step when switching tabs
+          // (whether to a new tab or returning to an already-recording tab)
           const tabSwitchStep = {
             type: 'TAB_SWITCH' as const,
             payload: {
@@ -817,10 +930,17 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
               toUrl: newTab.url,
               fromTitle,
               toTitle: newTab.title,
+              fromTabIndex,
+              toTabIndex,
               timestamp: Date.now(),
             },
-            description: `Switch to tab: ${newTab.title || newTab.url}`,
+            description: `Switch to tab ${toTabIndex !== undefined ? toTabIndex + 1 : ''}: ${newTab.title || newTab.url}`,
           };
+          
+          console.log(`[ServiceWorker] TAB_SWITCH detected: ${isNewTab ? 'new tab' : 'returning to tab'} ${newTabId}`, {
+            from: { tabId: previousActiveTabId, url: fromUrl, index: fromTabIndex },
+            to: { tabId: newTabId, url: newTab.url, index: toTabIndex },
+          });
           
           // Send TAB_SWITCHED message to sidepanel
           chrome.runtime.sendMessage({
@@ -830,26 +950,43 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
               toUrl: newTab.url,
               fromTitle,
               toTitle: newTab.title,
+              fromTabIndex,
+              toTabIndex,
               timestamp: Date.now(),
             },
-          } as TabSwitchedMessage);
+          } as TabSwitchedMessage).catch(() => {
+            // Sidepanel might not be open, that's okay
+          });
           
-          // Broadcast the recorded step
+          // Broadcast the recorded step with tab index
           chrome.runtime.sendMessage({
             type: 'RECORDED_STEP',
             payload: {
               step: tabSwitchStep,
               tabUrl: newTab.url,
               tabTitle: newTab.title,
+              tabIndex: toTabIndex,
             },
           }).catch(() => {
             // Sidepanel might not be open, that's okay
           });
         }
       } catch (error) {
-        console.warn(`Failed to handle tab switch to ${newTabId}:`, error);
+        console.error(`[ServiceWorker] Failed to handle tab switch to ${newTabId}:`, error);
       }
+    } else {
+      console.log('[ServiceWorker] Tab activation ignored - not recording or no active recording tabs');
     }
+  }, TAB_SWITCH_DEBOUNCE_MS);
+});
+
+// Listen for new tab creation during recording
+chrome.tabs.onCreated.addListener(async (tab) => {
+  // Only track if actively recording (not paused)
+  if (recordingSessionId && activeRecordingTabs.size > 0 && tab.id) {
+    console.log(`New tab created during recording: ${tab.id}`);
+    // Tab will be handled by onActivated listener when user switches to it
+    // We just log it here for debugging purposes
   }
 });
 
@@ -858,6 +995,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   if (activeRecordingTabs.has(tabId)) {
     activeRecordingTabs.delete(tabId);
     tabUrlMap.delete(tabId);
+    sessionTabMap.delete(tabId);
     if (lastActiveTabId === tabId) {
       lastActiveTabId = null;
     }

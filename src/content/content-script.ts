@@ -168,7 +168,8 @@ function handleFullMessage(
           return false;
         }
         try {
-          recordingManager.start();
+          const tabIndex = message.payload?.tabIndex;
+          recordingManager.start(tabIndex);
           sendResponse({
             success: true,
             data: { message: 'Recording started in tab' },
@@ -326,6 +327,13 @@ function handleFullMessage(
           
           // Set flag in sessionStorage to auto-start recording after refresh
           sessionStorage.setItem('ghostwriter_auto_start_recording', 'true');
+          
+          // If recording manager has a tab index, preserve it across refresh
+          const currentTabIndex = (recordingManager as any)?.currentTabIndex;
+          if (currentTabIndex !== undefined && currentTabIndex !== null) {
+            sessionStorage.setItem('ghostwriter_tab_index', String(currentTabIndex));
+            console.log('📸 GhostWriter: Preserving tab index across refresh:', currentTabIndex);
+          }
           
           // Ensure scroll is at (0, 0) before refresh
           window.scrollTo(0, 0);
@@ -784,6 +792,14 @@ try {
     console.log('📸 GhostWriter: Auto-starting recording after page refresh');
     sessionStorage.removeItem('ghostwriter_auto_start_recording');
     
+    // Retrieve tab index if it was stored before refresh
+    const storedTabIndex = sessionStorage.getItem('ghostwriter_tab_index');
+    const tabIndex = storedTabIndex !== null ? parseInt(storedTabIndex, 10) : undefined;
+    if (tabIndex !== undefined) {
+      console.log('📸 GhostWriter: Restored tab index from sessionStorage:', tabIndex);
+      sessionStorage.removeItem('ghostwriter_tab_index');
+    }
+    
     // Wait for page to fully load and spreadsheet to render
     const startRecording = async () => {
       // Wait for page to be fully loaded
@@ -814,9 +830,28 @@ try {
       
       console.log('📸 GhostWriter: Page refreshed, scroll position:', { x: window.scrollX, y: window.scrollY });
       
-      // Start recording
+      // Start recording locally with the preserved tab index
       if (recordingManager) {
-        recordingManager.start();
+        recordingManager.start(tabIndex);
+        console.log('📸 GhostWriter: Recording started after refresh with tab index:', tabIndex);
+      }
+      
+      // IMPORTANT: Now notify service worker to initialize the recording session
+      // for multi-tab coordination. We do this AFTER recordingManager.start()
+      // so that the initial snapshot capture happens first with the zoom logic.
+      // Wait a bit to ensure the initial snapshot is captured
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      try {
+        console.log('📸 GhostWriter: Notifying service worker to initialize session...');
+        const response = await chrome.runtime.sendMessage({ type: 'START_RECORDING' });
+        if (response?.success) {
+          console.log('📸 GhostWriter: Service worker recording session initialized');
+        } else {
+          console.warn('📸 GhostWriter: Failed to initialize service worker session:', response?.error);
+        }
+      } catch (err) {
+        console.error('📸 GhostWriter: Error initializing service worker session:', err);
       }
     };
     

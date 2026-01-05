@@ -37,6 +37,8 @@ function App() {
     isRecording,
     pendingAIValidations,
     enhancedSteps,
+    recordedTabs,
+    excludedTabIndices,
     setState,
     setConnectionStatus,
     setError,
@@ -49,6 +51,10 @@ function App() {
     setCurrentWorkflowName,
     setIsRecording,
     setWorkflowSteps,
+    // addRecordedTab, // Available for future use
+    // incrementTabStepCount, // Available for future use
+    toggleTabExclusion,
+    removeWorkflowStep,
   } = useExtensionStore();
 
   const [isPinging, setIsPinging] = useState(false);
@@ -58,6 +64,7 @@ function App() {
   const [showRefreshDialog, setShowRefreshDialog] = useState(false);
   const [pendingTabId, setPendingTabId] = useState<number | null>(null);
   const [isPaused, setIsPaused] = useState(false);
+  const [tabSwitchToast, setTabSwitchToast] = useState<{ title: string; tabIndex: number; totalTabs: number } | null>(null);
   // Correction learning state
   const [showCorrections, setShowCorrections] = useState(false);
   const [storedCorrections, setStoredCorrections] = useState<CorrectionEntry[]>([]);
@@ -211,6 +218,28 @@ function App() {
       } else if (message.type === 'RECORDED_STEP' && message.payload?.step) {
         // Use the store actions directly instead of from hook to avoid stale closures
         useExtensionStore.getState().addWorkflowStep(message.payload.step);
+        
+        // Track tab metadata
+        const tabIndex = message.payload.tabIndex;
+        const tabUrl = message.payload.tabUrl;
+        const tabTitle = message.payload.tabTitle;
+        if (tabIndex !== undefined && tabUrl && tabTitle) {
+          useExtensionStore.getState().addRecordedTab(tabIndex, tabUrl, tabTitle);
+          useExtensionStore.getState().incrementTabStepCount(tabIndex);
+        }
+      } else if (message.type === 'TAB_SWITCHED' && message.payload) {
+        // Tab switch detected - show toast notification
+        const { toUrl, toTitle, toTabIndex } = message.payload;
+        if (toTabIndex !== undefined) {
+          const totalTabs = useExtensionStore.getState().recordedTabs.size;
+          setTabSwitchToast({
+            title: toTitle || toUrl || 'New Tab',
+            tabIndex: toTabIndex,
+            totalTabs: totalTabs + 1, // +1 because we're adding this tab
+          });
+          // Auto-hide toast after 3 seconds
+          setTimeout(() => setTabSwitchToast(null), 3000);
+        }
       } else if (message.type === 'UPDATE_STEP' && message.payload?.stepId && message.payload?.step) {
         useExtensionStore.getState().updateWorkflowStep(message.payload.stepId, message.payload.step);
         // Mark as enhanced when step is updated with AI suggestions
@@ -326,6 +355,7 @@ function App() {
       // Send REFRESH_PAGE message
       // Note: Page will refresh, so we won't get a response back
       // The content script will auto-start recording after refresh using sessionStorage flag
+      // and will notify the service worker to initialize the recording session
       await runtimeBridge.sendMessage(
         {
           type: 'REFRESH_PAGE',
@@ -1273,14 +1303,60 @@ function App() {
           </div>
         </div>
 
+        {/* Tab Switch Toast Notification */}
+        {tabSwitchToast && (
+          <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900 rounded-lg border border-blue-200 dark:border-blue-700 animate-fade-in">
+            <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-200">
+              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
+              </svg>
+              <span>Recording in: <strong>{tabSwitchToast.title}</strong></span>
+              <span className="ml-auto text-xs">Tab {tabSwitchToast.tabIndex + 1} of {tabSwitchToast.totalTabs}</span>
+            </div>
+          </div>
+        )}
+
         {/* Recorded Steps */}
         {workflowSteps.length > 0 && (
           <div className="mb-6 p-4 bg-card rounded-lg border border-border">
             <h2 className="text-lg font-semibold mb-4 text-card-foreground">
               Recorded Steps ({workflowSteps.length})
             </h2>
+            
+            {/* Tab Filter Bar */}
+            {recordedTabs.size > 1 && (
+              <div className="mb-3 pb-3 border-b border-border">
+                <div className="text-xs text-muted-foreground mb-2">Filter by tab:</div>
+                <div className="flex flex-wrap gap-2">
+                  {Array.from(recordedTabs.entries()).map(([tabIndex, info]) => {
+                    const isExcluded = excludedTabIndices.has(tabIndex);
+                    return (
+                      <button
+                        key={tabIndex}
+                        onClick={() => toggleTabExclusion(tabIndex)}
+                        className={`px-2 py-1 text-xs rounded transition-colors ${
+                          isExcluded 
+                            ? 'bg-gray-200 text-gray-500 line-through hover:bg-gray-300' 
+                            : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                        }`}
+                        title={isExcluded ? 'Click to include' : 'Click to exclude'}
+                      >
+                        Tab {tabIndex + 1}: {info.title.length > 20 ? info.title.substring(0, 20) + '...' : info.title} ({info.stepCount})
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+            
             <div className="space-y-2 max-h-64 overflow-y-auto">
-              {workflowSteps.map((step, index) => {
+              {workflowSteps.filter((step) => {
+                // Filter out steps from excluded tabs
+                if (isWorkflowStepPayload(step.payload) && step.payload.tabIndex !== undefined) {
+                  return !excludedTabIndices.has(step.payload.tabIndex);
+                }
+                return true; // Include steps without tab index
+              }).map((step, index) => {
                 const stepId = step.payload.timestamp.toString();
                 const isPending = pendingAIValidations.has(stepId);
                 const isEnhanced = enhancedSteps.has(stepId);
@@ -1312,6 +1388,15 @@ function App() {
                       <div className="flex-1">
                         <div className="font-medium text-foreground flex items-center gap-2">
                           {index + 1}. {step.type}
+                          {/* Tab Badge */}
+                          {isWorkflowStepPayload(step.payload) && step.payload.tabIndex !== undefined && (
+                            <span 
+                              className="px-1.5 py-0.5 text-xs bg-blue-100 text-blue-700 rounded"
+                              title={`Tab ${step.payload.tabIndex + 1}`}
+                            >
+                              Tab {step.payload.tabIndex + 1}
+                            </span>
+                          )}
                           {isVariable && (
                             <span 
                               className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded-full font-medium"
@@ -1418,6 +1503,16 @@ function App() {
                         )}
                       </div>
                       <div className="flex items-center gap-2">
+                        {/* Remove Step Button */}
+                        <button
+                          onClick={() => removeWorkflowStep(index)}
+                          className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                          title="Remove this step"
+                        >
+                          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
                         {/* Screenshot Button */}
                         {hasScreenshot && (
                           <button

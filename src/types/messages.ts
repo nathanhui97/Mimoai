@@ -134,6 +134,7 @@ export interface RecordedStepMessage extends ExtensionMessage {
     step: import('./workflow').WorkflowStep;
     tabUrl?: string; // Tab URL where step was recorded (not tabId)
     tabTitle?: string; // Tab title for context
+    tabIndex?: number; // Logical tab index (0, 1, 2...)
   };
 }
 
@@ -290,6 +291,8 @@ export interface TabSwitchedMessage extends ExtensionMessage {
     toUrl: string;
     fromTitle?: string;
     toTitle?: string;
+    fromTabIndex?: number;
+    toTabIndex?: number;
     timestamp: number;
   };
 }
@@ -303,6 +306,7 @@ export interface StartRecordingInTabMessage extends ExtensionMessage {
     tabId: number; // Runtime-only, not persisted
     tabUrl: string;
     tabTitle?: string;
+    tabIndex?: number; // Logical tab index (0, 1, 2...)
   };
 }
 
