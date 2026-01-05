@@ -5,7 +5,7 @@
 
 if [ -z "$1" ] || [ -z "$2" ]; then
     echo "Usage: ./push-to-github.sh YOUR_GITHUB_USERNAME REPO_NAME"
-    echo "Example: ./push-to-github.sh nathhui autoflow-chrome-extension"
+    echo "Example: ./push-to-github.sh nathhui mimoai"
     exit 1
 fi
 

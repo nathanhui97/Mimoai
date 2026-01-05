@@ -16,7 +16,7 @@
 **Option B: Complete Reset (If Option A doesn't work)**
 1. Click **"Remove"** to uninstall the extension
 2. Click **"Load unpacked"**
-3. Navigate to: `/Users/nathhui/Documents/Autoflow chrome extension/dist`
+3. Navigate to: `/Users/nathhui/Documents/mimoai/dist`
 4. Select the `dist` folder
 
 ## Step 4: Verify You Have the Latest Version
@@ -60,7 +60,7 @@ If you're still seeing old behavior:
 ### Check Build Date:
 Run this in terminal:
 ```bash
-ls -la "/Users/nathhui/Documents/Autoflow chrome extension/dist/assets/" | grep content-script
+ls -la "/Users/nathhui/Documents/mimoai/dist/assets/" | grep content-script
 ```
 
 The file should have a recent timestamp (just now).

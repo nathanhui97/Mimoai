@@ -2970,6 +2970,29 @@ export class RecordingManager {
           this.lastInputStep.value === value) {
         return; // Skip duplicate input
       }
+      
+      // ============================================================================
+      // 📊 SPREADSHEET DEDUPLICATION: Skip if typing in same cell as last step
+      // This handles slow typing, corrections, and incremental edits
+      // Only record the FINAL value when user moves to a different cell
+      // ============================================================================
+      const isSpreadsheet = url.includes('docs.google.com/spreadsheets') || 
+                           url.includes('excel.office.com');
+      
+      if (isSpreadsheet && label && this.lastStep) {
+        // Check if the last step was also an INPUT to the same cell
+        if (this.lastStep.type === 'INPUT' && 
+            isWorkflowStepPayload(this.lastStep.payload) &&
+            this.lastStep.payload.label === label) {
+          
+          console.log(`📊 [Recording] Skipping duplicate INPUT for cell "${label}" (intermediate typing)`);
+          console.log(`📊 [Recording] Previous value: "${this.lastStep.payload.value}"`);
+          console.log(`📊 [Recording] Current value: "${value}" (will be recorded when cell changes)`);
+          
+          // Skip this step entirely - don't record intermediate typing
+          return;
+        }
+      }
 
       // Generate semantic fallback selectors for grid cells (same as in handleClick)
       const semanticContext = ContextScanner.scan(element);

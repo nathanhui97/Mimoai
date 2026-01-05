@@ -23,7 +23,7 @@
 
 ### Step 1: Reload Extension
 1. Go to: `chrome://extensions`
-2. Find "Autoflow" (or "GhostWriter")
+2. Find "mimoai"
 3. Click **RELOAD** 🔄
 
 ### Step 2: Open Google Sheets
@@ -35,7 +35,7 @@
    - **C1**: Phone
 
 ### Step 3: Record a Simple Workflow
-1. Open **Autoflow side panel**
+1. Open **mimoai side panel**
 2. Click **"Start Recording"** (red button)
 3. **Click cell A2** (under "Name")
 4. **Type "John Doe"**
@@ -89,7 +89,7 @@ This means AI is typing into wrong element (old bug).
 
 1. **Hard Reload Extension**:
    - Go to `chrome://extensions`
-   - Click "Remove" on Autoflow
+   - Click "Remove" on mimoai
    - Reload the page
    - Re-install from `/dist` folder
 

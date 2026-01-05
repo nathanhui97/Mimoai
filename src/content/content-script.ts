@@ -1,5 +1,5 @@
 /**
- * Content Script for GhostWriter Extension
+ * Content Script for mimoai Extension
  * Runs on all URLs and handles DOM interaction recording/replay
  */
 
@@ -7,7 +7,7 @@
 // Version identifier for debugging - update this when making significant changes
 const EXTENSION_VERSION = 'v0.1.1-starting-page-validation';
 const BUILD_TIMESTAMP = new Date().toISOString();
-console.log(`🚀 GhostWriter: Content script loaded (${EXTENSION_VERSION}) - ${BUILD_TIMESTAMP}`);
+console.log(`🚀 mimoai: Content script loaded (${EXTENSION_VERSION}) - ${BUILD_TIMESTAMP}`);
 
 // Dynamically detect build hash from script URL
 try {

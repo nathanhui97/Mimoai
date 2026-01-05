@@ -1138,7 +1138,7 @@ function App() {
   return (
     <div className="min-h-screen bg-background p-6">
       <div className="max-w-2xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6 text-foreground">GhostWriter</h1>
+        <h1 className="text-3xl font-bold mb-6 text-foreground">mimoai</h1>
         
         {/* Connection Status */}
         <div className="mb-6 p-4 bg-card rounded-lg border border-border">

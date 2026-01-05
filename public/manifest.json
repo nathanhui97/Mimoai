@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "GhostWriter",
+  "name": "mimoai",
   "version": "0.1.1",
   "description": "AI-powered browser interaction recorder and replayer",
   "permissions": [

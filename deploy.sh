@@ -12,7 +12,7 @@ PROJECT_REF="jfboagngbpzollcipewh"
 
 echo "🚀 Deploying recover_element Edge Function to Supabase..."
 echo ""
-echo "Project: autoflow (${PROJECT_REF})"
+echo "Project: mimoai (${PROJECT_REF})"
 echo ""
 
 # Step 1: Login

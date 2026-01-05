@@ -1,8 +1,8 @@
-# GhostWriter (Autoflow) - Project Summary
+# mimoai - Project Summary
 
 ## 📋 Product Description
 
-**GhostWriter** (also known as Autoflow) is an AI-powered Chrome Extension that transforms repetitive browser tasks into reusable "Micro-Apps" with intelligent automation. Unlike traditional macro recorders that play back static scripts, GhostWriter uses AI to understand user intent, automatically parameterize workflows, and create intuitive form interfaces for future executions.
+**mimoai** is an AI-powered Chrome Extension that transforms repetitive browser tasks into reusable "Micro-Apps" with intelligent automation. Unlike traditional macro recorders that play back static scripts, mimoai uses AI to understand user intent, automatically parameterize workflows, and create intuitive form interfaces for future executions.
 
 ### Core Value Proposition
 
@@ -313,7 +313,7 @@ User Action → Content Script → Supabase Edge Function → Gemini API
 ## 📁 Project Structure
 
 ```
-autoflow-chrome-extension/
+mimoai/
 ├── src/
 │   ├── background/          # Service worker
 │   ├── content/             # Content script layer (core automation)

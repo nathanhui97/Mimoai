@@ -1,8 +1,8 @@
-# GhostWriter
+# mimoai
 
 **Turn repetitive browser tasks into reusable "Micro-Apps" instantly.**
 
-GhostWriter is a Chrome Extension that revolutionizes browser automation by using AI to understand user intent and automatically generate user-friendly forms for repetitive tasks. Unlike traditional macro recorders that play back static scripts, GhostWriter watches you perform a task once, understands the context, and creates an intuitive form interface for future executions.
+mimoai is a Chrome Extension that revolutionizes browser automation by using AI to understand user intent and automatically generate user-friendly forms for repetitive tasks. Unlike traditional macro recorders that play back static scripts, mimoai watches you perform a task once, understands the context, and creates an intuitive form interface for future executions.
 
 ## 🚀 Core Innovation
 

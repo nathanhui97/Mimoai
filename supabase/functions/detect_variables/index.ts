@@ -742,7 +742,7 @@ function buildVariableDetectionPrompt(
   initialFullPageSnapshot?: string
 ): string {
   let prompt = `PRODUCT CONTEXT:
-You are analyzing steps from a browser automation tool called "GhostWriter" (also known as Autoflow). 
+You are analyzing steps from a browser automation tool called "mimoai". 
 This tool allows users to record repetitive browser tasks (like filling forms, creating promotions, processing orders) 
 and then execute them multiple times with different input values. 
 

@@ -5,7 +5,7 @@
 **Run this single command in your terminal:**
 
 ```bash
-cd "/Users/nathhui/Documents/Autoflow chrome extension" && ./deploy.sh
+cd "/Users/nathhui/Documents/mimoai" && ./deploy.sh
 ```
 
 This script will:
@@ -26,7 +26,7 @@ If you prefer to run commands manually:
 
 2. **Link to your project:**
    ```bash
-   cd "/Users/nathhui/Documents/Autoflow chrome extension"
+   cd "/Users/nathhui/Documents/mimoai"
    npx supabase link --project-ref jfboagngbpzollcipewh
    ```
 

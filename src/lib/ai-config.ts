@@ -40,7 +40,7 @@ class AIConfigManager {
 
   constructor() {
     // Default configuration
-    // Supabase project: autoflow (jfboagngbpzollcipewh)
+    // Supabase project: mimoai (jfboagngbpzollcipewh)
     this.config = {
       supabaseUrl: 'https://jfboagngbpzollcipewh.supabase.co',
       supabaseAnonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpmYm9hZ25nYnB6b2xsY2lwZXdoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ5OTIyMzMsImV4cCI6MjA4MDU2ODIzM30.CHHB1kvhiq4i063unS6_UdBLwLd8uXVi71id6hdelUI',

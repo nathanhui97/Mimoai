@@ -19,7 +19,7 @@ You're seeing the old build hash `BCQyALCB.js` instead of the new `DyhywIid.js`.
 
 ### Step 3: Load Fresh Extension
 1. Click **"Load unpacked"**
-2. Navigate to: `/Users/nathhui/Documents/Autoflow chrome extension/dist`
+2. Navigate to: `/Users/nathhui/Documents/mimoai/dist`
 3. Select the `dist` folder
 4. Wait for it to load
 

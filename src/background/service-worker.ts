@@ -1,5 +1,5 @@
 /**
- * Background Service Worker for GhostWriter Extension
+ * Background Service Worker for mimoai Extension
  * Handles message routing between Side Panel and Content Scripts
  * Manages multi-tab recording coordination
  */

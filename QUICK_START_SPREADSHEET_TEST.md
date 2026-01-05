@@ -3,13 +3,13 @@
 ## Step 1: Build & Reload (1 minute)
 
 ```bash
-cd "/Users/nathhui/Documents/Autoflow chrome extension"
+cd "/Users/nathhui/Documents/mimoai"
 npm run build
 ```
 
 Then:
 1. Go to `chrome://extensions`
-2. Find "Autoflow"
+2. Find "mimoai"
 3. Click the **Reload** button 🔄
 
 ---
@@ -33,7 +33,7 @@ Type these headers in row 1:
 
 ## Step 4: Run Tests (3 minutes)
 
-Open Autoflow side panel and try these commands:
+Open mimoai side panel and try these commands:
 
 ### Test 1: Direct Cell Input ⚡
 ```
