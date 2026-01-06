@@ -57,7 +57,11 @@ export type MessageType =
   | 'ACTIVATE_TAB' // Switch to a specific tab during multi-tab execution
   | 'CREATE_TAB' // Create a new tab during multi-tab execution
   | 'NAVIGATE_TAB' // Navigate a tab to a URL during multi-tab execution
-  | 'GET_CURRENT_TAB_ID'; // Get the current tab's ID (from service worker)
+  | 'GET_CURRENT_TAB_ID' // Get the current tab's ID (from service worker)
+  // TabManager state operations (routed through service worker for reliability)
+  | 'GET_TAB_MANAGER_STATE' // Get tab manager state from storage
+  | 'SET_TAB_MANAGER_STATE' // Save tab manager state to storage
+  | 'CLEAR_TAB_MANAGER_STATE'; // Clear tab manager state from storage
 
 /**
  * Base message interface for all extension messages

@@ -147,6 +147,7 @@ export interface AgentActionParams {
   toTabIndex?: number;      // Logical tab index to switch to
   toUrl?: string;           // URL of the tab to switch to
   toTitle?: string;         // Title of the tab
+  isNewTab?: boolean;       // Was this a new tab creation (true) or switch to existing (false)?
   
   // For read - query element values
   attribute?: 'value' | 'text' | 'checked' | 'selected' | 'count';
@@ -370,6 +371,15 @@ export class AIAgent {
     console.log(`[AIAgent] 📅 Created: ${workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : 'Unknown'}`);
     console.log(`[AIAgent] 📊 Total steps: ${workflow.steps.length}`);
     
+    // Clear any existing TabManager state from previous workflows
+    try {
+      const { TabManager } = await import('../content/universal-execution/tab-manager');
+      await TabManager.clearStorage();
+      console.log('[AIAgent] 🧹 Cleared previous tab manager state');
+    } catch (error) {
+      console.warn('[AIAgent] Could not clear tab manager state:', error);
+    }
+    
     // Initialize state
     this.state = {
       workflowId: workflow.id,
@@ -513,6 +523,7 @@ export class AIAgent {
           const toTabIndex = tabSwitchPayload?.toTabIndex;
           const toUrl = tabSwitchPayload?.toUrl;
           const toTitle = tabSwitchPayload?.toTitle;
+          const isNewTab = tabSwitchPayload?.isNewTab; // Whether this was a new tab creation or switch
           
           if (toTabIndex === undefined || !toUrl) {
             console.error('[AIAgent] ❌ TAB_SWITCH hint missing required data');
@@ -521,7 +532,8 @@ export class AIAgent {
             continue;
           }
           
-          console.log(`[AIAgent] 🔄 Switching to tab ${toTabIndex}: ${toTitle || toUrl}`);
+          const switchType = isNewTab === true ? '(new tab)' : isNewTab === false ? '(existing tab)' : '(legacy)';
+          console.log(`[AIAgent] 🔄 Switching to tab ${toTabIndex}: ${toTitle || toUrl} ${switchType}`);
           
           const tabSwitchAction: AgentAction = {
             type: 'tab_switch',
@@ -529,6 +541,7 @@ export class AIAgent {
               toTabIndex,
               toUrl,
               toTitle,
+              isNewTab, // Pass through the isNewTab indicator
               description: currentHint.description,
             },
             reasoning: `Switching to tab ${toTabIndex}: ${toTitle || toUrl}`,
@@ -2183,6 +2196,7 @@ export class AIAgent {
           
           const toTabIndex = (currentAction.params as any).toTabIndex;
           const toUrl = (currentAction.params as any).toUrl;
+          const isNewTab = (currentAction.params as any).isNewTab;
           
           // Get or create TabManager instance (singleton pattern)
           let tabManager: typeof TabManager.prototype;
@@ -2192,30 +2206,74 @@ export class AIAgent {
             const tabIdResponse = await chrome.runtime.sendMessage({ type: 'GET_CURRENT_TAB_ID' });
             const currentTabId = tabIdResponse?.data?.tabId || 0;
             console.log(`[AIAgent] Got current tab ID from service worker: ${currentTabId}`);
-            (window as any).__ghostwriter_tab_manager = new TabManager(currentTabId);
+            
+            // Create and initialize TabManager
+            const newTabManager = new TabManager(currentTabId);
+            await newTabManager.initialize();
+            (window as any).__ghostwriter_tab_manager = newTabManager;
           }
           tabManager = (window as any).__ghostwriter_tab_manager;
           
-          // Check if tab exists or needs to be created
-          if (tabManager.hasTab(toTabIndex)) {
-            console.log(`[AIAgent] 🔄 Switching to existing tab ${toTabIndex}`);
-            const switchSuccess = await tabManager.switchToTab(toTabIndex);
-            if (!switchSuccess) {
-              console.error(`[AIAgent] ❌ Tab switch failed`);
-              return {
-                success: false,
-                error: `Failed to switch to tab ${toTabIndex}`,
-              };
-            }
-          } else {
-            console.log(`[AIAgent] 🔄 Opening new tab ${toTabIndex} at ${toUrl}`);
+          // Decide whether to create new tab or switch to existing based on recording
+          if (isNewTab === true) {
+            // Recording shows this was a NEW tab creation
+            console.log(`[AIAgent] 🆕 Creating new tab ${toTabIndex} at ${toUrl} (recorded as new)`);
             const newTabId = await tabManager.openNewTab(toTabIndex, toUrl);
             if (!newTabId) {
-              console.error(`[AIAgent] ❌ Failed to open new tab`);
+              console.error(`[AIAgent] ❌ Failed to create new tab`);
               return {
                 success: false,
-                error: `Failed to open new tab at ${toUrl}`,
+                error: `Failed to create new tab at ${toUrl}`,
               };
+            }
+          } else if (isNewTab === false) {
+            // Recording shows this was a SWITCH to existing tab
+            console.log(`[AIAgent] 🔄 Switching to existing tab ${toTabIndex} (recorded as existing)`);
+            
+            // If tab doesn't exist yet, create it (first time switching to it in replay)
+            if (!tabManager.hasTab(toTabIndex)) {
+              console.log(`[AIAgent] 🆕 Tab ${toTabIndex} not yet created, creating it now`);
+              const newTabId = await tabManager.openNewTab(toTabIndex, toUrl);
+              if (!newTabId) {
+                console.error(`[AIAgent] ❌ Failed to create tab`);
+                return {
+                  success: false,
+                  error: `Failed to create tab ${toTabIndex}`,
+                };
+              }
+            } else {
+              // Tab already exists, just switch to it
+              const switchSuccess = await tabManager.switchToTab(toTabIndex);
+              if (!switchSuccess) {
+                console.error(`[AIAgent] ❌ Tab switch failed`);
+                return {
+                  success: false,
+                  error: `Failed to switch to tab ${toTabIndex}`,
+                };
+              }
+            }
+          } else {
+            // Legacy: isNewTab not set (old recordings)
+            // Fall back to old behavior: check if tab exists
+            console.log(`[AIAgent] ⚠️ Legacy TAB_SWITCH (no isNewTab field), using fallback logic`);
+            if (tabManager.hasTab(toTabIndex)) {
+              console.log(`[AIAgent] 🔄 Switching to existing tab ${toTabIndex}`);
+              const switchSuccess = await tabManager.switchToTab(toTabIndex);
+              if (!switchSuccess) {
+                return {
+                  success: false,
+                  error: `Failed to switch to tab ${toTabIndex}`,
+                };
+              }
+            } else {
+              console.log(`[AIAgent] 🔄 Opening new tab ${toTabIndex} at ${toUrl}`);
+              const newTabId = await tabManager.openNewTab(toTabIndex, toUrl);
+              if (!newTabId) {
+                return {
+                  success: false,
+                  error: `Failed to open new tab at ${toUrl}`,
+                };
+              }
             }
           }
           

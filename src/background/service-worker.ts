@@ -21,6 +21,9 @@ let lastRecordedTabIndex: number | null = null; // Track last tab's logical inde
 let tabSwitchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 const TAB_SWITCH_DEBOUNCE_MS = 500;
 
+// Pending new tabs: tabs that opened to restricted pages (chrome://newtab) and are waiting for real navigation
+const pendingNewTabs: Set<number> = new Set();
+
 /**
  * Broadcast message to all tabs currently being recorded
  * Note: This function is currently unused but kept for future multi-tab coordination
@@ -147,6 +150,9 @@ async function pauseRecordingInAllTabs(): Promise<void> {
     }
   }
   
+  // Clear pending new tabs since recording is paused
+  pendingNewTabs.clear();
+  
   // Do NOT clear:
   // - recordingSessionId (preserve for resume)
   // - sessionTabMap (preserve for resume)
@@ -220,6 +226,7 @@ async function stopRecordingInAllTabs(): Promise<{ initialFullPageSnapshot?: str
   sessionTabMap.clear();
   lastRecordedTabUrl = null;
   lastRecordedTabIndex = null;
+  pendingNewTabs.clear(); // Clear pending new tabs
   
   console.log(`[Service Worker] Recording stopped, snapshot available: ${!!initialSnapshot}, length: ${initialSnapshot?.length || 0}`);
   
@@ -633,6 +640,7 @@ chrome.runtime.onMessage.addListener(
           lastActiveTabId = tabId;
           
           // Create TAB_SWITCH step with logical indices
+          // For RESUME_RECORDING, we're always switching to an existing tab (not creating new)
           const tabSwitchStep = {
             type: 'TAB_SWITCH' as const,
             payload: {
@@ -642,6 +650,7 @@ chrome.runtime.onMessage.addListener(
               toTitle: tabTitle,
               fromTabIndex,
               toTabIndex,
+              isNewTab: false, // Resume always switches to existing tab
               timestamp: Date.now(),
             },
             description: `Switch to tab ${toTabIndex}: ${tabTitle || tabUrl}`,
@@ -831,6 +840,75 @@ chrome.runtime.onMessage.addListener(
       return false;
     }
 
+    // ============================================================================
+    // TabManager State Operations (routed through service worker for reliability)
+    // Content scripts in some contexts (e.g., Google Sheets) can't access storage
+    // ============================================================================
+
+    // Handle GET_TAB_MANAGER_STATE - get tab manager state from storage
+    if (message.type === 'GET_TAB_MANAGER_STATE') {
+      chrome.storage.local.get(['tabManagerState'], (result) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({
+            success: false,
+            error: chrome.runtime.lastError.message,
+          });
+        } else {
+          sendResponse({
+            success: true,
+            data: result.tabManagerState || null,
+          });
+        }
+      });
+      return true; // Keep channel open for async
+    }
+
+    // Handle SET_TAB_MANAGER_STATE - save tab manager state to storage
+    if (message.type === 'SET_TAB_MANAGER_STATE') {
+      const { state } = message.payload || {};
+      
+      if (!state) {
+        sendResponse({
+          success: false,
+          error: 'state is required for SET_TAB_MANAGER_STATE',
+        });
+        return false;
+      }
+
+      chrome.storage.local.set({ tabManagerState: state }, () => {
+        if (chrome.runtime.lastError) {
+          sendResponse({
+            success: false,
+            error: chrome.runtime.lastError.message,
+          });
+        } else {
+          console.log('[ServiceWorker] TabManager state saved:', { tabs: state.tabMap?.length || 0 });
+          sendResponse({
+            success: true,
+          });
+        }
+      });
+      return true; // Keep channel open for async
+    }
+
+    // Handle CLEAR_TAB_MANAGER_STATE - clear tab manager state from storage
+    if (message.type === 'CLEAR_TAB_MANAGER_STATE') {
+      chrome.storage.local.remove(['tabManagerState'], () => {
+        if (chrome.runtime.lastError) {
+          sendResponse({
+            success: false,
+            error: chrome.runtime.lastError.message,
+          });
+        } else {
+          console.log('[ServiceWorker] TabManager state cleared');
+          sendResponse({
+            success: true,
+          });
+        }
+      });
+      return true; // Keep channel open for async
+    }
+
     // If message comes from content script, forward to sidepanel
     if (sender.tab) {
       // Message from content script - could forward to sidepanel if needed
@@ -921,8 +999,95 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
     console.log(`[ServiceWorker] Tab ${tabId} loaded: ${tab.url}`);
     
+    // Check if this is a restricted page
+    const isRestrictedPage = tab.url.startsWith('chrome://') || 
+                            tab.url.startsWith('chrome-extension://') || 
+                            tab.url.startsWith('about:') ||
+                            tab.url.startsWith('edge://');
+    
+    // Handle pending new tabs that navigated from restricted page to real page
+    if (recordingSessionId && pendingNewTabs.has(tabId) && !isRestrictedPage) {
+      console.log(`[ServiceWorker] 🆕 Pending tab ${tabId} navigated to real page: ${tab.url}`);
+      
+      // This tab was opened to chrome://newtab and NOW navigated to a real URL
+      // Treat this as a NEW TAB creation with the FINAL URL
+      pendingNewTabs.delete(tabId);
+      
+      // Get previous tab info for TAB_SWITCH step
+      let fromUrl = '';
+      let fromTitle = '';
+      let fromTabIndex: number | undefined;
+      
+      if (lastActiveTabId && activeRecordingTabs.has(lastActiveTabId)) {
+        const prevTabInfo = tabUrlMap.get(lastActiveTabId);
+        if (prevTabInfo) {
+          fromUrl = prevTabInfo.url;
+          fromTitle = prevTabInfo.title || '';
+        }
+        fromTabIndex = sessionTabMap.get(lastActiveTabId);
+      }
+      
+      // Start recording in this new tab
+      await startRecordingInTab(tabId, tab.url, tab.title);
+      
+      // Get the new tab's logical index (assigned in startRecordingInTab)
+      const toTabIndex = sessionTabMap.get(tabId);
+      
+      // Update last active tab
+      lastActiveTabId = tabId;
+      
+      // Create TAB_SWITCH step directly to the final URL (skip chrome://newtab)
+      const tabSwitchStep = {
+        type: 'TAB_SWITCH' as const,
+        payload: {
+          fromUrl,
+          toUrl: tab.url, // Final URL (not chrome://newtab!)
+          fromTitle,
+          toTitle: tab.title,
+          fromTabIndex,
+          toTabIndex,
+          isNewTab: true, // This is a new tab creation
+          timestamp: Date.now(),
+        },
+        description: `Switch to tab ${toTabIndex !== undefined ? toTabIndex + 1 : ''}: ${tab.title || tab.url}`,
+      };
+      
+      console.log(`[ServiceWorker] 📝 Recording TAB_SWITCH to real URL (skipped chrome://newtab):`, {
+        from: { url: fromUrl, index: fromTabIndex },
+        to: { url: tab.url, index: toTabIndex },
+      });
+      
+      // Send TAB_SWITCHED message to sidepanel  
+      chrome.runtime.sendMessage({
+        type: 'TAB_SWITCHED',
+        payload: {
+          fromUrl,
+          toUrl: tab.url,
+          fromTitle,
+          toTitle: tab.title,
+          fromTabIndex,
+          toTabIndex,
+          timestamp: Date.now(),
+        },
+      } as TabSwitchedMessage).catch(() => {
+        console.warn('[ServiceWorker] Failed to send TAB_SWITCHED to sidepanel (may be closed)');
+      });
+      
+      // Also send step to be added to workflow
+      chrome.runtime.sendMessage({
+        type: 'RECORDED_STEP',
+        payload: {
+          step: tabSwitchStep,
+        },
+      }).catch(() => {
+        console.warn('[ServiceWorker] Failed to send RECORDED_STEP to sidepanel');
+      });
+      
+      return; // Done handling pending tab
+    }
+    
     // If this tab was being recorded before the reload, re-establish the recording connection
-    if (recordingSessionId && sessionTabMap.has(tabId) && tab.url) {
+    if (recordingSessionId && sessionTabMap.has(tabId) && tab.url && !isRestrictedPage) {
       console.log(`[ServiceWorker] Tab ${tabId} was in recording session, re-establishing connection...`);
       
       // Update URL map with new page info
@@ -979,12 +1144,24 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
       try {
         const newTab = await chrome.tabs.get(newTabId);
         
-        // Only handle if it's not a restricted page
-        if (newTab.url && 
-            !newTab.url.startsWith('chrome://') && 
-            !newTab.url.startsWith('chrome-extension://') && 
-            !newTab.url.startsWith('about:') &&
-            !newTab.url.startsWith('edge://')) {
+        // Check if this is a restricted page (chrome://newtab, about:blank, etc.)
+        const isRestrictedPage = newTab.url && (
+          newTab.url.startsWith('chrome://') || 
+          newTab.url.startsWith('chrome-extension://') || 
+          newTab.url.startsWith('about:') ||
+          newTab.url.startsWith('edge://')
+        );
+        
+        if (isRestrictedPage) {
+          // Mark this tab as "pending" - waiting for user to navigate to a real URL
+          console.log(`[ServiceWorker] New tab ${newTabId} opened to restricted page (${newTab.url}), marking as pending`);
+          pendingNewTabs.add(newTabId);
+          // Don't record TAB_SWITCH yet - wait for real navigation
+          return;
+        }
+        
+        // Only handle if it's a real page
+        if (newTab.url) {
           
           // Get the previous active tab's URL for TAB_SWITCH step
           let fromUrl = '';
@@ -1041,6 +1218,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
               toTitle: newTab.title,
               fromTabIndex,
               toTabIndex,
+              isNewTab, // Record whether this was a new tab or switch to existing
               timestamp: Date.now(),
             },
             description: `Switch to tab ${toTabIndex !== undefined ? toTabIndex + 1 : ''}: ${newTab.title || newTab.url}`,
@@ -1109,6 +1287,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       lastActiveTabId = null;
     }
     console.log(`Tab ${tabId} closed, removed from recording tracking`);
+  }
+  
+  // Also clean up from pending new tabs if present
+  if (pendingNewTabs.has(tabId)) {
+    pendingNewTabs.delete(tabId);
+    console.log(`Pending new tab ${tabId} closed, removed from pending tracking`);
   }
 });
 

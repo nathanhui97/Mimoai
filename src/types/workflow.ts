@@ -136,6 +136,7 @@ export interface TabSwitchPayload {
   toTitle?: string;
   fromTabIndex?: number; // Logical index (Tab 0, Tab 1, etc.)
   toTabIndex?: number; // Logical index
+  isNewTab?: boolean; // Was this a new tab creation (true) or switch to existing tab (false)?
   timestamp: number;
 }
 

@@ -66,19 +66,32 @@ import type { WorkflowStep } from '../types/workflow';
   }
 })();
 
-// Check for saved agent state after navigation and resume if needed
-(async () => {
+// ============================================================================
+// Agent Auto-Resume System
+// ============================================================================
+
+// Track if agent is currently resuming to prevent duplicate resumptions
+let isResumingAgent = false;
+
+/**
+ * Check for saved agent state and resume execution if needed
+ * This is called both on page load AND when tab becomes visible
+ */
+async function checkAndResumeAgent(trigger: 'page_load' | 'tab_visible'): Promise<void> {
   try {
+    // Prevent duplicate resumptions
+    if (isResumingAgent) {
+      console.log(`[Content] ⏭️ Agent already resuming, skipping ${trigger} trigger`);
+      return;
+    }
+    
     // ONLY resume in main frame (frameId === 0) - not in iframes
     if (currentFrameId !== 0) {
       console.log('[Content] Skipping agent resumption in iframe (frameId:', currentFrameId, ')');
       return;
     }
     
-    // Add a delay to let the page load first
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    console.log('[Content] 🔍 Checking for saved agent state...');
+    console.log(`[Content] 🔍 Checking for saved agent state (trigger: ${trigger})...`);
     const result = await chrome.storage.local.get(['agentState']);
     const savedState = result.agentState as any;
     
@@ -91,21 +104,28 @@ import type { WorkflowStep } from '../types/workflow';
       });
     } else {
       console.log('[Content] ℹ️ No saved agent state found');
+      return;
     }
     
     if (savedState && savedState.status === 'running') {
+      // Set flag to prevent duplicate resumptions
+      isResumingAgent = true;
+      
       const transferType = savedState.transferredToTab ? 'tab switch' : 'navigation';
-      console.log(`[Content] 🔄 Resuming agent after ${transferType}`);
+      console.log(`[Content] 🔄 Resuming agent after ${transferType} (trigger: ${trigger})`);
       console.log(`[Content] Current hint index: ${savedState.currentHintIndex}, Total hints: ${savedState.hints?.length}`);
       console.log(`[Content] Current frameId: ${currentFrameId}, URL: ${window.location.href}`);
       console.log(`[Content] Next hint:`, savedState.hints?.[savedState.currentHintIndex]?.description);
       
       // Small delay to ensure page is ready
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Use shorter delay for tab_visible since page is already loaded
+      const readyDelay = trigger === 'tab_visible' ? 500 : 1500;
+      await new Promise(resolve => setTimeout(resolve, readyDelay));
       
       // CRITICAL: Double-check we're in the main frame
       if (currentFrameId !== 0) {
         console.error(`[Content] ❌ Agent state found but we're in iframe! frameId: ${currentFrameId}`);
+        isResumingAgent = false;
         return;
       }
       
@@ -116,6 +136,7 @@ import type { WorkflowStep } from '../types/workflow';
           currentUrl.includes('/_/og/bscframe')) {
         console.error(`[Content] ❌ Agent resume blocked - we're on an iframe URL: ${currentUrl}`);
         // Don't clear state - let the actual main frame resume
+        isResumingAgent = false;
         return;
       }
       
@@ -147,11 +168,34 @@ import type { WorkflowStep } from '../types/workflow';
       });
       
       console.log('[Content] Agent resumption complete:', agentResult);
+      
+      // Reset flag after completion
+      isResumingAgent = false;
     }
   } catch (error) {
     console.error('[Content] Error resuming agent:', error);
+    // Reset flag on error
+    isResumingAgent = false;
   }
+}
+
+// Check for saved agent state after page load
+(async () => {
+  // Add a delay to let the page load first
+  await new Promise(resolve => setTimeout(resolve, 500));
+  await checkAndResumeAgent('page_load');
 })();
+
+// Listen for tab visibility changes (critical for tab switching!)
+// When switching from Tab A → Tab B, Tab B becomes visible and should resume agent
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible') {
+    console.log('[Content] 👀 Tab became visible, checking for agent state...');
+    // Small delay to ensure tab is fully activated
+    await new Promise(resolve => setTimeout(resolve, 200));
+    await checkAndResumeAgent('tab_visible');
+  }
+});
 
 // Full message handler with all message types
 function handleFullMessage(

@@ -956,9 +956,32 @@ function App() {
       }
       
       // Navigate to starting page OR refresh if already there
-      const startingUrl = workflow.steps.length > 0 && isWorkflowStepPayload(workflow.steps[0].payload)
-        ? workflow.steps[0].payload.url
-        : undefined;
+      // Handle workflows that start with TAB_SWITCH (get URL from fromUrl or find first non-TAB_SWITCH step)
+      let startingUrl: string | undefined;
+      
+      if (workflow.steps.length > 0) {
+        const firstStep = workflow.steps[0];
+        
+        if (firstStep.type === 'TAB_SWITCH') {
+          // Workflow starts with tab switch - use the fromUrl as starting point
+          startingUrl = (firstStep.payload as any).fromUrl;
+          console.log('[App] Workflow starts with TAB_SWITCH, using fromUrl as starting point:', startingUrl);
+        } else if (isWorkflowStepPayload(firstStep.payload)) {
+          // Regular step - use its URL
+          startingUrl = firstStep.payload.url;
+        }
+        
+        // Fallback: Find first non-TAB_SWITCH step
+        if (!startingUrl) {
+          for (const step of workflow.steps) {
+            if (step.type !== 'TAB_SWITCH' && isWorkflowStepPayload(step.payload)) {
+              startingUrl = step.payload.url;
+              console.log('[App] Found starting URL from first non-TAB_SWITCH step:', startingUrl);
+              break;
+            }
+          }
+        }
+      }
       
       if (startingUrl) {
         const needsNavigation = tab.url !== startingUrl;
