@@ -8,6 +8,7 @@ import { ElementContext } from './element-context';
 import { ElementSimilarity } from './element-similarity';
 import { ElementStateCapture } from './element-state';
 import { ElementTextCapture } from './element-text';
+import { ShadowDOMUtils } from './shadow-dom-utils';
 import { ElementAnalyzer } from '../lib/element-analyzer';
 // WaitConditionDeterminer removed - StateWaitEngine handles waits at execution time
 import { IframeUtils } from './iframe-utils';
@@ -15,16 +16,16 @@ import { ContextScanner } from './context-scanner';
 import { SheetStateExtractor } from './sheet-state-extractor';
 import { VisualSnapshotService, type AnnotatedCaptureResult } from './visual-snapshot';
 import { AIService } from '../lib/ai-service';
-import { VisualAnalysisService } from '../lib/visual-analysis';
+// import { VisualAnalysisService } from '../lib/visual-analysis'; // Removed to prevent zoom issues
 import { DOMDistiller } from '../lib/dom-distiller';
 import { PIIScrubber } from '../lib/pii-scrubber';
-import { aiConfig } from '../lib/ai-config';
+// import { aiConfig } from '../lib/ai-config'; // Removed - not needed anymore
 import { StateWaitEngine } from './state-wait-engine';
 import { capturePageSignals, generateOutcomesFromDiff } from './universal-execution/state-verifier';
 import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep, WorkflowStepPayload } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
-import type { PageAnalysis, PageType } from '../types/visual';
+// import type { PageAnalysis, PageType } from '../types/visual'; // Removed - not needed anymore
 // Reliable Replayer enhancements
 import { buildLocatorBundle } from '../lib/locator-builder';
 import { 
@@ -66,6 +67,8 @@ export class RecordingManager {
   private lastInputStep: { selector: string; value: string } | null = null; // Track last input to prevent duplicates
   private lastClickStep: { selector: string; timestamp: number } | null = null; // Track last click to prevent duplicates
   private pendingInputTimestamp: number | null = null; // Capture INPUT timestamp when event fires, not when debounce completes
+  private pendingCellReference: string | null = null; // Capture cell reference when input fires, not when debounce completes (fixes C→E bug)
+  private isCapturingHeaders: boolean = false; // Flag to skip recording during header capture (prevents Name Box navigation from being recorded)
   private lastStep: WorkflowStep | null = null; // Track last step for wait condition determination
   // Value Cache Pattern: Cache input values for Google Sheets (contenteditable elements that clear on blur)
   private lastInputValue: string = ''; // Cache for contenteditable values (Google Sheets)
@@ -81,11 +84,11 @@ export class RecordingManager {
   private pendingClickProcessing: Promise<void>[] = [];
   // Track pending click callbacks that can be forcibly executed on stop()
   private pendingClickCallbacks: Array<{ callback: () => Promise<void>; timeoutId?: number }> = [];
-  // Phase 4: Human-like visual understanding
-  private currentPageAnalysis: PageAnalysis | null = null;
-  private pageAnalysisPending: boolean = false;
+  // NOTE: Removed currentPageAnalysis and pageAnalysisPending to prevent zoom issues
   // Full page snapshot at recording start (for spreadsheet column header detection)
   private initialFullPageSnapshot: string | null = null;
+  // Promise for tracking snapshot capture completion
+  private initialSnapshotPromise: Promise<void> | null = null;
 
   /**
    * Start recording - attach event listeners
@@ -107,47 +110,12 @@ export class RecordingManager {
       document.body.setAttribute('data-ghostwriter-recording', 'true');
     }
 
-    // Phase 4: Analyze page type for human-like understanding
-    this.analyzeCurrentPage().catch((error) => {
-      console.warn('🎨 GhostWriter: Page analysis failed:', error);
-    });
+    // NOTE: Disabled page type analysis during recording start to prevent zoom/flash
+    // The page analysis captures a full page screenshot which zooms out on spreadsheets
+    // console.log('🎨 GhostWriter: Skipping page type analysis to prevent zoom issues');
 
-    // Capture full page snapshot at start for spreadsheet column header detection
-    // This allows AI to see all column headers even when cells are scrolled down
-    const isSpreadsheet = VisualSnapshotService.isSpreadsheetDomain();
-    if (isSpreadsheet) {
-      console.log('📸 GhostWriter: Capturing initial full page snapshot for spreadsheet column headers');
-      // Page was refreshed before recording started, so header row should be visible in viewport
-      // Verify scroll position is at (0, 0) as a safety check
-      const scrollY = window.scrollY || window.pageYOffset || 0;
-      if (scrollY !== 0) {
-        console.warn('📸 GhostWriter: Scroll position not at top, forcing scroll to (0, 0)');
-        window.scrollTo(0, 0);
-        // Wait for scroll to complete before capturing
-        setTimeout(() => {
-          VisualSnapshotService.captureFullPage(0.8).then((fullPage) => {
-            if (fullPage) {
-              this.initialFullPageSnapshot = fullPage.screenshot;
-              console.log('📸 GhostWriter: Initial full page snapshot captured for spreadsheet headers');
-            } else {
-            }
-          }).catch((error) => {
-            console.warn('📸 GhostWriter: Failed to capture initial full page snapshot:', error);
-          });
-        }, 200);
-      } else {
-        VisualSnapshotService.captureFullPage(0.8).then((fullPage) => {
-          if (fullPage) {
-            this.initialFullPageSnapshot = fullPage.screenshot;
-            console.log('📸 GhostWriter: Initial full page snapshot captured for spreadsheet headers');
-          } else {
-          }
-        }).catch((error) => {
-          console.warn('📸 GhostWriter: Failed to capture initial full page snapshot:', error);
-        });
-      }
-    } else {
-    }
+    // NOTE: Removed initial snapshot capture to prevent zoom/flash issues
+    // Users will rename variables in the UI instead
 
     // Setup click handler - use CAPTURE phase to catch events before React/Base UI stops propagation
     // This is critical for dropdown options that might have stopPropagation() called
@@ -221,9 +189,12 @@ export class RecordingManager {
       try {
         // Capture the pending input value now
         // Use the captured timestamp if available, otherwise use current time
+        // Pass lastInputValue explicitly to prevent race conditions
         await this.captureInputValue(
           this.currentInputElement as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
-          this.pendingInputTimestamp || Date.now()
+          this.pendingInputTimestamp || Date.now(),
+          null, // no beforeSignals
+          this.lastInputValue // CRITICAL: Pass cached value explicitly
         );
         console.log('✅ GhostWriter: Pending input step flushed successfully');
       } catch (error) {
@@ -537,6 +508,9 @@ export class RecordingManager {
     await this.sendStep(step);
   }
 
+  // NOTE: Removed captureInitialSnapshot() method
+  // No longer needed since we removed DOM-based header capture and visual snapshots
+
   /**
    * Get the initial full page snapshot captured at recording start (synchronous version).
    * Used for spreadsheet column header detection.
@@ -561,17 +535,21 @@ export class RecordingManager {
       hasSnapshot: !!this.initialFullPageSnapshot,
       snapshotLength: this.initialFullPageSnapshot?.length || 0,
       isSpreadsheetDomain: VisualSnapshotService.isSpreadsheetDomain(),
+      hasPromise: !!this.initialSnapshotPromise,
     });
     
     // If snapshot is already available, return it immediately
     if (this.initialFullPageSnapshot) {
+      console.log('📸 GhostWriter: Snapshot already available, returning immediately');
       return this.initialFullPageSnapshot;
     }
     
-    // Otherwise, wait a bit for the async capture to complete (max 2 seconds)
-    // The capture happens in start() method asynchronously
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
+    // If capture is in progress, await it
+    if (this.initialSnapshotPromise) {
+      console.log('📸 GhostWriter: Waiting for snapshot capture to complete...');
+      await this.initialSnapshotPromise;
+      console.log('📸 GhostWriter: Snapshot capture completed, snapshot available:', !!this.initialFullPageSnapshot);
+    }
     
     return this.initialFullPageSnapshot;
   }
@@ -679,11 +657,27 @@ export class RecordingManager {
   /**
    * Check if an element is interactive/clickable
    * IMPORTANT: Must be permissive for modern React/Angular apps that use div/span with click handlers
+   * BUT: Must NOT be too permissive - icons, SVGs, and decorative elements should NOT be considered interactive
    */
   private isInteractiveElement(element: Element): boolean {
     const htmlEl = element as HTMLElement;
     const tagName = element.tagName.toLowerCase();
     const style = window.getComputedStyle(htmlEl);
+    
+    // 0. CRITICAL: Exclude decorative/non-semantic elements (icons, SVGs, etc.)
+    // These should NEVER be recorded - we should record their parent button instead
+    const isDecorativeElement = tagName === 'svg' || 
+                                tagName === 'path' || 
+                                tagName === 'g' ||
+                                tagName.includes('icon') ||  // lightning-primitive-icon, mat-icon, etc.
+                                tagName.includes('-svg') ||
+                                element.getAttribute('role') === 'img' ||
+                                element.getAttribute('role') === 'presentation';
+    
+    if (isDecorativeElement) {
+      console.log('🔍 GhostWriter: Skipping decorative element:', tagName, '- will find parent button');
+      return false;  // Force parent traversal to find the actual button
+    }
     
     // 1. Widget elements are always interactive
     if (tagName.includes('widget') || tagName.includes('gs-report') || 
@@ -709,12 +703,8 @@ export class RecordingManager {
     }
     
     // 5. Fallback: visible element with reasonable size (permissive)
-    if (ElementStateCapture.isElementVisible(element)) {
-      const rect = element.getBoundingClientRect();
-      if (rect.width > 10 && rect.height > 10) {
-        return true; // Assume potentially interactive
-      }
-    }
+    // REMOVED: This was TOO permissive and recorded icons/decorative elements
+    // Only use explicit indicators above (cursor, tag, role)
     
     return false;
   }
@@ -1235,6 +1225,11 @@ export class RecordingManager {
   private handleClick(event: MouseEvent): void {
     if (!this.isRecording) {
       console.log('GhostWriter: Click received but recording is not active');
+      return;
+    }
+    
+    // Skip recording during header capture (Name Box navigation)
+    if (this.isCapturingHeaders) {
       return;
     }
 
@@ -2010,7 +2005,9 @@ export class RecordingManager {
           };
 
           // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
-          const reliableData = this.enrichStepWithReliableData(actualElement, 'CLICK');
+          // CRITICAL: Use clickableElement (target), not actualElement!
+          // actualElement might be an icon/SVG, but clickableElement is the button after traversal
+          const reliableData = this.enrichStepWithReliableData(target, 'CLICK');
           if (reliableData) {
             stepPayload.locatorBundle = reliableData.locatorBundle;
             stepPayload.intent = reliableData.intent;
@@ -2081,6 +2078,14 @@ export class RecordingManager {
           }
 
           console.log('GhostWriter: ✅ Sending step to side panel - Type:', step.type, 'Selector:', selectors.primary.substring(0, 100));
+          console.log('GhostWriter: Step details:', {
+            elementText: elementText || '(none)',
+            role: target.getAttribute('role'),
+            ariaLabel: target.getAttribute('aria-label'),
+            isInShadowDOM: ShadowDOMUtils.isInShadowDOM(target),
+            scope: stepPayload.scope,
+            isListItem: finalIsListItemOrOption,
+          });
           this.sendStep(step);
           this.lastStep = step;
           // Update last click timestamp (already set earlier, but update with actual step timestamp)
@@ -2193,6 +2198,12 @@ export class RecordingManager {
    */
   private handleInput(event: Event): void {
     if (!this.isRecording) return;
+    
+    // CRITICAL: Skip recording during header capture
+    // The header capture types into the Name Box, which would be recorded as user input
+    if (this.isCapturingHeaders) {
+      return;
+    }
 
     // CRITICAL: Capture timestamp SYNCHRONOUSLY when event fires (not when debounce completes)
     // This ensures correct step ordering even when async processing delays occur
@@ -2213,9 +2224,48 @@ export class RecordingManager {
         return;
       }
 
+      // ============================================
+      // CRITICAL FIX: Flush previous element's input BEFORE updating state
+      // This prevents losing values when user rapidly types across cells
+      // Must happen BEFORE we update lastInputValue and currentInputElement!
+      // ============================================
+      if (this.inputDebounceTimer !== null && this.currentInputElement && this.currentInputElement !== target) {
+        console.log('📊 GhostWriter: User switched cells - flushing previous input before starting new timer');
+        clearTimeout(this.inputDebounceTimer);
+        this.inputDebounceTimer = null;
+        
+        // The previous element data is still in the instance variables (not yet overwritten)
+        const previousElement = this.currentInputElement;
+        const previousTimestamp = this.pendingInputTimestamp;
+        const previousValue = this.lastInputValue;
+        
+        // Flush the previous input synchronously
+        // pendingCellReference still has the PREVIOUS cell's reference!
+        // Pass previousValue explicitly to prevent it from being overwritten before flush completes
+        if (previousValue && previousElement) {
+          console.log('📊 GhostWriter: Flushing previous cell input:', { previousValue, cellRef: this.pendingCellReference });
+          this.captureInputValue(
+            previousElement as HTMLInputElement | HTMLTextAreaElement | HTMLElement,
+            previousTimestamp || Date.now(),
+            null, // no beforeSignals
+            previousValue // CRITICAL: Pass explicit value so it doesn't get overwritten
+          );
+        }
+        
+        // Clear the previous state AFTER flushing
+        this.pendingCellReference = null;
+        this.pendingInputTimestamp = null;
+      } else if (this.inputDebounceTimer !== null) {
+        // Same element - just clear the timer to restart debounce
+        clearTimeout(this.inputDebounceTimer);
+      }
+
+      // ============================================
+      // NOW update state for the current element
+      // ============================================
+      
       // CACHE VALUE: Store the current value in memory (critical for Google Sheets)
       // This ensures we have the value even if Google Sheets clears the DOM on blur
-      // Store on EVERY input event, regardless of whether value exists (captures empty strings too)
       if (isContentEditable) {
         this.lastInputValue = target.textContent?.trim() || target.innerText?.trim() || '';
         this.currentInputElement = target;
@@ -2228,23 +2278,26 @@ export class RecordingManager {
         this.currentInputElement = target;
       }
 
-      // Ignore password fields (though user chose to record all)
-      // We'll still record them but could add filtering here if needed
-
       // Store the input timestamp for when the debounced handler runs
       this.pendingInputTimestamp = inputTimestamp;
-
-      // Clear previous timer
-      if (this.inputDebounceTimer !== null) {
-        clearTimeout(this.inputDebounceTimer);
+      
+      // CRITICAL: Capture cell reference SYNCHRONOUSLY for Google Sheets
+      // This prevents the C→E bug where clicking away updates the Name Box before we capture
+      if (VisualSnapshotService.isSpreadsheetDomain()) {
+        const nameBox = document.querySelector('#t-name-box') as HTMLInputElement;
+        if (nameBox && nameBox.value && /^[A-Z]+\d+$/i.test(nameBox.value)) {
+          this.pendingCellReference = nameBox.value.toUpperCase();
+          console.log('📊 GhostWriter: Captured cell reference at input time:', this.pendingCellReference);
+        }
       }
 
-      // Set new timer
+      // Set new timer for current element
       this.inputDebounceTimer = window.setTimeout(() => {
         // Don't capture if recording was stopped
         if (!this.isRecording) return;
         this.captureInputValue(target as HTMLInputElement | HTMLTextAreaElement | HTMLElement, this.pendingInputTimestamp!);
         this.pendingInputTimestamp = null; // Clear after use
+        this.pendingCellReference = null; // Clear after use
       }, this.DEBOUNCE_DELAY);
     } catch (error) {
       console.error('Error handling input:', error);
@@ -2928,11 +2981,13 @@ export class RecordingManager {
    * @param element The input element
    * @param captureTimestamp The timestamp when the input event first fired (not when debounce completed)
    * @param beforeSignals Optional before signals for outcome diffing
+   * @param fallbackValue Optional explicit value to use (for flush scenarios where cached value might be stale)
    */
   private async captureInputValue(
     element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
     captureTimestamp: number,
-    beforeSignals?: ReturnType<typeof capturePageSignals> | null
+    beforeSignals?: ReturnType<typeof capturePageSignals> | null,
+    fallbackValue?: string
   ): Promise<void> {
     try {
       // Check if element is contenteditable
@@ -2951,18 +3006,24 @@ export class RecordingManager {
         
         // RECOVERY STRATEGY: If DOM is empty but we have cached value, use cache
         // This fixes the Google Sheets bug where contenteditable clears on blur/Enter
-        // Don't check element equality - just use cache if DOM is empty (simpler and more reliable)
-        if (!value && this.lastInputValue) {
-          console.log('GhostWriter: Recovering value from cache:', this.lastInputValue);
-          value = this.lastInputValue;
+        // Prefer explicit fallbackValue (from flush) over this.lastInputValue (which may be stale)
+        if (!value) {
+          const cachedValue = fallbackValue !== undefined ? fallbackValue : this.lastInputValue;
+          if (cachedValue) {
+            console.log('GhostWriter: Recovering value from cache:', cachedValue);
+            value = cachedValue;
+          }
         }
       } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
         value = element.value || (element as HTMLInputElement).checked?.toString() || '';
         
         // RECOVERY STRATEGY: For standard inputs too (less common but safe)
-        if (!value && this.lastInputValue) {
-          console.log('GhostWriter: Recovering value from cache:', this.lastInputValue);
-          value = this.lastInputValue;
+        if (!value) {
+          const cachedValue = fallbackValue !== undefined ? fallbackValue : this.lastInputValue;
+          if (cachedValue) {
+            console.log('GhostWriter: Recovering value from cache:', cachedValue);
+            value = cachedValue;
+          }
         }
       } else {
         value = '';
@@ -3300,16 +3361,33 @@ export class RecordingManager {
           uniqueAttributes: Object.keys(disambiguationAttrs).length > 0 ? disambiguationAttrs : undefined,
           formContext: context.formContext,
           // Capture semantic coordinates for AI interpretation (includes decisionSpace)
-          ...(function() {
+          ...((() => {
             const scanned = ContextScanner.scan(element);
-            console.log(`[RecordingManager] ContextScanner.scan result for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference });
+            // CRITICAL FIX: If we have a cached cell reference from input time, use it instead of current Name Box
+            // This fixes the C→E bug where clicking away updates Name Box before we capture
+            if (this.pendingCellReference && scanned.gridCoordinates) {
+              console.log(`📊 GhostWriter: Using cached cell reference "${this.pendingCellReference}" instead of "${scanned.gridCoordinates.cellReference}" (fixes C→E bug)`);
+              scanned.gridCoordinates.cellReference = this.pendingCellReference;
+            }
+            // NOTE: Previously looked up column headers here, but removed for simplicity
+            // Users will rename variables in the UI instead
+            // Cell reference (e.g., "A5", "B10") will be used as the default variable name
+            console.log(`[RecordingManager] ContextScanner.scan result for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference });
             return scanned;
-          })(),
-        } : (function() {
+          })()),
+        } : ((() => {
           const scanned = ContextScanner.scan(element);
-          console.log(`[RecordingManager] ContextScanner.scan result (no context) for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference });
+          // CRITICAL FIX: If we have a cached cell reference from input time, use it instead of current Name Box
+          if (this.pendingCellReference && scanned.gridCoordinates) {
+            console.log(`📊 GhostWriter: Using cached cell reference "${this.pendingCellReference}" instead of "${scanned.gridCoordinates.cellReference}" (fixes C→E bug)`);
+            scanned.gridCoordinates.cellReference = this.pendingCellReference;
+          }
+          // NOTE: Previously looked up column headers here, but removed for simplicity
+          // Users will rename variables in the UI instead
+          // Cell reference (e.g., "A5", "B10") will be used as the default variable name
+          console.log(`[RecordingManager] ContextScanner.scan result (no context) for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference });
           return scanned;
-        })(),
+        })()),
         similarity: similarElements.length > 0 ? {
           similarCount: similarElements.length,
           uniquenessScore,
@@ -3437,10 +3515,7 @@ export class RecordingManager {
           console.warn('📸 GhostWriter: Sending step WITHOUT visualSnapshot');
         }
 
-        // Phase 4: Add page type to step if available
-        if (this.currentPageAnalysis?.pageType) {
-          step.payload.pageType = this.currentPageAnalysis.pageType;
-        }
+        // NOTE: Removed page type addition to prevent zoom issues
       }
 
       chrome.runtime.sendMessage({
@@ -3462,42 +3537,9 @@ export class RecordingManager {
     }
   }
 
-  /**
-   * Analyze current page for human-like understanding (async, non-blocking)
-   */
-  private async analyzeCurrentPage(): Promise<void> {
-    if (this.pageAnalysisPending) {
-      return; // Avoid duplicate analysis
-    }
-
-    if (!aiConfig.isVisualAnalysisEnabled()) {
-      return;
-    }
-
-    this.pageAnalysisPending = true;
-
-    try {
-      console.log('🎨 GhostWriter: Analyzing page type...');
-      const analysis = await VisualAnalysisService.analyzePageType();
-      
-      if (analysis) {
-        this.currentPageAnalysis = analysis;
-        console.log('🎨 GhostWriter: Page type:', analysis.pageType?.type, 
-                   'confidence:', analysis.pageType?.confidence?.toFixed(2));
-      }
-    } catch (error) {
-      console.warn('🎨 GhostWriter: Page analysis failed:', error);
-    } finally {
-      this.pageAnalysisPending = false;
-    }
-  }
-
-  /**
-   * Get current page type (for steps that need it)
-   */
-  getCurrentPageType(): PageType | undefined {
-    return this.currentPageAnalysis?.pageType;
-  }
+  // NOTE: Removed analyzeCurrentPage() and getCurrentPageType() methods
+  // These were causing zoom issues during recording start on spreadsheets
+  // Page type analysis is not critical for recording functionality
 
   /**
    * Generate natural language description for a step (async, non-blocking)

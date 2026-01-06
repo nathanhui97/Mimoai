@@ -262,13 +262,22 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
             const rect = widget.getBoundingClientRect();
             if (rect.width === 0 || rect.height === 0) continue;
             
-            // Check title in heading elements (light DOM)
-            let titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
-            let title = titleEl?.textContent?.trim() || '';
+            // ENHANCED: Check title in both light DOM and shadow DOM
+            let titleEl: Element | null = null;
+            let title = '';
             
-            // If no title in light DOM, check shadow DOM!
-            if (!title && widget.shadowRoot) {
+            // PRIORITY 1: Check shadow DOM first (for web components)
+            if (widget.shadowRoot) {
               titleEl = widget.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
+              title = titleEl?.textContent?.trim() || '';
+              if (title) {
+                console.log('[Scope] 🌑 Found title in shadow root:', title.substring(0, 50));
+              }
+            }
+            
+            // PRIORITY 2: Check light DOM if not found in shadow
+            if (!title) {
+              titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
               title = titleEl?.textContent?.trim() || '';
             }
             

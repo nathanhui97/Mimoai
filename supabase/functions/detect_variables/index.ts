@@ -387,100 +387,12 @@ async function analyzeStep(
     console.log(`[detect_variables] Full page snapshot base64 length: ${fullPageBase64.length}, original snapshot length: ${initialFullPageSnapshot.length}`);
     
     parts.push({
-      text: `\n\n═══════════════════════════════════════════════════════════════════════════════
-📸 CRITICAL: ZOOMED-OUT SPREADSHEET SNAPSHOT - READ ALL COLUMN HEADERS
-═══════════════════════════════════════════════════════════════════════════════
+      text: `TASK: Find the column header for cell ${cellRef} in this spreadsheet.
 
-**SNAPSHOT CONTEXT:**
-- This is a ZOOMED-OUT snapshot (33% zoom) captured at recording start
-- The spreadsheet was REFRESHED and scrolled to the top before recording
-- Header row is VISIBLE at the top of the snapshot
-- Multiple columns are visible because of the zoom-out
+Cell: ${cellRef} (column ${columnLetter})
+Value entered: "${metadata.value || ''}"
 
-**CURRENT CELL BEING ANALYZED:**
-- Cell Reference: ${cellRef}
-- Value Entered: "${metadata.value || ''}"
-- Column Letter: ${columnLetter}
-
-**🎯 YOUR MANDATORY TASK (DO NOT SKIP ANY STEP):**
-
-**STEP 1: LOCATE THE HEADER ROW**
-Look at the spreadsheet image below. The header row is the row that contains:
-- Descriptive labels (like "Name", "Email", "Price", "Status")
-- NOT data values (like "123", "john@email.com", "yes", "no")
-- Usually has bold text or different background color
-- Typically row 1, but could be row 2 or 3
-
-**STEP 2: READ ALL VISIBLE HEADERS (LEFT TO RIGHT)**
-Starting from column A, read EVERY header you can see:
-- Column A: [read the header text]
-- Column B: [read the header text]
-- Column C: [read the header text]
-- Column D: [read the header text]
-- Continue for all visible columns...
-- Read the COMPLETE text (e.g., "Marketplace Fee" not just "Marketplace")
-
-**STEP 3: MATCH COLUMN ${columnLetter} TO ITS HEADER**
-Find column ${columnLetter} in your list from Step 2
-Use that EXACT header text as the fieldName
-
-**STEP 4: VERIFY YOUR ANSWER**
-- Is fieldName the actual header text you read from the image?
-- Is it NOT a cell reference like "${cellRef}"?
-- Is it NOT just the column letter "${columnLetter}"?
-- Is it the COMPLETE header text (all words)?
-
-**HANDLING PARTIAL VISIBILITY:**
-- If not all columns are visible in the snapshot, read the headers that ARE visible
-- The header row should be at the top of the image
-- The snapshot may not show all columns if the spreadsheet is wide - that's okay, just read the headers that are visible
-
-**CRITICAL RULES FOR HEADER READING:**
-- READ THE COMPLETE HEADER TEXT - If header says "Marketplace Fee", use "Marketplace Fee" NOT "Marketplace"
-- Headers can be multi-word - read ALL words in the header cell
-- fieldName MUST be the EXACT, COMPLETE header text you see (e.g., "Marketplace Fee", "Store UUID", "ORG ID")
-- fieldName MUST NOT be "${cellRef}" or "${columnLetter}" or "Cell ${cellRef}"
-- fieldName MUST NOT be a partial header (e.g., if header is "Marketplace Fee", don't use just "Marketplace")
-- Do NOT assume headers are in row 1 - SEARCH for them visually
-- If you can't find headers after thorough search, set fieldName to "Unknown Field" AND explain why in imageDescription
-
-**MANDATORY JSON RESPONSE (ALL FIELDS REQUIRED - RESPONSE IS INVALID WITHOUT THESE):**
-{
-  "isVariable": true,
-  "confidence": 0.95,
-  "fieldName": "Email",  // <-- The ACTUAL header from column B, row 1
-  "variableName": "email",
-  "imageDescription": "Zoomed-out Google Sheets. Header row is row 1. Headers are: Name, Email, Phone, Status...",
-  "headerRowPosition": "Row 1",
-  "headersFound": "Column A: Name, Column B: Email, Column C: Phone, Column D: Status",
-  "reasoning": "Located header row at row 1. Column B header reads 'Email'. User entered email address in cell B75."
-}
-
-**MANDATORY JSON RESPONSE FORMAT (ALL FIELDS REQUIRED):**
-{
-  "isVariable": true,
-  "confidence": 0.9,
-  "fieldName": "ACTUAL_HEADER_TEXT_HERE",  // <-- MUST be from the image, NOT "${cellRef}" or "${columnLetter}"
-  "variableName": "camelCaseVersion",
-  "imageDescription": "MANDATORY - Describe: spreadsheet type, where headers are, what you see",
-  "headerRowPosition": "MANDATORY - Which row? (e.g., 'Row 1', 'Row 2')",
-  "headersFound": "MANDATORY - List ALL: 'Column A: [text], Column B: [text], Column C: [text]...'",
-  "reasoning": "MANDATORY - Explain how you found the header"
-}
-
-**⚠️ CRITICAL REQUIREMENTS - YOUR RESPONSE WILL BE REJECTED IF THESE ARE MISSING:**
-1. **imageDescription** (MANDATORY): Describe the spreadsheet image you see. Example: "Google Sheets with headers visible at top. Header row is row 1. I can see columns A through F."
-2. **headerRowPosition** (MANDATORY): Which row number contains headers? (e.g., "Row 1", "Row 2")
-3. **headersFound** (MANDATORY): List ALL column headers you can see with COMPLETE text. Example: "Column A: Store, Column B: Store UUID, Column C: ORG ID, Column D: Marketplace Fee"
-4. **fieldName** (MANDATORY): The COMPLETE header text with ALL words. If header says "Marketplace Fee", use "Marketplace Fee" NOT just "Marketplace"
-
-**READING COMPLETE HEADER TEXT:**
-- Headers can be multi-word: "Marketplace Fee", "Store UUID", "ORG ID"
-- Read the ENTIRE text in the header cell, not just the first word
-- If you see "Marketplace Fee" in column D, fieldName must be "Marketplace Fee" (both words)
-- If you see "Store UUID" in column B, fieldName must be "Store UUID" (both words)
-
-═══════════════════════════════════════════════════════════════════════════════`
+The spreadsheet image below is zoomed out (33%) to show multiple columns. Look at row 1 to find the column headers.`
     });
     parts.push({
       inline_data: {
@@ -489,55 +401,23 @@ Use that EXACT header text as the fieldName
       }
     });
     parts.push({
-      text: `\n\n═══════════════════════════════════════════════════════════════════════════════
-🔍 NOW EXAMINE THE ZOOMED-OUT SPREADSHEET IMAGE ABOVE
-═══════════════════════════════════════════════════════════════════════════════
+      text: `Instructions:
+1. Look at row 1 in the image - this is usually the header row
+2. Read ALL column headers from left to right (A, B, C, D, etc.)
+3. Find the header text for column ${columnLetter}
+4. Use that EXACT header text as fieldName (read the complete text, not just the first word)
 
-**STEP-BY-STEP INSTRUCTIONS (FOLLOW EXACTLY):**
-
-**1️⃣ FIND THE HEADER ROW:**
-Look at the spreadsheet image. The header row contains descriptive labels like:
-- ✅ Good: "Name", "Email", "Phone", "Status", "Price", "Quantity"
-- ❌ Bad: "123", "john@email.com", "yes", "no", "100", "5"
-The header row is usually row 1, with bold text or colored background.
-
-**2️⃣ READ EVERY HEADER FROM LEFT TO RIGHT:**
-Start from column A and read each header:
-- Column A: [what text do you see?]
-- Column B: [what text do you see?]
-- Column C: [what text do you see?]
-- Column D: [what text do you see?]
-- Continue for ALL visible columns...
-
-READ THE COMPLETE TEXT. If it says "Email Address", write "Email Address" (both words!).
-
-**3️⃣ FIND COLUMN ${columnLetter} IN YOUR LIST:**
-Look at your list from step 2. What is the header text for column ${columnLetter}?
-That text is your fieldName.
-
-**4️⃣ FILL IN THE RESPONSE:**
+Respond with JSON only:
 {
   "isVariable": true,
   "confidence": 0.9,
-  "fieldName": "[HEADER TEXT FROM COLUMN ${columnLetter}]",  // <-- FROM THE IMAGE
-  "variableName": "[camelCase version]",
-  "imageDescription": "[Describe what you see: spreadsheet type, header row location, visible columns]",
-  "headerRowPosition": "[Which row? e.g., 'Row 1']",
-  "headersFound": "[List: 'Column A: ..., Column B: ..., Column C: ...']",
-  "reasoning": "[Explain: Found headers at row X, column ${columnLetter} has header 'Y']"
+  "fieldName": "the exact header text from column ${columnLetter}",
+  "variableName": "camelCaseVersion",
+  "headersFound": "A: [header], B: [header], C: [header]...",
+  "reasoning": "Found header at row X, column ${columnLetter} says [text]"
 }
 
-**🚫 ABSOLUTELY FORBIDDEN:**
-- fieldName = "${cellRef}" ❌
-- fieldName = "${columnLetter}" ❌  
-- fieldName = "Cell ${cellRef}" ❌
-- fieldName = "F41" or "B75" or any cell reference ❌
-
-**✅ CORRECT EXAMPLES:**
-- fieldName = "Email" ✅
-- fieldName = "Full Name" ✅
-- fieldName = "Order Status" ✅
-- fieldName = "Price" ✅`
+CRITICAL: fieldName must be the actual header text, NOT "${cellRef}" or "${columnLetter}" or "Cell ${cellRef}".`
     });
     console.log(`[detect_variables] Full page snapshot image added FIRST to Gemini request for step ${metadata.stepIndex}`);
   } else if (initialFullPageSnapshot) {
@@ -697,15 +577,17 @@ That text is your fieldName.
         console.log(`[detect_variables] ⚠️ Generic fieldName "${result.fieldName}" for step ${metadata.stepIndex} - ${reason}`);
         console.log(`[detect_variables] Cell reference: ${metadata.cellReference}, hasSnapshot: ${shouldIncludeSnapshot}`);
         
-        // Instead of returning null, use a descriptive fallback name
-        // This ensures variables are still detected even if AI fails to read headers
-        const fallbackFieldName = `Column ${columnLetter} Value`;
-        const fallbackVarName = `column${columnLetter}Value`;
-        console.log(`[detect_variables] 🔄 Using fallback name: "${fallbackFieldName}" (variableName: "${fallbackVarName}")`);
+        // Use cell reference as fallback (user will rename in UI)
+        const fallbackFieldName = metadata.cellReference || `Column ${columnLetter}`;
+        const fallbackVarName = metadata.cellReference 
+          ? `cell${metadata.cellReference.replace(/[^A-Z0-9]/gi, '')}` 
+          : `column${columnLetter}`;
+        const fallbackReasoning = `${reason} Using cell reference as default name. User can rename this variable in the UI.`;
+        console.log(`[detect_variables] 🔄 Using cell reference fallback: "${fallbackFieldName}"`);
         
         result.fieldName = fallbackFieldName;
         result.variableName = fallbackVarName;
-        result.reasoning = `${reason} Using column-based fallback name. User can rename this variable.`;
+        result.reasoning = fallbackReasoning;
         // DON'T return null - continue with modified result
       }
     }
@@ -1736,3 +1618,5 @@ function extractBase64Data(dataUrl: string): string {
   const base64Match = dataUrl.match(/^data:image\/[^;]+;base64,(.+)$/);
   return base64Match ? base64Match[1] : dataUrl;
 }
+
+// NOTE: Removed inferFieldFromValue function - users will rename variables in the UI instead

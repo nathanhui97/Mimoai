@@ -891,14 +891,18 @@ export class AIAgent {
         // which could be stale or point to wrong records (e.g., different account IDs)
 
         // ============================================================================
-        // 🚀 FAST-PATH OPTIMIZATION: Try deterministic execution first (skip AI call)
-        // If we can find the element directly using recorded selectors, execute immediately
-        // This saves ~500-1500ms per step by avoiding the LLM network call
+        // 🚀 CONFIDENCE-BASED HYBRID EXECUTION
+        // DOM finds candidates and calculates confidence
+        // Route based on confidence: 95%+ = instant, 80-94% = fast, <80% = LLM
+        // This saves ~500-1500ms per step for high-confidence actions
         // ============================================================================
-        if (currentHint && currentHint.actionType === 'click') {
-          const fastPathResult = await this.tryFastPathExecute(currentHint);
-          if (fastPathResult.executed && fastPathResult.success) {
-            console.log(`[AIAgent] ⚡ FAST-PATH: Click executed directly, skipping AI call`);
+        if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type')) {
+          const hybridResult = await this.tryFastPathExecute(currentHint);
+          
+          if (hybridResult.executed && hybridResult.success) {
+            const confidence = hybridResult.confidence || 95;
+            const confidenceLabel = confidence >= 95 ? 'HIGH' : 'MEDIUM-HIGH';
+            console.log(`[Hybrid] ⚡ ${confidenceLabel} CONFIDENCE (${confidence}%) - ${currentHint.actionType.toUpperCase()} executed instantly, skipping LLM`);
             
             // Mark as completed and advance
             this.state.hints[this.state.currentHintIndex].completed = true;
@@ -908,10 +912,13 @@ export class AIAgent {
             this.state.history.push({
               stepNumber: currentHint.stepNumber,
               action: { 
-                type: 'click', 
-                params: { description: currentHint.description }, 
-                reasoning: 'Fast-path: Direct execution via recorded selector', 
-                confidence: 0.9 
+                type: currentHint.actionType, 
+                params: { 
+                  description: currentHint.description,
+                  ...(currentHint.actionType === 'type' && { text: currentHint.value })
+                }, 
+                reasoning: `Confidence-based execution: ${hybridResult.confidence}% confidence`, 
+                confidence: (hybridResult.confidence || 95) / 100
               },
               observation,
               result: 'success',
@@ -921,6 +928,12 @@ export class AIAgent {
             // Brief pause then continue
             await this.sleep(150);
             continue;
+          } else if (hybridResult.confidence !== undefined && hybridResult.confidence >= 60) {
+            console.log(`[Hybrid] 🧠 MEDIUM CONFIDENCE (${hybridResult.confidence}%) - Using LLM for disambiguation`);
+            // Fall through to LLM call below
+          } else if (hybridResult.confidence !== undefined) {
+            console.log(`[Hybrid] 🔧 LOW CONFIDENCE (${hybridResult.confidence}%) - Using LLM for recovery`);
+            // Fall through to LLM call below
           }
         }
         
@@ -1319,10 +1332,10 @@ export class AIAgent {
    * Returns: { executed: true, success: boolean } if fast-path executed
    *          { executed: false } if should fall back to AI
    */
-  private async tryFastPathExecute(hint: AgentHint): Promise<{ executed: boolean; success?: boolean; error?: string }> {
+  private async tryFastPathExecute(hint: AgentHint): Promise<{ executed: boolean; success?: boolean; error?: string; confidence?: number }> {
     try {
-      // Only attempt fast-path for click actions (type is more complex)
-      if (hint.actionType !== 'click') {
+      // Only attempt fast-path for click and type actions
+      if (hint.actionType !== 'click' && hint.actionType !== 'type') {
         return { executed: false };
       }
 
@@ -1332,7 +1345,7 @@ export class AIAgent {
       const dropdownIsOpen = !!domMap.activeDropdown;
       
       // If dropdown is open and hint text matches a dropdown option, ONLY consider dropdown menu items
-      if (dropdownIsOpen && hint.targetText) {
+      if (dropdownIsOpen && hint.targetText && hint.actionType === 'click') {
         const hintTextLower = hint.targetText.toLowerCase();
         const dropdownOptions = domMap.activeDropdown?.options || [];
         const matchesDropdownOption = dropdownOptions.some(opt => 
@@ -1341,8 +1354,8 @@ export class AIAgent {
         );
         
         if (matchesDropdownOption) {
-          console.log('[AIAgent] ⚡ Fast-path skipped: Dropdown is open, letting AI select the correct option');
-          return { executed: false };
+          console.log('[Hybrid] ⚡ Confidence-based skip: Dropdown is open (let LLM select option)');
+          return { executed: false, confidence: 50 };
         }
       }
 
@@ -1353,67 +1366,305 @@ export class AIAgent {
       ].filter(Boolean) as string[];
       
       if (selectors.length === 0) {
-        console.log('[AIAgent] ⚡ Fast-path skipped: No recorded selectors');
-        return { executed: false };
+        console.log('[Hybrid] ⚡ Confidence-based skip: No recorded selectors');
+        return { executed: false, confidence: 0 };
       }
 
-      // Try each selector to find the element
-      let element: HTMLElement | null = null;
-      let usedSelector: string | null = null;
+      // DEBUG: Log selectors being tried
+      console.log(`[Hybrid] 🔍 DEBUG: Trying ${selectors.length} selectors:`, selectors.map(s => s.substring(0, 80)));
+
+      // Find ALL matching candidates
+      const candidates: HTMLElement[] = [];
       
       for (const selector of selectors) {
         try {
-          // Skip XPath selectors (they start with / or //)
+          let found: NodeListOf<Element> | Element[] = [];
+          
+          // Handle XPath selectors using document.evaluate
           if (selector.startsWith('/')) {
-            continue;
+            console.log(`[Hybrid] 🔍 DEBUG: Trying XPath selector: ${selector.substring(0, 80)}`);
+            try {
+              const xpathResult = document.evaluate(
+                selector,
+                document,
+                null,
+                XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+                null
+              );
+              
+              const xpathElements: Element[] = [];
+              for (let i = 0; i < xpathResult.snapshotLength; i++) {
+                const node = xpathResult.snapshotItem(i);
+                if (node instanceof Element) {
+                  xpathElements.push(node);
+                }
+              }
+              found = xpathElements;
+              console.log(`[Hybrid] 🔍 DEBUG: XPath found ${found.length} elements`);
+            } catch (xpathError) {
+              console.log(`[Hybrid] 🔍 DEBUG: XPath evaluation failed:`, xpathError);
+              continue;
+            }
+          } else {
+            // CSS selector
+            found = document.querySelectorAll(selector);
+            console.log(`[Hybrid] 🔍 DEBUG: CSS selector "${selector.substring(0, 80)}" found ${found.length} elements`);
           }
-          const found = document.querySelector(selector) as HTMLElement;
-          if (found && found.offsetParent !== null) { // Check if visible
-            // Additional validation: element should be reasonably sized (not a container)
-            const rect = found.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0 && rect.width < 500 && rect.height < 200) {
-              element = found;
-              usedSelector = selector;
-              break;
+          
+          let visibleCount = 0;
+          for (const el of Array.from(found)) {
+            const htmlEl = el as HTMLElement;
+            if (htmlEl.offsetParent !== null) { // Check if visible
+              const rect = htmlEl.getBoundingClientRect();
+              const maxWidth = hint.actionType === 'type' ? 800 : 500;
+              if (rect.width > 0 && rect.height > 0 && rect.width < maxWidth && rect.height < 200) {
+                candidates.push(htmlEl);
+                visibleCount++;
+              }
             }
           }
-        } catch {
+          
+          console.log(`[Hybrid] 🔍 DEBUG: ${visibleCount} of ${found.length} passed visibility+size checks`);
+          
+          // If we found a match with this selector, stop trying others
+          // This is the KEY: we only try the FIRST selector that matches!
+          if (candidates.length > 0) {
+            console.log(`[Hybrid] 🔍 DEBUG: Stopping selector search - found ${candidates.length} candidates with first matching selector`);
+            break;
+          }
+        } catch (err) {
+          console.log(`[Hybrid] 🔍 DEBUG: Selector failed:`, err);
           // Invalid selector, try next
         }
       }
-
-      if (!element || !usedSelector) {
-        console.log('[AIAgent] ⚡ Fast-path skipped: Element not found with recorded selectors');
-        return { executed: false };
+      
+      // DEBUG: Log actual candidate count to diagnose "unique match" bug
+      console.log(`[Hybrid] 🔍 DEBUG: Found ${candidates.length} candidates matching selectors`);
+      if (candidates.length > 0) {
+        console.log(`[Hybrid] 🔍 DEBUG: First 3 candidates:`, candidates.slice(0, 3).map(c => ({
+          tag: c.tagName,
+          text: c.textContent?.substring(0, 30),
+          ariaLabel: c.getAttribute('aria-label'),
+          parent: c.parentElement?.tagName,
+        })));
       }
-
-      console.log(`[AIAgent] ⚡ Fast-path: Found element, executing click directly`, {
-        tag: element.tagName,
-        text: element.textContent?.slice(0, 50),
-        selector: usedSelector.slice(0, 80),
+      
+      // Calculate confidence score
+      const confidenceAnalysis = this.calculateExecutionConfidence(hint, candidates);
+      
+      console.log(`[Hybrid] Confidence: ${confidenceAnalysis.confidence}% - ${confidenceAnalysis.reason}`);
+      
+      // ============================================================================
+      // CONFIDENCE-BASED ROUTING
+      // ============================================================================
+      
+      // HIGH CONFIDENCE (95-100%): Execute immediately
+      if (confidenceAnalysis.confidence >= 95 && confidenceAnalysis.bestCandidate) {
+        console.log('[Hybrid] ⚡ HIGH CONFIDENCE (95%+) - Instant execution');
+        return await this.instantExecute(hint, confidenceAnalysis.bestCandidate, confidenceAnalysis.confidence);
+      }
+      
+      // MEDIUM-HIGH CONFIDENCE (80-94%): Execute with caution
+      // Still fast, but we're slightly less certain
+      if (confidenceAnalysis.confidence >= 80 && confidenceAnalysis.bestCandidate) {
+        console.log('[Hybrid] ⚡ MEDIUM-HIGH CONFIDENCE (80-94%) - Fast execution with logging');
+        return await this.instantExecute(hint, confidenceAnalysis.bestCandidate, confidenceAnalysis.confidence);
+      }
+      
+      // MEDIUM CONFIDENCE (60-79%): Let LLM disambiguate
+      // DOM found candidates, but LLM should pick the right one
+      if (confidenceAnalysis.confidence >= 60) {
+        console.log('[Hybrid] 🧠 MEDIUM CONFIDENCE (60-79%) - Let LLM pick from candidates');
+        return { executed: false, confidence: confidenceAnalysis.confidence };
+      }
+      
+      // LOW CONFIDENCE (<60%): Full LLM recovery
+      console.log('[Hybrid] 🔧 LOW CONFIDENCE (<60%) - Full LLM recovery needed');
+      return { executed: false, confidence: confidenceAnalysis.confidence };
+      
+    } catch (error) {
+      console.log('[Hybrid] ⚡ Error in confidence-based routing, falling back to LLM:', error);
+      return { executed: false, confidence: 0 };
+    }
+  }
+  
+  /**
+   * Execute action instantly with high confidence
+   * Used when confidence >= 80%
+   */
+  private async instantExecute(
+    hint: AgentHint,
+    element: Element,
+    confidence: number
+  ): Promise<{ executed: boolean; success: boolean; error?: string; confidence: number }> {
+    try {
+      // Cast to HTMLElement for execution
+      const htmlElement = element as HTMLElement;
+      
+      console.log(`[Hybrid] ⚡ Executing ${hint.actionType} with ${confidence}% confidence`, {
+        tag: htmlElement.tagName,
+        text: htmlElement.textContent?.slice(0, 50),
       });
 
-      // Execute click directly
-      try {
-        element.scrollIntoView({ block: 'center', behavior: 'instant' });
-        await this.sleep(50);
-        element.focus();
-        element.click();
+      // Scroll into view and focus
+      htmlElement.scrollIntoView({ block: 'center', behavior: 'instant' });
+      await this.sleep(50);
+      htmlElement.focus();
+      
+      // Execute action
+      if (hint.actionType === 'click') {
+        htmlElement.click();
+      } else if (hint.actionType === 'type' && hint.value) {
+        // For type actions, use Tier1Executor for robust typing
+        const { Tier1Executor } = await import('./tier1-executor');
+        const typeAction: AgentAction = {
+          type: 'type',
+          params: {
+            text: hint.value,
+            clearFirst: true,
+          },
+          reasoning: `Confidence-based execution (${confidence}%)`,
+          confidence: confidence / 100,
+        };
         
-        // Wait for stability
-        const { StateWaitEngine } = await import('../content/state-wait-engine');
-        await StateWaitEngine.waitForStability({ maxWaitMs: 2000 });
-        
-        console.log('[AIAgent] ⚡ Fast-path: Click executed successfully');
-        return { executed: true, success: true };
-      } catch (clickError) {
-        console.log('[AIAgent] ⚡ Fast-path: Click failed, falling back to AI', clickError);
-        return { executed: false };
+        const result = await Tier1Executor.execute(typeAction);
+        if (result.status !== 'success') {
+          console.log('[Hybrid] ⚡ Type execution failed, falling back to LLM');
+          return { executed: false, success: false, confidence };
+        }
       }
-    } catch (error) {
-      console.log('[AIAgent] ⚡ Fast-path error, falling back to AI:', error);
-      return { executed: false };
+      
+      // Wait for stability
+      const { StateWaitEngine } = await import('../content/state-wait-engine');
+      await StateWaitEngine.waitForStability({ maxWaitMs: 2000 });
+      
+      console.log(`[Hybrid] ⚡ ${hint.actionType} executed successfully (${confidence}% confidence)`);
+      return { executed: true, success: true, confidence };
+      
+    } catch (executeError) {
+      console.log(`[Hybrid] ⚡ Execution failed, falling back to LLM:`, executeError);
+      return { executed: false, success: false, error: executeError instanceof Error ? executeError.message : 'Unknown', confidence };
     }
+  }
+
+  /**
+   * Calculate confidence score for executing a hint without LLM
+   * Returns: 0-100 score indicating how confident we are about direct execution
+   * 
+   * Confidence factors:
+   * - Selector quality (40 points): testId > aria-label > name > ID > generic
+   * - Candidate count (30 points): 1 = high, 2-3 = medium, 4+ = low
+   * - Scope clarity (20 points): no scope > scoped with 1 match > scoped with multiple
+   * - Element state (10 points): visible + enabled
+   */
+  private calculateExecutionConfidence(
+    hint: AgentHint,
+    candidates: Element[]
+  ): { confidence: number; reason: string; bestCandidate?: Element } {
+    let score = 0;
+    const reasons: string[] = [];
+    
+    // DEBUG: Log what we received
+    console.log(`[Hybrid] 🔍 calculateExecutionConfidence called with ${candidates.length} candidates`);
+    console.log(`[Hybrid] 🔍 Hint has scope: ${hint.recordedScopeHint ? `"${hint.recordedScopeHint}"` : 'NO'}`);
+    
+    // Factor 1: Number of candidates (30 points)
+    if (candidates.length === 0) {
+      return { confidence: 0, reason: 'No candidates found' };
+    } else if (candidates.length === 1) {
+      score += 30;
+      reasons.push('unique match (+30)');
+      console.log(`[Hybrid] 🔍 Factor 1: UNIQUE MATCH - 1 candidate found`);
+    } else if (candidates.length === 2) {
+      score += 15;
+      reasons.push('2 candidates (+15)');
+      console.log(`[Hybrid] 🔍 Factor 1: 2 candidates`);
+    } else if (candidates.length === 3) {
+      score += 10;
+      reasons.push('3 candidates (+10)');
+      console.log(`[Hybrid] 🔍 Factor 1: 3 candidates`);
+    } else {
+      reasons.push(`${candidates.length} candidates (0)`);
+      console.log(`[Hybrid] 🔍 Factor 1: ${candidates.length} candidates (LOW CONFIDENCE)`);
+    }
+    
+    // Factor 2: Selector quality (40 points)
+    if (hint.recordedTestId) {
+      score += 40;
+      reasons.push('testId (+40)');
+    } else if (hint.recordedAriaLabel) {
+      score += 35;
+      reasons.push('aria-label (+35)');
+    } else if (hint.recordedSelector?.includes('[name=') || hint.recordedSelector?.includes('name="')) {
+      score += 30;
+      reasons.push('name attr (+30)');
+    } else if (hint.recordedSelector?.startsWith('#')) {
+      score += 20;
+      reasons.push('ID selector (+20)');
+    } else if (hint.recordedSelector?.includes('[aria-label=')) {
+      score += 35;
+      reasons.push('aria-label in selector (+35)');
+    } else {
+      score += 10;
+      reasons.push('generic selector (+10)');
+    }
+    
+    // Factor 3: Scope/context clarity (20 points)
+    // UNIVERSAL PRINCIPLE: If selector finds EXACTLY 1 element globally, it's unambiguous!
+    // Scope is context from recording, but if selector is globally unique, we can execute safely.
+    // Only worry about scope when there are MULTIPLE matches that need disambiguation.
+    if (!hint.recordedScopeHint) {
+      // No scope = page-level element
+      score += 20;
+      reasons.push('no scope ambiguity (+20)');
+      console.log(`[Hybrid] 🔍 Factor 3: No scope - page-level element`);
+    } else if (candidates.length === 1) {
+      // Has scope BUT selector is globally unique!
+      // This means the selector itself is strong enough (e.g., unique aria-label)
+      // Safe to execute - the scope was just for context during recording
+      score += 18;
+      reasons.push('globally unique despite scope (+18)');
+      console.log(`[Hybrid] 🔍 Factor 3: Scope "${hint.recordedScopeHint}" but GLOBALLY UNIQUE (1 match) - safe to execute`);
+    } else if (candidates.length <= 3) {
+      // Has scope + few candidates = moderate ambiguity
+      // LLM should verify which one is in the correct scope
+      score += 5;
+      reasons.push('scope + few candidates, need verification (+5)');
+      console.log(`[Hybrid] 🔍 Factor 3: ${candidates.length} candidates in scope "${hint.recordedScopeHint}" - LLM should verify`);
+    } else {
+      // Has scope + many candidates = high ambiguity
+      // Definitely need LLM for disambiguation
+      score += 0;
+      reasons.push(`scope + ${candidates.length} candidates, need LLM (0)`);
+      console.log(`[Hybrid] 🔍 Factor 3: ${candidates.length} candidates + scope - MUST use LLM`);
+    }
+    
+    // Factor 4: Element state (10 points)
+    const bestCandidate = candidates[0];
+    if (bestCandidate && bestCandidate instanceof HTMLElement) {
+      const isVisible = bestCandidate.offsetParent !== null;
+      const rect = bestCandidate.getBoundingClientRect();
+      const hasSize = rect.width > 0 && rect.height > 0;
+      const isEnabled = !bestCandidate.hasAttribute('disabled');
+      
+      if (isVisible && hasSize && isEnabled) {
+        score += 10;
+        reasons.push('interactable (+10)');
+      } else {
+        reasons.push('not fully interactable (0)');
+      }
+    }
+    
+    const finalScore = Math.min(score, 100);
+    const reason = reasons.join(', ');
+    
+    console.log(`[Hybrid] Confidence: ${finalScore}% - ${reason}`);
+    
+    return {
+      confidence: finalScore,
+      reason,
+      bestCandidate: bestCandidate || undefined,
+    };
   }
 
   /**
@@ -1569,6 +1820,20 @@ export class AIAgent {
       console.log('[AIAgent] 🧠 Calling dom_agent Edge Function...');
       console.log('[AIAgent] 📤 Sending: currentHintIndex =', payload.currentHintIndex, ', nextIncomplete =', nextIncompleteHint?.stepNumber);
       console.log('[AIAgent] 📤 Hints status:', payload.hints.map((h: any, i: number) => `${i}:${h.completed?'✅':'⬜'}`).join(' '));
+      
+      // DEBUG: Show current hint details
+      const currentHintData = payload.hints[payload.currentHintIndex];
+      if (currentHintData) {
+        console.log('[AIAgent] 📤 CURRENT HINT DETAILS:', {
+          description: currentHintData.description,
+          targetText: currentHintData.targetText,
+          targetRole: currentHintData.targetRole,
+          recordedSelector: currentHintData.recordedSelector?.substring(0, 80),
+          recordedAriaLabel: currentHintData.recordedAriaLabel,
+          recordedScopeHint: currentHintData.recordedScopeHint,
+        });
+      }
+      
       console.log('[AIAgent] 📤 Candidates:', (payload as any).currentCandidates?.length || 0, 'sent to LLM');
       if ((payload as any).currentCandidates?.length > 0) {
         console.log('[AIAgent] 📤 Top 3 candidates:', (payload as any).currentCandidates.slice(0, 3).map((c: any, i: number) => 
@@ -2687,20 +2952,19 @@ export class AIAgent {
    * but the AI should adapt based on current page state and variable overrides.
    */
   private extractHints(workflow: SavedWorkflow, variableValues?: Record<string, string>): AgentHint[] {
-    // ⚠️ CRITICAL: For AI Agent, prefer original steps over optimized steps
-    // The optimizer may remove necessary UI interactions (e.g., opening menus before clicking)
-    // which the AI agent needs to perform in the correct order
+    // ⚠️ CRITICAL: For AI Agent, ALWAYS use original steps, never optimized
+    // The optimizer removes "redundant" clicks (like opening menus, waiting for page loads)
+    // but these are ESSENTIAL for AI agent to execute in the correct sequence
     // 
-    // Only use optimized steps if they didn't reduce the step count significantly
-    let steps = workflow.steps; // Default to original steps
+    // Example: Optimizer removes "Click Accounts" → "Click New" and just keeps "Navigate to /new"
+    // But AI needs to click through the UI, not navigate directly to URLs
+    // 
+    // LESSON LEARNED: Optimization breaks workflows that require sequential UI interactions
+    let steps = workflow.steps; // ALWAYS use original steps
     
-    if (workflow.optimizedSteps && workflow.optimizedSteps.length >= workflow.steps.length * 0.5) {
-      // Optimization didn't remove more than 50% of steps - safe to use
-      steps = workflow.optimizedSteps;
-      console.log(`[AIAgent] Using optimized steps: ${workflow.optimizedSteps.length} steps (original: ${workflow.steps.length})`);
-    } else if (workflow.optimizedSteps) {
-      // Optimization was too aggressive - stick with original steps
-      console.warn(`[AIAgent] ⚠️ Optimization removed ${workflow.steps.length - workflow.optimizedSteps.length} steps (${Math.round((1 - workflow.optimizedSteps.length / workflow.steps.length) * 100)}%). Using original steps instead.`);
+    if (workflow.optimizedSteps) {
+      console.warn(`[AIAgent] ⚠️ Ignoring ${workflow.optimizedSteps.length} optimized steps - AI Agent requires original ${workflow.steps.length} steps for reliable execution`);
+      console.warn(`[AIAgent] ⚠️ Optimizer removed ${workflow.steps.length - workflow.optimizedSteps.length} steps which may be essential for sequential UI interactions`);
     }
     
     const originalSteps = workflow.steps; // Keep reference to original steps for elementText lookup
@@ -2853,12 +3117,42 @@ export class AIAgent {
       
       // Extract scope hint from context (e.g., widget/container title)
       // 🎯 PRIORITY ORDER:
-      // 1. payload.scope.title (from locatorBundle - MOST RELIABLE, if kind=WIDGET)
+      // 1. payload.scope (from locatorBundle - MOST RELIABLE)
+      //    - WIDGET: use scope.title
+      //    - NEAREST_SECTION: use scope.headingText
+      //    - TABLE_ROW: use scope.anchorText
+      //    - MODAL: no specific hint needed
       // 2. payload.context?.container?.text (legacy DOM-based detection)
-      // 3. payload.aiEvidence?.semanticAnchors?.textLabel (AI-detected, LEAST RELIABLE)
-      const recordedScopeHint = (payload.scope?.kind === 'WIDGET' ? payload.scope.title : null) ||
-                                payload.context?.container?.text || 
-                                payload.aiEvidence?.semanticAnchors?.textLabel;
+      // 3. DO NOT USE semanticAnchors.textLabel (that's the element's OWN text!)
+      let recordedScopeHint: string | undefined;
+      
+      if (payload.scope) {
+        switch (payload.scope.kind) {
+          case 'WIDGET':
+            recordedScopeHint = (payload.scope as any).title;
+            break;
+          case 'NEAREST_SECTION':
+            recordedScopeHint = (payload.scope as any).headingText;
+            break;
+          case 'TABLE_ROW':
+            recordedScopeHint = (payload.scope as any).anchorText;
+            break;
+          case 'MODAL':
+            // Modal scope doesn't need a specific hint (modal detection is automatic)
+            recordedScopeHint = undefined;
+            break;
+          default:
+            recordedScopeHint = undefined;
+        }
+      }
+      
+      // Fallback: legacy container.text
+      if (!recordedScopeHint) {
+        recordedScopeHint = payload.context?.container?.text;
+      }
+      
+      // DO NOT use aiEvidence.semanticAnchors.textLabel as fallback!
+      // That's the element's own text, not the container!
       
       // AI widget context available for future use when it's more reliable
       const aiWidgetTitle = payload.aiWidgetContext?.widgetTitle;

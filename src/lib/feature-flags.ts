@@ -28,8 +28,9 @@ export const FeatureFlags = {
    * AI-powered variable detection after recording
    * Cost: Medium (one-time LLM call per workflow)
    * Risk: None, just expensive
+   * ALWAYS ENABLED - Required for spreadsheet column header detection
    */
-  AI_VARIABLE_DETECTION: false,
+  AI_VARIABLE_DETECTION: true,
   
   /**
    * AI workflow analyzer to choose execution strategy

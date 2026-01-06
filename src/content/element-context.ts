@@ -439,6 +439,26 @@ export class ElementContext {
       }
 
       current = current.parentElement;
+      
+      // SHADOW DOM: If we reached the shadow root boundary, continue from the shadow host
+      if (!current) {
+        const rootNode = element.getRootNode();
+        if (rootNode !== document && 'host' in rootNode) {
+          const shadowHost = (rootNode as ShadowRoot).host;
+          console.log('[ElementContext] 🌑 Crossed shadow boundary, checking host:', shadowHost.tagName);
+          
+          // Check if shadow host itself is a container
+          for (const pattern of containerPatterns) {
+            if (this.matchesPattern(shadowHost, pattern)) {
+              console.log('[ElementContext] 🌑 Shadow host is a widget container');
+              return shadowHost;
+            }
+          }
+          
+          // Continue searching from host's parent
+          current = shadowHost.parentElement;
+        }
+      }
     }
 
     return null;
@@ -515,12 +535,25 @@ export class ElementContext {
           }
         }
       } else {
+        // LIGHT DOM: Standard querySelector
         const titleEl = container.querySelector(selector);
         if (titleEl) {
           const text = titleEl.textContent?.trim();
           if (text && text.length > 0) {
             // Limit to 50 chars for descriptions
             return text.length > 50 ? text.substring(0, 50) + '...' : text;
+          }
+        }
+        
+        // SHADOW DOM: If container has shadow root, search inside it
+        if (container.shadowRoot) {
+          const shadowTitleEl = container.shadowRoot.querySelector(selector);
+          if (shadowTitleEl) {
+            const text = shadowTitleEl.textContent?.trim();
+            if (text && text.length > 0) {
+              console.log('[ElementContext] 🌑 Found title in shadow root:', text);
+              return text.length > 50 ? text.substring(0, 50) + '...' : text;
+            }
           }
         }
       }

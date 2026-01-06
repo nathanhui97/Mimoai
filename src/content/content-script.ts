@@ -47,9 +47,9 @@ import { AIDataBuilder } from './ai-data-builder';
 import { VisualSnapshotService } from './visual-snapshot';
 import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep } from '../types/workflow';
-import { isWorkflowStepPayload } from '../types/workflow';
-// Universal Execution Engine - the new reliable execution engine
-import { executeWorkflow as executeUniversalWorkflow, convertLegacyStep } from './universal-execution';
+// import { isWorkflowStepPayload } from '../types/workflow'; // Unused after removing Universal Engine
+// Universal Execution Engine - DEPRECATED (replaced by AI Agent with fast-path)
+// import { executeWorkflow as executeUniversalWorkflow, convertLegacyStep } from './universal-execution';
 
 // Request frameId from background script on initialization
 (async () => {
@@ -475,117 +475,22 @@ function handleFullMessage(
         return false;
       }
 
-      // All workflow execution now uses the Universal Execution Engine
+      // DEPRECATED: Universal Execution Engine replaced by AI Agent with fast-path
+      // All execution now uses AI Agent mode (EXECUTE_WORKFLOW_AGENT)
       case 'EXECUTE_WORKFLOW':
-      case 'EXECUTE_WORKFLOW_ADAPTIVE':  // @deprecated - redirects to Universal Engine
-      case 'EXECUTE_WORKFLOW_VERIFIED':  // @deprecated - redirects to Universal Engine
+      case 'EXECUTE_WORKFLOW_ADAPTIVE':
+      case 'EXECUTE_WORKFLOW_VERIFIED':
       case 'EXECUTE_WORKFLOW_UNIVERSAL': {
-        if (!message.payload?.steps) {
-          sendResponse({
-            success: false,
-            error: 'EXECUTE_WORKFLOW requires steps in payload',
-          });
-          return false;
-        }
-
-        const steps = message.payload.steps as WorkflowStep[];
-        const workflowId = message.payload.workflowId as string || 'unknown';
-        const variableValues = message.payload.variableValues as Record<string, string> || {};
-        
-        // Get starting URL from first step
-        const startingUrl = steps.length > 0 && isWorkflowStepPayload(steps[0].payload)
-          ? steps[0].payload.url
-          : undefined;
-        
-        // Check if we need to navigate to the starting URL
-        const currentUrl = window.location.href;
-        if (startingUrl && currentUrl !== startingUrl) {
-          console.log(`GhostWriter: Current URL (${currentUrl}) differs from workflow starting URL (${startingUrl}), navigating...`);
-          
-          // Store execution state in sessionStorage to resume after navigation
-          sessionStorage.setItem('ghostwriter_pending_execution', JSON.stringify({
-            steps,
-            workflowId,
-            variableValues,
-            timestamp: Date.now(),
-          }));
-          
-          // Send response before navigation (page will reload)
-          sendResponse({
-            success: true,
-            data: { message: 'Navigating to workflow URL, execution will start automatically' },
-          });
-          
-          // Navigate to the starting URL (this will reload the page)
-          window.location.href = startingUrl;
-          
-          return false; // Don't execute here, will resume after navigation
-        }
-
-        // Execute workflow with new Universal Engine (already on correct page)
-        (async () => {
-          try {
-            console.log('GhostWriter: Starting UNIVERSAL execution for workflow:', workflowId);
-            
-            // Notify execution started
-            chrome.runtime.sendMessage({
-              type: 'VERIFIED_EXECUTION_STARTED',
-              payload: { workflowId },
-            });
-            
-            // Convert legacy steps to universal format
-            const universalSteps = steps.map(step => convertLegacyStep(step));
-            
-            // Execute with universal engine
-            const result = await executeUniversalWorkflow(universalSteps, {
-              stopOnFailure: true,
-              stepTimeout: 10000,
-              variableValues,
-              onStepProgress: (stepIndex, status) => {
-                chrome.runtime.sendMessage({
-                  type: status === 'starting' ? 'VERIFIED_STEP_STARTED' :
-                        status === 'completed' ? 'VERIFIED_STEP_COMPLETED' : 'VERIFIED_STEP_FAILED',
-                  payload: { stepIndex },
-                });
-              },
-              onStepError: (stepIndex, error) => {
-                console.error(`GhostWriter: Universal step ${stepIndex} error:`, error);
-              },
-            });
-            
-            // Notify execution completed
-            chrome.runtime.sendMessage({
-              type: 'VERIFIED_EXECUTION_COMPLETED',
-              payload: {
-                success: result.success,
-                stepsExecuted: result.stepsCompleted,
-                totalSteps: result.totalSteps,
-                totalTimeMs: result.totalElapsedMs,
-                error: result.success ? undefined : result.failureSummary,
-              },
-            });
-            
-          } catch (error) {
-            console.error('GhostWriter: Error in universal execution:', error);
-            chrome.runtime.sendMessage({
-              type: 'VERIFIED_EXECUTION_COMPLETED',
-              payload: {
-                success: false,
-                error: error instanceof Error ? error.message : 'Unknown error',
-              },
-            });
-          }
-        })();
-
+        console.warn('[DEPRECATED] EXECUTE_WORKFLOW_UNIVERSAL is deprecated. Use EXECUTE_WORKFLOW_AGENT instead.');
         sendResponse({
-          success: true,
-          data: { message: 'Universal execution started' },
+          success: false,
+          error: 'EXECUTE_WORKFLOW_UNIVERSAL is deprecated. Please use AI Agent mode (EXECUTE_WORKFLOW_AGENT).',
         });
         return false;
       }
 
       case 'VERIFIED_EXECUTION_CANCEL': {
-        // TODO: Add proper cancellation support in universal engine
+        // Execution cancellation
         console.log('GhostWriter: Execution cancellation requested');
         sendResponse({ success: true });
         return false;
@@ -908,7 +813,10 @@ try {
     });
   }
   
-  // Check if there's a pending workflow execution to resume after navigation
+  // DISABLED: Universal Execution Engine resumption logic
+  // AI Agent mode uses chrome.storage.local for state persistence instead of sessionStorage
+  // This sessionStorage-based resumption is no longer needed
+  /*
   const pendingExecutionStr = sessionStorage.getItem('ghostwriter_pending_execution');
   if (pendingExecutionStr) {
     console.log('🚀 GhostWriter: Found pending workflow execution in sessionStorage, resuming...');
@@ -1080,6 +988,7 @@ try {
       sessionStorage.removeItem('ghostwriter_pending_execution');
     }
   }
+  */
 } catch (error) {
   console.error('GhostWriter: Failed to initialize RecordingManager:', error);
   if (error instanceof Error) {

@@ -4,8 +4,7 @@ import { runtimeBridge } from '../lib/bridge';
 import { WorkflowStorage } from '../lib/storage';
 import { CorrectionMemory } from '../lib/correction-memory';
 import { VariableDetector } from '../lib/variable-detector';
-import { SimpleVariableDetector } from '../lib/simple-variable-detector';
-import { NavigationOptimizer } from '../lib/navigation-optimizer';
+// import { NavigationOptimizer } from '../lib/navigation-optimizer'; // DISABLED - breaks AI Agent workflows
 import { IntentAnalyzer } from '../lib/intent-analyzer';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
@@ -589,33 +588,19 @@ function App() {
         setLearningFeedback('🔍 Analyzing workflow steps for variables...');
         
         try {
-          let variables;
-          
-          if (FeatureFlags.AI_VARIABLE_DETECTION) {
-            console.log('[App] Calling AI VariableDetector.detectVariables...');
-            variables = await VariableDetector.detectVariables(currentSteps, initialFullPageSnapshot);
-            console.log('[App] ✅ AI Variable detection completed:', {
-              totalVariables: variables.variables.length,
-              analysisCount: variables.analysisCount,
-              variables: variables.variables.map(v => ({
-                fieldName: v.fieldName,
-                variableName: v.variableName,
-                isVariable: v.isVariable,
-                confidence: v.confidence,
-              })),
-            });
-          } else {
-            console.log('[App] Using pattern-based SimpleVariableDetector (AI disabled)');
-            variables = SimpleVariableDetector.detectVariables(currentSteps);
-            console.log('[App] ✅ Pattern-based detection completed:', {
-              totalVariables: variables.variables.length,
-              analysisCount: variables.analysisCount,
-              variables: variables.variables.map(v => ({
-                fieldName: v.fieldName,
-                variableName: v.variableName,
-              })),
-            });
-          }
+          // Always use AI-based variable detection for accurate spreadsheet column header detection
+          console.log('[App] Calling AI VariableDetector.detectVariables...');
+          const variables = await VariableDetector.detectVariables(currentSteps, initialFullPageSnapshot);
+          console.log('[App] ✅ AI Variable detection completed:', {
+            totalVariables: variables.variables.length,
+            analysisCount: variables.analysisCount,
+            variables: variables.variables.map(v => ({
+              fieldName: v.fieldName,
+              variableName: v.variableName,
+              isVariable: v.isVariable,
+              confidence: v.confidence,
+            })),
+          });
           
           // Store variables for display (even if empty, so UI shows the section)
           setCurrentWorkflowVariables(variables);
@@ -729,28 +714,22 @@ function App() {
       setIsDetectingVariables(true);
       
       // Detect variables using AI vision analysis (if enabled)
-      let variables;
-      
-      if (FeatureFlags.AI_VARIABLE_DETECTION) {
-        console.log('[SaveWorkflow] Starting AI variable detection for', sortedSteps.length, 'steps');
-        console.log('[SaveWorkflow] Step types:', sortedSteps.map(s => ({ type: s.type, hasSnapshot: isWorkflowStepPayload(s.payload) ? !!s.payload.visualSnapshot : false })));
-        // For saved workflows, we don't have the initial snapshot, so pass null
-        variables = await VariableDetector.detectVariables(sortedSteps, null);
-        console.log('[SaveWorkflow] AI variables detected:', JSON.stringify(variables, null, 2));
-      } else {
-        console.log('[SaveWorkflow] Using pattern-based variable detection');
-        variables = SimpleVariableDetector.detectVariables(sortedSteps);
-        console.log('[SaveWorkflow] Pattern-based variables detected:', {
-          count: variables.variables.length,
-          variables: variables.variables.map(v => v.fieldName),
-        });
-      }
+      // Always use AI-based variable detection
+      console.log('[SaveWorkflow] Starting AI variable detection for', sortedSteps.length, 'steps');
+      console.log('[SaveWorkflow] Step types:', sortedSteps.map(s => ({ type: s.type, hasSnapshot: isWorkflowStepPayload(s.payload) ? !!s.payload.visualSnapshot : false })));
+      // For saved workflows, we don't have the initial snapshot, so pass null
+      const variables = await VariableDetector.detectVariables(sortedSteps, null);
+      console.log('[SaveWorkflow] AI variables detected:', JSON.stringify(variables, null, 2));
 
-      // Run navigation optimization to detect and optimize unnecessary navigation steps
-      console.log('[SaveWorkflow] Starting navigation optimization...');
-      setLearningFeedback('🔧 Analyzing navigation patterns...');
+      // OPTIMIZATION DISABLED - Breaks AI Agent workflows
+      // The optimizer removes "redundant" clicks that are actually ESSENTIAL for UI flow
+      // Example: Removes "Click Accounts → Click New" thinking it can navigate directly
+      // But AI Agent needs these clicks to open menus/modals in the correct sequence
+      // 
+      // LESSON: Don't optimize workflows designed for sequential UI interactions
+      console.log('[SaveWorkflow] ⚠️ Navigation optimizer DISABLED - AI Agent requires all original steps');
       
-      const optimizer = new NavigationOptimizer();
+      // Create temp workflow for intent analysis
       const tempWorkflow: SavedWorkflow = {
         id: `workflow-${Date.now()}`,
         name: workflowName.trim(),
@@ -759,10 +738,28 @@ function App() {
         steps: sortedSteps,
       };
       
+      // Create empty optimization result (no optimization)
+      const optimizationResult = {
+        optimizedSteps: sortedSteps,  // Use original steps as-is
+        metadata: {
+          analyzedAt: Date.now(),
+          sequencesFound: 0,
+          sequencesOptimized: 0,
+          originalStepCount: sortedSteps.length,
+          optimizedStepCount: sortedSteps.length,
+          stepsRemoved: 0,
+          aiAnalysisUsed: false,
+          optimizationMap: [],
+        }
+      };
+      
+      /* DISABLED - Optimizer breaks AI Agent workflows:
+      const optimizer = new NavigationOptimizer();
       const optimizationResult = await optimizer.optimizeWorkflow(tempWorkflow, {
         useAI: true,
         aiConfidenceThreshold: 0.7,
       });
+      */
       
       console.log('[SaveWorkflow] Optimization complete:', {
         originalSteps: sortedSteps.length,
@@ -910,19 +907,21 @@ function App() {
 
   /**
    * Execute workflow with optional variable values
-   * Always uses AI Agent mode for the best adaptive execution
+   * Uses AI Agent with fast-path DOM execution for best reliability
    */
   const executeWorkflowWithVariables = async (
     steps: WorkflowStep[],
     workflow: SavedWorkflow,
     variableValues?: Record<string, string>
   ) => {
-    // Always use AI Agent for the best adaptive execution
-    // Selector mode is kept as fallback code if AI Agent is disabled via feature flag
+    // ALWAYS use AI Agent mode with fast-path DOM execution
+    // Fast-path: Try recorded selectors first (95% of steps, 0ms LLM latency)
+    // Fallback: Use LLM for intelligent recovery when selectors fail
+    // This provides the best of both worlds: speed + adaptability
     if (FeatureFlags.AI_AGENT_LOOP) {
       await executeWithAgent(workflow, variableValues);
     } else {
-      // Fallback to Universal Execution if AI Agent is disabled
+      // Fallback to selector-based execution if AI Agent is disabled
       await executeWithSelectors(steps, workflow, variableValues);
     }
   };

@@ -21,6 +21,18 @@ export class ElementTextCapture {
           // Limit to 50 chars for descriptions
           return text.length > 50 ? text.substring(0, 50) + '...' : text;
         }
+        
+        // SHADOW DOM: Check if button is in shadow root and look for aria-label on host
+        const rootNode = element.getRootNode();
+        if (rootNode !== document && 'host' in rootNode) {
+          const shadowHost = (rootNode as ShadowRoot).host;
+          const hostAriaLabel = shadowHost.getAttribute('aria-label');
+          if (hostAriaLabel && hostAriaLabel.trim().length > 0) {
+            const text = hostAriaLabel.trim();
+            console.log('[ElementText] 🌑 Using aria-label from shadow host:', text);
+            return text.length > 50 ? text.substring(0, 50) + '...' : text;
+          }
+        }
       }
       
       // PRIORITY 2: Try innerText (only visible text, excludes hidden children)

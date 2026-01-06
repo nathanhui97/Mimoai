@@ -18,6 +18,35 @@ export class ShadowDOMUtils {
     }
     return null;
   }
+  
+  /**
+   * Shadow-aware closest() - like element.closest() but traverses shadow boundaries
+   * This is critical for finding widgets/containers when element is in shadow DOM
+   */
+  static closestAcrossShadow(element: Element, selector: string): Element | null {
+    let current: Element | null = element;
+    
+    // First, try standard closest() in current context
+    const match = current.closest(selector);
+    if (match) return match;
+    
+    // If not found and we're in a shadow root, continue from the shadow host
+    const rootNode = element.getRootNode();
+    if (rootNode !== document && 'host' in rootNode) {
+      const shadowHost = (rootNode as ShadowRoot).host;
+      console.log('[ShadowDOMUtils] 🌑 Element in shadow root, checking host and ancestors');
+      
+      // Check if shadow host matches
+      if (shadowHost.matches(selector)) {
+        return shadowHost;
+      }
+      
+      // Continue searching from host's parent
+      return shadowHost.closest(selector);
+    }
+    
+    return null;
+  }
 
   /**
    * Check if an element is inside Shadow DOM

@@ -247,13 +247,20 @@ export class VariableDetector {
       // Always include INPUT steps (primary variable source)
       // INPUT steps are important even without snapshots - the value is what matters
       if (step.type === 'INPUT') {
+        // CRITICAL: Skip row 1 inputs (header row edits) - they're not variables!
+        const cellRef = payload.context?.gridCoordinates?.cellReference;
+        if (cellRef && /^[A-Z]+1$/.test(cellRef)) {
+          console.log(`[VariableDetector] ⏭️ Skipping INPUT step ${i}: row 1 (header row) - cellRef: ${cellRef}`);
+          continue;
+        }
+        
         // Include if it has a value (what user typed) OR a label (field name)
         const hasValue = !!payload.value;
         const hasLabel = !!payload.label;
         const hasSnapshot = !!(payload.visualSnapshot?.viewport || payload.visualSnapshot?.elementSnippet);
         
         if (hasValue || hasLabel) {
-          console.log(`[VariableDetector] Including INPUT step ${i}: value="${payload.value || '(empty)'}", label="${payload.label || '(none)'}", hasSnapshot=${hasSnapshot}`);
+          console.log(`[VariableDetector] Including INPUT step ${i}: value="${payload.value || '(empty)'}", label="${payload.label || '(none)'}", hasSnapshot=${hasSnapshot}, cellRef=${cellRef || 'none'}`);
           result.push(this.createStepForAnalysis(i, step, steps));
         } else {
           console.log(`[VariableDetector] Skipping INPUT step ${i}: no value and no label`);

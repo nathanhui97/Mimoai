@@ -30,6 +30,7 @@ import {
   createSectionScope,
   createWidgetScope,
 } from '../types/scope';
+import { ShadowDOMUtils } from '../content/shadow-dom-utils';
 
 /**
  * Build a complete LocatorBundle from an element
@@ -381,14 +382,76 @@ function buildDisambiguators(element: Element): string[] {
  * Detect scope for the element
  */
 function detectScope(element: Element): Scope | undefined {
-  // Check if in modal
-  const modal = element.closest('[role="dialog"], .modal, [class*="modal"]');
+  // CRITICAL: Check if element is IN shadow DOM first
+  // If yes, we need to check the shadow host for widget context
+  // element.closest() doesn't traverse shadow boundaries!
+  let searchContext: Element = element;
+  const rootNode = element.getRootNode();
+  
+  if (rootNode !== document && 'host' in rootNode) {
+    // We're in a shadow root! Get the host element
+    const shadowHost = (rootNode as ShadowRoot).host;
+    console.log('[LocatorBuilder] 🌑 Element is in shadow DOM, host:', shadowHost.tagName);
+    
+    // Check if shadow host is a widget/web component
+    const hostTag = shadowHost.tagName.toLowerCase();
+    
+    // Gainsight widgets: gs-report-widget-element, gs-*
+    // Salesforce: lightning-*, c-*, force-*
+    // Generic: *-widget, *-card, *-component
+    if (hostTag.includes('widget') || 
+        hostTag.includes('card') || 
+        hostTag.startsWith('gs-') ||
+        hostTag.startsWith('lightning-') ||
+        hostTag.startsWith('c-') ||
+        hostTag.includes('component')) {
+      
+      // Try to find widget title in shadow root
+      let title: string | undefined;
+      const shadowRoot = shadowHost.shadowRoot;
+      
+      if (shadowRoot) {
+        // Search for title in shadow DOM
+        const titleEl = shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
+        title = titleEl?.textContent?.trim();
+        
+        // If no title in shadow, check for data attributes on host
+        if (!title) {
+          title = shadowHost.getAttribute('data-title') || 
+                  shadowHost.getAttribute('title') || 
+                  shadowHost.getAttribute('aria-label') ||
+                  undefined;
+        }
+      }
+      
+      // Fallback: search in light DOM children of host
+      if (!title) {
+        const titleEl = shadowHost.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"]');
+        title = titleEl?.textContent?.trim();
+      }
+      
+      if (title) {
+        console.log('[LocatorBuilder] ✅ Found widget title in shadow DOM:', title);
+        return createWidgetScope(title);
+      } else {
+        console.log('[LocatorBuilder] ⚠️ Widget host found but no title detected');
+        // Still return widget scope with host tag name
+        return createWidgetScope(hostTag);
+      }
+    }
+    
+    // For non-widget shadow hosts, continue searching from the host in light DOM
+    searchContext = shadowHost;
+  }
+  
+  // Check if in modal (shadow-aware)
+  const modal = ShadowDOMUtils.closestAcrossShadow(searchContext, '[role="dialog"], .modal, [class*="modal"]');
   if (modal) {
     return createModalScope();
   }
   
-  // Check if in table row
-  const row = element.closest('tr, [role="row"]');
+  // Check if in table row (shadow-aware)
+  const row = ShadowDOMUtils.closestAcrossShadow(searchContext, 'tr, [role="row"]');
   if (row) {
     // Find anchor text in the row
     const firstCell = row.querySelector('td:first-child, [role="cell"]:first-child');
@@ -398,17 +461,41 @@ function detectScope(element: Element): Scope | undefined {
     }
   }
   
-  // Check if in widget/card
-  const widget = element.closest('[class*="widget"], [class*="card"], gridster-item');
+  // Check if in widget/card (shadow-aware)
+  // Include common web component patterns
+  const widget = ShadowDOMUtils.closestAcrossShadow(searchContext, 
+    '[class*="widget"], [class*="card"], gridster-item, gs-report-widget-element, ' +
+    'lightning-card, c-card, [class*="dashboard-item"], [class*="tile"]');
   if (widget) {
-    const title = widget.querySelector('h1, h2, h3, h4, [class*="title"]')?.textContent?.trim();
+    // For web components, check shadow root first
+    let title: string | undefined;
+    
+    if (widget.shadowRoot) {
+      const titleEl = widget.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
+      title = titleEl?.textContent?.trim();
+    }
+    
+    // Fallback: light DOM
+    if (!title) {
+      title = widget.querySelector('h1, h2, h3, h4, [class*="title"]')?.textContent?.trim();
+    }
+    
+    // Fallback: check widget attributes
+    if (!title) {
+      title = widget.getAttribute('data-title') || 
+              widget.getAttribute('title') ||
+              widget.getAttribute('aria-label') ||
+              undefined;
+    }
+    
     if (title) {
+      console.log('[LocatorBuilder] ✅ Detected widget scope:', title.substring(0, 50));
       return createWidgetScope(title);
     }
   }
   
-  // Check if in labeled section
-  const section = element.closest('section, article');
+  // Check if in labeled section (shadow-aware)
+  const section = ShadowDOMUtils.closestAcrossShadow(searchContext, 'section, article');
   if (section) {
     const heading = section.querySelector('h1, h2, h3, h4, h5, h6');
     const headingText = heading?.textContent?.trim();

@@ -457,9 +457,10 @@ export class VisualSnapshotService {
           await this.setZoomLevel(0.33);
           console.log('📸 GhostWriter: Zoomed out to 33% for spreadsheet capture');
 
-          // 3. CRITICAL: Wait 600ms for Google Sheets Canvas to repaint
+          // 3. CRITICAL: Wait 1000ms for Google Sheets Canvas to repaint
           // Google Sheets needs time to fetch virtualized rows/cols after zoom
-          await new Promise(resolve => setTimeout(resolve, 600));
+          // Increased from 600ms to 1000ms for more reliable header rendering
+          await new Promise(resolve => setTimeout(resolve, 1000));
         } catch (zoomErr) {
           console.warn('📸 GhostWriter: Zoom operation failed, continuing with current zoom:', zoomErr);
           // Continue with capture at current zoom if zoom fails
@@ -503,12 +504,17 @@ export class VisualSnapshotService {
       // RESTORE ZOOM NO MATTER WHAT (even if capture errors)
       // Only restore if we're on a spreadsheet (where we may have changed zoom)
       if (isSpreadsheet) {
+        console.log(`📸 GhostWriter: Restoring zoom from 33% to ${originalZoom}...`);
         try {
-          await this.setZoomLevel(originalZoom);
-          await new Promise(resolve => setTimeout(resolve, 100)); // Smooth transition
-          console.log(`📸 GhostWriter: Restored zoom to ${originalZoom}`);
+          const restoreSuccess = await this.setZoomLevel(originalZoom);
+          if (restoreSuccess) {
+            await new Promise(resolve => setTimeout(resolve, 100)); // Smooth transition
+            console.log(`📸 GhostWriter: ✅ Zoom restored to ${originalZoom}`);
+          } else {
+            console.error(`📸 GhostWriter: ❌ setZoomLevel returned false for ${originalZoom}`);
+          }
         } catch (restoreErr) {
-          console.error('📸 GhostWriter: Failed to restore zoom level:', restoreErr);
+          console.error('📸 GhostWriter: ❌ Failed to restore zoom level:', restoreErr);
         }
       }
     }

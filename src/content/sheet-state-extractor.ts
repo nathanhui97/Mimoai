@@ -124,6 +124,228 @@ export class SheetStateExtractor {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
   
+  // ============================================================================
+  // RELIABLE COLUMN HEADER CACHE - Per-spreadsheet header storage
+  // This is the 100% reliable DOM-based approach (no AI vision needed)
+  // ============================================================================
+  private static headerCache: Map<string, Map<string, string>> = new Map();
+  
+  /**
+   * Get the spreadsheet ID from URL (for caching)
+   */
+  private static getSpreadsheetId(): string {
+    const url = window.location.href;
+    // Google Sheets: /spreadsheets/d/{ID}/
+    const match = url.match(/\/spreadsheets\/d\/([^\/]+)/);
+    return match ? match[1] : url;
+  }
+  
+  /**
+   * Read a SINGLE column header from row 1 using Name Box + Formula Bar
+   * Called on-demand when user types in a column for the first time
+   * This is fast (single navigation) and works for ANY column (A, Z, AA, ABC, etc.)
+   */
+  static async captureColumnHeader(column: string): Promise<string | null> {
+    const spreadsheetId = this.getSpreadsheetId();
+    const col = column.toUpperCase();
+    
+    // Check cache first
+    if (!this.headerCache.has(spreadsheetId)) {
+      this.headerCache.set(spreadsheetId, new Map());
+    }
+    const headers = this.headerCache.get(spreadsheetId)!;
+    
+    if (headers.has(col)) {
+      console.log(`📊 SheetStateExtractor: Using cached header for column ${col}: "${headers.get(col)}"`);
+      return headers.get(col) || null;
+    }
+    
+    console.log(`📊 SheetStateExtractor: Capturing header for column ${col}...`);
+    
+    try {
+      const nameBox = document.querySelector('#t-name-box') as HTMLInputElement;
+      const formulaBar = document.querySelector('#t-formula-bar-input, .cell-input') as HTMLInputElement | HTMLDivElement;
+      
+      if (!nameBox || !formulaBar) {
+        console.warn('📊 SheetStateExtractor: Name Box or Formula Bar not found');
+        return null;
+      }
+      
+      // Save current position to restore later
+      const originalCell = nameBox.value || 'A1';
+      
+      // Navigate to [col]1 (e.g., A1, B1, AA1)
+      const cellRef = `${col}1`;
+      nameBox.focus();
+      nameBox.value = cellRef;
+      nameBox.dispatchEvent(new Event('input', { bubbles: true }));
+      
+      // Press Enter to navigate
+      nameBox.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true,
+      }));
+      
+      // Wait for Google Sheets to update the formula bar
+      await this.sleep(150);
+      
+      // Read formula bar value
+      const value = (formulaBar as HTMLInputElement).value || 
+                   formulaBar.textContent || 
+                   formulaBar.innerText || '';
+      
+      const trimmedValue = value.trim();
+      
+      // Restore original position
+      try {
+        nameBox.focus();
+        nameBox.value = originalCell;
+        nameBox.dispatchEvent(new Event('input', { bubbles: true }));
+        nameBox.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+        }));
+        await this.sleep(50);
+      } catch (restoreErr) {
+        console.warn('📊 Error restoring original position:', restoreErr);
+      }
+      
+      if (trimmedValue) {
+        headers.set(col, trimmedValue);
+        console.log(`📊 SheetStateExtractor: Column ${col} header: "${trimmedValue}" (cached)`);
+        return trimmedValue;
+      } else {
+        console.log(`📊 SheetStateExtractor: Column ${col} has no header (empty)`);
+        // Still cache the empty state to avoid re-reading
+        headers.set(col, '');
+        return null;
+      }
+    } catch (error) {
+      console.error(`📊 SheetStateExtractor: Error capturing header for column ${col}:`, error);
+      return null;
+    }
+  }
+  
+  /**
+   * Read all column headers at once (legacy method, still useful for bulk capture)
+   * Optimized to stop early when encountering empty columns
+   */
+  static async captureAllHeaders(maxColumns: number = 26): Promise<Map<string, string>> {
+    const spreadsheetId = this.getSpreadsheetId();
+    
+    if (!this.headerCache.has(spreadsheetId)) {
+      this.headerCache.set(spreadsheetId, new Map());
+    }
+    const headers = this.headerCache.get(spreadsheetId)!;
+    
+    // Generate column letters (A-Z, then AA-AZ if needed)
+    const columns: string[] = [];
+    for (let i = 0; i < Math.min(maxColumns, 26); i++) {
+      columns.push(String.fromCharCode(65 + i)); // A-Z
+    }
+    
+    let emptyCount = 0;
+    for (const col of columns) {
+      if (headers.has(col)) continue; // Already cached
+      
+      const header = await this.captureColumnHeader(col);
+      if (!header) {
+        emptyCount++;
+        // Stop after 3 consecutive empty columns
+        if (emptyCount >= 3) {
+          console.log('📊 SheetStateExtractor: Stopping scan after 3 empty columns');
+          break;
+        }
+      } else {
+        emptyCount = 0; // Reset counter on non-empty
+      }
+    }
+    
+    return headers;
+  }
+  
+  /**
+   * Get the header for a specific column from cache
+   */
+  static getColumnHeader(column: string): string | null {
+    const spreadsheetId = this.getSpreadsheetId();
+    const headers = this.headerCache.get(spreadsheetId);
+    const header = headers?.get(column.toUpperCase()) || null;
+    console.log(`📊 SheetStateExtractor: getColumnHeader(${column}) for spreadsheet ${spreadsheetId}:`, header, 'cache size:', headers?.size || 0);
+    return header;
+  }
+  
+  /**
+   * Get all cached headers for the current spreadsheet
+   */
+  static getCachedHeaders(): Map<string, string> | null {
+    const spreadsheetId = this.getSpreadsheetId();
+    return this.headerCache.get(spreadsheetId) || null;
+  }
+  
+  /**
+   * Clear the header cache (e.g., when navigating to a new spreadsheet)
+   */
+  static clearHeaderCache(): void {
+    this.headerCache.clear();
+  }
+  
+  /**
+   * Extract column letter from a cell reference (e.g., "C17" → "C", "AA5" → "AA")
+   */
+  static extractColumnFromCellRef(cellRef: string): string | null {
+    const match = cellRef.match(/^([A-Z]+)/i);
+    return match ? match[1].toUpperCase() : null;
+  }
+  
+  /**
+   * Update a column header in the cache (e.g., when user edits row 1)
+   * This keeps the cache in sync if headers are modified during recording
+   */
+  static updateColumnHeader(column: string, header: string): void {
+    const spreadsheetId = this.getSpreadsheetId();
+    if (!this.headerCache.has(spreadsheetId)) {
+      this.headerCache.set(spreadsheetId, new Map());
+    }
+    const headers = this.headerCache.get(spreadsheetId)!;
+    headers.set(column.toUpperCase(), header);
+    console.log(`📊 SheetStateExtractor: Updated header for column ${column}: "${header}"`);
+  }
+  
+  /**
+   * Get headers for a list of cell references
+   * Called after recording stops to populate column headers for all INPUT steps
+   * Returns a map of column → header text
+   */
+  static async getHeadersForCells(cellRefs: string[]): Promise<Map<string, string>> {
+    // Extract unique columns from cell references
+    const columns = new Set<string>();
+    for (const cellRef of cellRefs) {
+      const col = this.extractColumnFromCellRef(cellRef);
+      if (col) columns.add(col);
+    }
+    
+    console.log(`📊 SheetStateExtractor: Getting headers for ${columns.size} unique columns:`, Array.from(columns));
+    
+    const headers = new Map<string, string>();
+    
+    for (const col of columns) {
+      const header = await this.captureColumnHeader(col);
+      if (header) {
+        headers.set(col, header);
+      }
+    }
+    
+    console.log('📊 SheetStateExtractor: Headers retrieved:', Object.fromEntries(headers));
+    return headers;
+  }
+  
   /**
    * Canonical domain check - used EVERYWHERE for safeguards
    * This is the ONLY function that determines if we're on a spreadsheet

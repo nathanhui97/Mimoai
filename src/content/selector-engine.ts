@@ -1091,6 +1091,16 @@ export class SelectorEngine {
       } else {
         fallbacks.push(selector);
       }
+      
+      // SHADOW DOM: If element is in shadow root, create a scoped selector
+      // Format: "gs-report-widget-element >> [aria-label='More Options']"
+      if (shadowPath && shadowPath.length > 0) {
+        const hostSelector = shadowPath[0].hostSelector;
+        const shadowScopedSelector = `${hostSelector} >> [aria-label="${CSS.escape(ariaLabel)}"]`;
+        console.log('[SelectorEngine] 🌑 Generated shadow-scoped aria-label selector:', shadowScopedSelector);
+        // Add as high-priority fallback
+        fallbacks.unshift(shadowScopedSelector);
+      }
     }
 
     const name = (element as HTMLInputElement).name;
