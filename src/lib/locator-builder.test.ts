@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'vitest';
-import type { LocatorBundle, LocatorStrategy, LocatorFeatures } from '../types/locator';
+import type { LocatorBundle, LocatorStrategy } from '../types/locator';
 import {
   createEmptyBundle,
   createCSSLocator,
@@ -49,13 +49,13 @@ describe('LocatorBundle Types', () => {
       tagName: 'button',
       role: 'button',
       scope: {
-        type: 'page',
+        kind: 'PAGE',
       },
     };
 
     expect(bundle.strategies).toHaveLength(1);
     expect(bundle.disambiguators).toHaveLength(2);
-    expect(bundle.scope?.type).toBe('page');
+    expect(bundle.scope?.kind).toBe('PAGE');
   });
 });
 
@@ -307,7 +307,7 @@ describe('Locator Features', () => {
 
     const dynamicText = createTextLocator(
       '$99.99',
-      { textStabilityHint: 'dynamic' },
+      { textStabilityHint: 'likely_dynamic' },
       'span'
     );
 
