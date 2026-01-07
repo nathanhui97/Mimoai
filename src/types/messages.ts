@@ -36,6 +36,7 @@ export type MessageType =
   | 'ELEMENT_FIND_FAILED'
   | 'CANCEL_CORRECTION'
   | 'GET_INITIAL_SNAPSHOT'
+  | 'GET_COLUMN_HEADERS'
   | 'REFRESH_PAGE'
   | 'GET_ZOOM'
   | 'SET_ZOOM'

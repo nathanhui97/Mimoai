@@ -4,7 +4,14 @@
  * Manages multi-tab recording coordination
  */
 
+import { VersionChecker, EXTENSION_VERSION, BUILD_HASH } from '../lib/version-checker';
 import type { ExtensionMessage, MessageResponse, TabSwitchedMessage, StartRecordingInTabMessage, StopRecordingInTabMessage, ResumeRecordingMessage } from '../types/messages';
+
+// Check version on service worker startup
+console.log(`🚀 Service Worker loaded (${EXTENSION_VERSION}) [${BUILD_HASH}]`);
+VersionChecker.checkVersion('service-worker').catch(err => {
+  console.error('Failed to check service worker version:', err);
+});
 
 // Tab tracking state (runtime only, not persisted)
 const activeRecordingTabs: Set<number> = new Set();

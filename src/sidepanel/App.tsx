@@ -9,6 +9,7 @@ import { IntentAnalyzer } from '../lib/intent-analyzer';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { FeatureFlags } from '../lib/feature-flags';
+import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
 import type { ExtensionState } from '../types/state';
 import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
@@ -295,6 +296,47 @@ function App() {
     return false;
   };
 
+  // Handler to clear extension caches
+  const handleClearCache = async () => {
+    try {
+      console.log('[App] Clearing extension caches...');
+      const result = await VersionChecker.clearAllCaches();
+      
+      if (result.success) {
+        const feedbackMsg = `✅ Caches cleared: ${result.cleared.join(', ')}`;
+        setLearningFeedback(feedbackMsg);
+        console.log('[App] ✅ Caches cleared:', result.cleared);
+        
+        // Show feedback for 5 seconds
+        setTimeout(() => {
+          setLearningFeedback(null);
+        }, 5000);
+      } else {
+        console.error('[App] Failed to clear caches');
+        setError('Failed to clear caches');
+      }
+    } catch (err) {
+      console.error('[App] Error clearing caches:', err);
+      setError('Error clearing caches: ' + (err instanceof Error ? err.message : 'Unknown error'));
+    }
+  };
+
+  // Expose clear cache function globally for console debugging
+  useEffect(() => {
+    (window as any).clearExtensionCache = handleClearCache;
+    console.log('[App] 💡 clearExtensionCache() available in console');
+    console.log('[App] 📦 Extension version:', EXTENSION_VERSION);
+    
+    // Check version on sidepanel load
+    VersionChecker.checkVersion('sidepanel').catch(err => {
+      console.error('[App] Failed to check sidepanel version:', err);
+    });
+    
+    return () => {
+      delete (window as any).clearExtensionCache;
+    };
+  }, []);
+
   const handleStartRecording = async () => {
     try {
       clearWorkflowSteps();
@@ -308,11 +350,27 @@ function App() {
         throw new Error('No active tab found');
       }
       
+      // CRITICAL: Check if content script is responsive before starting recording
+      // This prevents the "extension context invalidated" zombie script issue
+      console.log('[App] Checking if content script is responsive...');
+      const isContentScriptAlive = await runtimeBridge.ping(tab.id);
+      
+      if (!isContentScriptAlive) {
+        console.warn('[App] Content script not responsive - triggering page refresh');
+        // Content script is dead/invalid - refresh the page to reinitialize it
+        setPendingTabId(tab.id);
+        setShowRefreshDialog(true);
+        return; // Exit early, dialog will handle the rest
+      }
+      
+      console.log('[App] Content script is responsive ✅');
+      
       // Check if it's a spreadsheet domain
       const isSpreadsheet = isSpreadsheetDomain(tab.url);
       
       if (isSpreadsheet) {
-        // Show refresh dialog for spreadsheets
+        // For spreadsheets, always refresh to capture clean column headers
+        // (even if content script is alive, we want a fresh start for header detection)
         setPendingTabId(tab.id);
         setShowRefreshDialog(true);
       } else {
@@ -588,7 +646,11 @@ function App() {
         setLearningFeedback('🔍 Analyzing workflow steps for variables...');
         
         try {
-          // Always use AI-based variable detection for accurate spreadsheet column header detection
+          // For spreadsheets, use cell references as variable names (users can rename in UI)
+          // This is more reliable than trying to detect headers programmatically
+          console.log('[App] 📊 Spreadsheet variable detection will use cell references as default names');
+          
+          // Use AI-based variable detection
           console.log('[App] Calling AI VariableDetector.detectVariables...');
           const variables = await VariableDetector.detectVariables(currentSteps, initialFullPageSnapshot);
           console.log('[App] ✅ AI Variable detection completed:', {
@@ -1593,38 +1655,63 @@ function App() {
                         )}
                       </div>
                     </div>
-                    {isWorkflowStepPayload(step.payload) && step.payload.label && (
-                      <div className="text-muted-foreground">Label: {step.payload.label}</div>
-                    )}
-                    {isWorkflowStepPayload(step.payload) && step.payload.value && (
-                      <div className="text-muted-foreground">
-                        Value: {step.payload.value}
-                        {isVariable && variableDef && (
-                          <span className="ml-2 text-xs text-purple-600">
-                            (Variable: {variableDef.fieldName})
-                          </span>
-                        )}
-                      </div>
-                    )}
-                    {isWorkflowStepPayload(step.payload) && (
-                      <div className="text-muted-foreground text-xs mt-1">
-                        Selector: {step.payload.selector}
-                      </div>
-                    )}
-                    {isVariable && variableDef && (
-                      <div className="text-purple-600 text-xs mt-1 flex items-center gap-1">
-                        <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                          <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                          <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-                        </svg>
-                        <span>AI detected as variable ({Math.round(variableDef.confidence * 100)}% confidence)</span>
-                      </div>
-                    )}
-                    {isEnhanced && aiFallbackCount > 0 && (
-                      <div className="text-blue-600 text-xs mt-1">
-                        ✨ {aiFallbackCount} AI-enhanced fallback selector{aiFallbackCount > 1 ? 's' : ''} added
-                      </div>
-                    )}
+                    {/* Simplified display for spreadsheet steps */}
+                    {(() => {
+                      if (!isWorkflowStepPayload(step.payload)) return null;
+                      
+                      const payload = step.payload;
+                      const isSpreadsheetStep = payload.spreadsheetContext?.recordedIntent?.cellRef || 
+                                               payload.context?.gridCoordinates?.cellReference;
+                      
+                      if (isSpreadsheetStep) {
+                        // Simplified view for spreadsheet INPUT steps - only show variable info
+                        return (
+                          <>
+                            {isVariable && variableDef && (
+                              <div className="text-purple-600 text-sm mt-1">
+                                ✨ Variable: {variableDef.fieldName} (click to rename)
+                              </div>
+                            )}
+                          </>
+                        );
+                      }
+                      
+                      // Full display for non-spreadsheet steps
+                      return (
+                        <>
+                          {payload.label && (
+                            <div className="text-muted-foreground">Label: {payload.label}</div>
+                          )}
+                          {payload.value && (
+                            <div className="text-muted-foreground">
+                              Value: {payload.value}
+                              {isVariable && variableDef && (
+                                <span className="ml-2 text-xs text-purple-600">
+                                  (Variable: {variableDef.fieldName})
+                                </span>
+                              )}
+                            </div>
+                          )}
+                          <div className="text-muted-foreground text-xs mt-1">
+                            Selector: {payload.selector}
+                          </div>
+                          {isVariable && variableDef && (
+                            <div className="text-purple-600 text-xs mt-1 flex items-center gap-1">
+                              <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
+                                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
+                                <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
+                              </svg>
+                              <span>Detected as variable ({Math.round(variableDef.confidence * 100)}% confidence)</span>
+                            </div>
+                          )}
+                          {isEnhanced && aiFallbackCount > 0 && (
+                            <div className="text-blue-600 text-xs mt-1">
+                              ✨ {aiFallbackCount} AI-enhanced fallback selector{aiFallbackCount > 1 ? 's' : ''} added
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 );
               })}
@@ -2154,9 +2241,9 @@ function App() {
         {showRefreshDialog && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-card p-6 rounded-lg border border-border max-w-md w-full mx-4">
-              <h2 className="text-xl font-semibold mb-4 text-card-foreground">Refresh Page for Header Detection</h2>
+              <h2 className="text-xl font-semibold mb-4 text-card-foreground">Refresh Page to Start Recording</h2>
               <p className="text-sm text-muted-foreground mb-4">
-                This will refresh the page to capture column headers. Any unsaved work may be lost. Continue?
+                The page needs to be refreshed to initialize recording properly. Recording will start automatically after refresh. Any unsaved work may be lost. Continue?
               </p>
               <div className="flex gap-2">
                 <button

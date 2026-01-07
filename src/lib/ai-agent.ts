@@ -8,6 +8,10 @@
  * 4. Agent observes the result and repeats
  * 
  * The extension is just a "tool" - the AI makes all decisions.
+ * 
+ * This file delegates to specialized modules:
+ * - CandidateFinder: Finds and ranks DOM elements matching hints
+ * - HintExtractor: Converts workflow steps to hints with variable substitution
  */
 
 import { aiConfig } from './ai-config';
@@ -17,10 +21,14 @@ import { FeatureFlags } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
 import { SheetStateExtractor } from '../content/sheet-state-extractor';
+import { SpreadsheetHelpers } from './spreadsheet-helpers';
 import { VisionAssist } from './tier3-vision-assist';
 import { RecoveryEngine } from '../content/recovery-engine';
-import type { WorkflowStepPayload, SavedWorkflow } from '../types/workflow';
-import { isWorkflowStepPayload } from '../types/workflow';
+import type { SavedWorkflow } from '../types/workflow';
+
+// Extracted agent modules
+import { CandidateFinder } from './agent/candidate-finder';
+import { HintExtractor } from './agent/hint-extractor';
 
 // ============================================================================
 // Types
@@ -341,6 +349,10 @@ export class AIAgent {
   // @ts-ignore - stepTimeout is stored for potential future use in API timeout
   private stepTimeout: number;
   private onProgress?: AgentProgressCallback;
+  
+  // Extracted modules
+  private readonly candidateFinder: CandidateFinder;
+  private readonly hintExtractor: HintExtractor;
 
   constructor(options: {
     maxSteps?: number;
@@ -350,6 +362,10 @@ export class AIAgent {
     this.maxSteps = options.maxSteps ?? 50;
     this.stepTimeout = options.stepTimeout ?? 30000; // Used for API timeout
     this.onProgress = options.onProgress;
+    
+    // Initialize extracted modules
+    this.candidateFinder = new CandidateFinder();
+    this.hintExtractor = new HintExtractor();
     
     this.state = {
       goal: '',
@@ -395,6 +411,15 @@ export class AIAgent {
 
     console.log(`[AIAgent] Goal: ${this.state.goal}`);
     console.log(`[AIAgent] Hints: ${this.state.hints.length} steps`);
+    
+    // Log variable values for debugging
+    if (variableValues && Object.keys(variableValues).length > 0) {
+      console.log(`[AIAgent] 📝 Variable values received:`, variableValues);
+      console.log(`[AIAgent] 📝 Variable keys:`, Object.keys(variableValues));
+      console.log(`[AIAgent] 📝 Variable entries:`, Object.entries(variableValues).map(([k, v]) => `${k}="${v}"`).join(', '));
+    } else {
+      console.log(`[AIAgent] ⚠️ No variable values provided!`);
+    }
     
     return this.continueExecution();
   }
@@ -729,27 +754,8 @@ export class AIAgent {
         if (SheetStateExtractor.isSpreadsheetDomain() && currentHint?.actionType === 'type' && currentHint?.value) {
           console.log(`[AIAgent] 📊 SPREADSHEET TYPE HINT detected: "${currentHint.value}"`);
           
-          // Extract cell reference from hint
-          let recordedCellRef: string | undefined;
-          
-          // Try recordedAriaLabel first (e.g., "A2", "B3")
-          if (currentHint.recordedAriaLabel) {
-            const match = currentHint.recordedAriaLabel.match(/^([A-Z]+\d+)$/i);
-            if (match) {
-              recordedCellRef = match[1].toUpperCase();
-            }
-          }
-          
-          // Try fallback selectors (e.g., [aria-label="A2"])
-          if (!recordedCellRef && currentHint.recordedFallbackSelectors) {
-            for (const selector of currentHint.recordedFallbackSelectors) {
-              const ariaMatch = selector.match(/\[aria-label=["']([A-Z]+\d+)["']\]/i);
-              if (ariaMatch) {
-                recordedCellRef = ariaMatch[1].toUpperCase();
-                break;
-              }
-            }
-          }
+          // Extract cell reference from hint using centralized helper
+          const recordedCellRef = SpreadsheetHelpers.extractCellReference(currentHint);
           
           if (recordedCellRef) {
             // Extract column letter from recorded cell (A2 → A, B10 → B)
@@ -835,26 +841,8 @@ export class AIAgent {
         // If on spreadsheet + click hint + cell reference → execute directly
         // ============================================================================
         if (SheetStateExtractor.isSpreadsheetDomain() && currentHint?.actionType === 'click') {
-          let cellRef: string | undefined;
-          
-          // Try recordedAriaLabel
-          if (currentHint.recordedAriaLabel) {
-            const match = currentHint.recordedAriaLabel.match(/^([A-Z]+\d+)$/i);
-            if (match) {
-              cellRef = match[1].toUpperCase();
-            }
-          }
-          
-          // Try fallback selectors
-          if (!cellRef && currentHint.recordedFallbackSelectors) {
-            for (const selector of currentHint.recordedFallbackSelectors) {
-              const ariaMatch = selector.match(/\[aria-label=["']([A-Z]+\d+)["']\]/i);
-              if (ariaMatch) {
-                cellRef = ariaMatch[1].toUpperCase();
-                break;
-              }
-            }
-          }
+          // Extract cell reference from hint using centralized helper
+          const cellRef = SpreadsheetHelpers.extractCellReference(currentHint);
           
           if (cellRef) {
             console.log(`[AIAgent] 📊 Executing SPREADSHEET CLICK: ${cellRef} (NO AI)`);
@@ -1027,20 +1015,40 @@ export class AIAgent {
         if (result.success) {
           const completedIndex = this.state.currentHintIndex;
           if (completedIndex >= 0 && completedIndex < this.state.hints.length) {
-            this.state.hints[completedIndex].completed = true;
-            this.state.hints[completedIndex].failureCount = 0;  // Reset failure count
+            const currentHint = this.state.hints[completedIndex];
             
-            // Find next incomplete hint (skip over already completed/skipped ones)
-            let nextIndex = completedIndex + 1;
-            while (nextIndex < this.state.hints.length && 
-                   (this.state.hints[nextIndex].completed || this.state.hints[nextIndex].skipped)) {
-              nextIndex++;
+            // 🚨 CRITICAL: Check if this was an INTERMEDIATE action or the GOAL action
+            // Example: Hint says "CLICK on BOGO" but AI clicked combobox to open dropdown
+            // Solution: Check if action achieved hint's goal, or was just a preparation step
+            const isIntermediateAction = this.detectIntermediateAction(currentHint, action, observation);
+            
+            if (isIntermediateAction) {
+              // ⚠️ Action was intermediate (e.g., opening dropdown) - DON'T mark hint complete yet
+              console.log(`[AIAgent] ⏸️  Intermediate action detected - hint ${completedIndex} NOT marked complete yet`);
+              console.log(`[AIAgent] 💡 Hint goal: "${currentHint.description}"`);
+              console.log(`[AIAgent] 💡 Action taken: ${action.type} "${action.params.target?.name || action.params.target?.text || ''}"`);
+              console.log(`[AIAgent] 💡 Need to complete the actual goal in next iteration`);
+              
+              // DON'T advance currentHintIndex - stay on same hint
+              // Reset failure count since action succeeded (just not the goal yet)
+              currentHint.failureCount = 0;
+            } else {
+              // ✅ Action achieved the hint's goal - mark complete and advance
+              this.state.hints[completedIndex].completed = true;
+              this.state.hints[completedIndex].failureCount = 0;  // Reset failure count
+              
+              // Find next incomplete hint (skip over already completed/skipped ones)
+              let nextIndex = completedIndex + 1;
+              while (nextIndex < this.state.hints.length && 
+                     (this.state.hints[nextIndex].completed || this.state.hints[nextIndex].skipped)) {
+                nextIndex++;
+              }
+              // If nextIndex is at or past the end, keep it there so we can detect completion
+              this.state.currentHintIndex = nextIndex;
+              
+              console.log(`[AIAgent] ✅ Marked hint ${completedIndex} as completed, advanced to hint ${this.state.currentHintIndex}`);
+              console.log(`[AIAgent] Completed hints: ${this.state.hints.filter(h => h.completed).length}/${this.state.hints.length}`);
             }
-            // If nextIndex is at or past the end, keep it there so we can detect completion
-            this.state.currentHintIndex = nextIndex;
-            
-            console.log(`[AIAgent] ✅ Marked hint ${completedIndex} as completed, advanced to hint ${this.state.currentHintIndex}`);
-            console.log(`[AIAgent] Completed hints: ${this.state.hints.filter(h => h.completed).length}/${this.state.hints.length}`);
             
             // 🎯 CRITICAL: If we just clicked something that likely navigated/changed the page,
             // wait for the new content to load before continuing
@@ -2700,713 +2708,37 @@ export class AIAgent {
 
   /**
    * Find and rank candidates that match the current hint
-   * Returns max 8 candidates sorted by score
+   * Delegates to CandidateFinder module
    */
   private findAndRankCandidates(hint: AgentHint, domMap: DOMMap): Array<DOMMapElement & { index: number; score: number }> {
-    // Infer expected role from hint description if not explicit
-    const expectedRole = this.inferRoleFromHint(hint);
-    
-    // 🚨 DROPDOWN PRIORITY: If a dropdown is open, prioritize dropdown options
-    const dropdownIsOpen = !!domMap.activeDropdown;
-    
-    // Score ALL interactive elements (don't filter first - let scoring decide)
-    const allElements = [...domMap.interactiveElements, ...domMap.formFields];
-    
-    // 🎯 PRE-FILTER: If we have a recorded scope hint, only consider elements in that widget
-    // CRITICAL: If dropdown is open, ONLY include dropdown options (ignore scope filtering entirely)
-    let candidatePool = allElements;
-    if (dropdownIsOpen) {
-      // DROPDOWN OPEN: Only consider dropdown options, ignore everything else!
-      const isDropdownOption = (el: DOMMapElement) => 
-        el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio' || el.role === 'menuitemcheckbox';
-      
-      candidatePool = allElements.filter(isDropdownOption);
-      console.log(`[AIAgent] 🔽 Dropdown is open - filtered to ${candidatePool.length} dropdown options ONLY (ignoring ${allElements.length - candidatePool.length} non-dropdown elements)`);
-    } else if (hint.recordedScopeHint) {
-      // Normal scope filtering when no dropdown
-      const scopeHint = hint.recordedScopeHint.toLowerCase();
-      const inScope = allElements.filter(el => {
-        // Check widgetTitle (exact match or contains)
-        if (el.widgetTitle && el.widgetTitle.toLowerCase().includes(scopeHint)) {
-          return true;
-        }
-        // Check scopePath (element's container hierarchy)
-        if (el.scopePath?.some(s => s.toLowerCase().includes(scopeHint))) {
-          return true;
-        }
-        // Fuzzy match for titles with dynamic numbers (e.g., "STORE...119" vs "STORE...")
-        if (el.widgetTitle) {
-          const baseScope = scopeHint.replace(/\d+$/g, '').trim();
-          const baseWidget = el.widgetTitle.toLowerCase().replace(/\d+$/g, '').trim();
-          if (baseScope.length > 10 && baseWidget.includes(baseScope)) {
-            return true;
-          }
-        }
-        return false;
-      });
-      
-      if (inScope.length > 0) {
-        candidatePool = inScope;
-        console.log(`[AIAgent] 🎯 Pre-filtered to ${inScope.length} elements in recorded scope "${hint.recordedScopeHint}" (from ${allElements.length} total)`);
-      } else {
-        console.warn(`[AIAgent] ⚠️ No elements found in recorded scope "${hint.recordedScopeHint}" - element may not be visible yet. Using all ${allElements.length} elements as fallback.`);
-      }
-    }
-    
-    // DEBUG: Log hint details
-    console.log(`[AIAgent] 🔍 Scoring ${candidatePool.length} elements for hint:`, {
-      targetText: hint.targetText,
-      targetRole: hint.targetRole,
-      recordedAriaLabel: hint.recordedAriaLabel,
-      recordedScopeHint: hint.recordedScopeHint,
-      expectedRole,
-    });
-    
-    const scored = candidatePool.map(el => ({
-      ...el,
-      score: this.computeCandidateScore(el, hint, expectedRole, dropdownIsOpen),
-    }));
-    
-    // Sort by score descending
-    scored.sort((a, b) => b.score - a.score);
-    
-    // Take top 15 candidates (increased from 8 to give LLM more options)
-    // Don't filter by score - let the LLM decide even if scores are low
-    const topCandidates = scored.slice(0, 15);
-    
-    console.log(`[AIAgent] Found ${topCandidates.length} candidates, top 3 scores: [${topCandidates.slice(0, 3).map(c => c.score).join(', ')}]`);
-    
-    // DEBUG: If all scores are 0, log first 3 candidates to diagnose
-    if (topCandidates.length > 0 && topCandidates[0].score === 0) {
-      console.warn('[AIAgent] ⚠️ All candidates scored 0! First 3 candidates:', topCandidates.slice(0, 3).map(c => ({
-        role: c.role,
-        name: c.name,
-        text: c.text,
-        widgetTitle: c.widgetTitle,
-        scopePath: c.scopePath,
-      })));
-    }
-    
-    return topCandidates.map((s, i) => ({
-      ...s,
-      index: i,
-    }));
+    return this.candidateFinder.findAndRankCandidates(hint, domMap);
   }
   
-  /**
-   * Infer expected role from hint description
-   */
-  private inferRoleFromHint(hint: AgentHint): string | null {
-    // If explicit role, use it
-    if (hint.targetRole) return hint.targetRole;
-    
-    const desc = (hint.description || '').toLowerCase();
-    const text = (hint.targetText || '').toLowerCase();
-    
-    // Infer from description keywords
-    if (desc.includes('dropdown') || desc.includes('select') || text.includes('select')) {
-      return 'combobox';
-    }
-    if (desc.includes('button') || desc.includes('click') && (desc.includes('submit') || desc.includes('continue') || desc.includes('save'))) {
-      return 'button';
-    }
-    if (desc.includes('enter') || desc.includes('type') || hint.actionType === 'type') {
-      return 'textbox'; // or spinbutton, searchbox
-    }
-    if (desc.includes('link')) {
-      return 'link';
-    }
-    if (desc.includes('checkbox')) {
-      return 'checkbox';
-    }
-    
-    return null;
-  }
-  
-  
-  /**
-   * Compute score for a candidate element
-   * Higher score = better match
-   */
-  private computeCandidateScore(el: DOMMapElement, hint: AgentHint, expectedRole: string | null, dropdownIsOpen: boolean = false): number {
-    let score = 0;
-    
-    // ============================================================
-    // DROPDOWN CONTEXT: If dropdown is open, massively boost options
-    // ============================================================
-    const isDropdownOption = el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio';
-    if (dropdownIsOpen && isDropdownOption) {
-      score += 150; // Massive boost for dropdown options when dropdown is open!
-      console.log(`[AIAgent] 🔽 Boosting dropdown option: "${el.text || el.name}" (+150 points)`);
-    }
-    
-    // ============================================================
-    // ROLE MATCHING (Critical - 50 points)
-    // ============================================================
-    const roleAliases: Record<string, string[]> = {
-      'combobox': ['combobox', 'listbox', 'select'],
-      'textbox': ['textbox', 'searchbox', 'spinbutton', 'input'],
-      'button': ['button', 'link', 'menuitem', 'option'], // ← Add 'option' for dropdown clicks recorded as button
-      'link': ['link', 'button'],
-      'checkbox': ['checkbox', 'switch'],
-    };
-    
-    if (expectedRole) {
-      const validRoles = roleAliases[expectedRole] || [expectedRole];
-      if (validRoles.includes(el.role)) {
-        score += 50; // Role match!
-      } else if (dropdownIsOpen && isDropdownOption) {
-        // Don't penalize options when dropdown is open, even if hint expects button
-        score += 0; // Neutral (already got +150 boost above)
-      } else {
-        // Role mismatch - significant penalty
-        score -= 20;
-      }
-    }
-    
-    // ============================================================
-    // testId exact match (highest priority - 100 points)
-    // ============================================================
-    if (hint.recordedTestId && el.attrs?.testId === hint.recordedTestId) {
-      score += 100;
-    }
-    
-    // ============================================================
-    // ARIA-LABEL exact match (highest priority - 100 points)
-    // ============================================================
-    // aria-label is one of the most reliable identifiers
-    // It's used for accessibility and is usually stable
-    if (hint.recordedAriaLabel) {
-      const recordedAriaLabel = hint.recordedAriaLabel.toLowerCase().trim();
-      const elAriaLabel = el.name?.toLowerCase().trim(); // name comes from computeAccessibleName which uses aria-label
-      
-      if (elAriaLabel === recordedAriaLabel) {
-        score += 100; // Exact aria-label match - highest priority!
-        console.log(`[AIAgent] 🎯 Exact aria-label match: "${hint.recordedAriaLabel}" (+100 points)`);
-      } else if (elAriaLabel && elAriaLabel.includes(recordedAriaLabel)) {
-        score += 50; // Partial match (aria-label contains recorded value)
-      } else if (recordedAriaLabel.includes(elAriaLabel || '')) {
-        score += 30; // Reverse partial match
-      }
-    }
-    
-    // ============================================================
-    // NAME/TEXT MATCHING (30 points for match, -10 for empty)
-    // ============================================================
-    const hintText = (hint.targetText || '').toLowerCase();
-    const elName = (el.name || '').toLowerCase();
-    const elText = (el.text || '').toLowerCase();
-    const placeholder = (el.attrs?.placeholder || '').toLowerCase();
-    
-    if (hintText) {
-      // Check for meaningful matches (not empty strings!)
-      if (elName && elName.length > 0 && (elName.includes(hintText) || hintText.includes(elName))) {
-        score += 30;
-      } else if (elText && elText.length > 0 && (elText.includes(hintText) || hintText.includes(elText))) {
-        score += 30;
-      } else if (placeholder && placeholder.length > 0 && placeholder.includes(hintText)) {
-        score += 25;
-      }
-    }
-    
-    // Unlabeled elements get a small bonus if they match the role
-    // (they might be the only element of that type)
-    if ((!elName || elName === '(unlabeled)') && expectedRole) {
-      const validRoles = roleAliases[expectedRole] || [expectedRole];
-      if (validRoles.includes(el.role)) {
-        score += 10; // Small bonus for matching role even when unlabeled
-      }
-    }
-    
-    // ============================================================
-    // CONTEXT MATCHING (Secondary signals)
-    // ============================================================
-    
-    // rowKey match (40 points) - critical for table rows
-    if (hint.recordedRowKey && el.rowKey === hint.recordedRowKey) {
-      score += 40;
-    }
-    
-    // scopePath match to recordedScopeHint (30 points)
-    if (hint.recordedScopeHint && el.scopePath) {
-      const scopeMatch = el.scopePath.some(s => 
-        s.toLowerCase().includes(hint.recordedScopeHint!.toLowerCase())
-      );
-      if (scopeMatch) {
-        score += 30;
-      }
-    }
-    
-    // widgetTitle match (20 points)
-    if (hint.recordedScopeHint && el.widgetTitle) {
-      if (el.widgetTitle.toLowerCase().includes(hint.recordedScopeHint.toLowerCase())) {
-        score += 20;
-      }
-    }
-    
-    // nearbyText overlap (10 points per match)
-    if (hint.nearbyText && el.scopePath) {
-      const overlap = hint.nearbyText.filter(t => 
-        el.scopePath?.some(s => s.toLowerCase().includes(t.toLowerCase()))
-      ).length;
-      score += overlap * 10;
-    }
-    
-    // Text match quality (up to 15 points)
-    if (hint.targetText && (el.name || el.text)) {
-      const hintText = hint.targetText.toLowerCase();
-      const elText = ((el.name || el.text) || '').toLowerCase();
-      
-      if (elText === hintText) {
-        // Exact match
-        score += 15;
-      } else if (elText.includes(hintText) || hintText.includes(elText)) {
-        // Partial match
-        score += 8;
-      }
-    }
-    
-    // Placeholder match (10 points)
-    if (hint.targetPlaceholder && el.attrs?.placeholder) {
-      if (el.attrs.placeholder.toLowerCase().includes(hint.targetPlaceholder.toLowerCase())) {
-        score += 10;
-      }
-    }
-    
-    return score;
-  }
-
   /**
    * Infer the goal from workflow
+   * Delegates to HintExtractor module
    */
   private inferGoal(workflow: SavedWorkflow): string {
-    // Prefer workflow name + description for richer context
-    if (workflow.name && workflow.description) {
-      return `${workflow.name} - ${workflow.description}`;
-    }
-    
-    // Use workflow name as primary goal
-    if (workflow.name) {
-      return workflow.name;
-    }
-
-    // Try to infer from step descriptions
-    const descriptions = workflow.steps
-      .map(s => s.description)
-      .filter(Boolean)
-      .join(' → ');
-    
-    if (descriptions) {
-      return `Complete workflow: ${descriptions}`;
-    }
-
-    return 'Complete the recorded workflow';
+    return this.hintExtractor.inferGoal(workflow);
   }
 
   /**
    * Extract hints from workflow steps
-   * 
-   * Hints are "suggestions" not commands - they tell the AI what was recorded,
-   * but the AI should adapt based on current page state and variable overrides.
+   * Delegates to HintExtractor module
    */
   private extractHints(workflow: SavedWorkflow, variableValues?: Record<string, string>): AgentHint[] {
-    // ⚠️ CRITICAL: For AI Agent, ALWAYS use original steps, never optimized
-    // The optimizer removes "redundant" clicks (like opening menus, waiting for page loads)
-    // but these are ESSENTIAL for AI agent to execute in the correct sequence
-    // 
-    // Example: Optimizer removes "Click Accounts" → "Click New" and just keeps "Navigate to /new"
-    // But AI needs to click through the UI, not navigate directly to URLs
-    // 
-    // LESSON LEARNED: Optimization breaks workflows that require sequential UI interactions
-    let steps = workflow.steps; // ALWAYS use original steps
-    
-    if (workflow.optimizedSteps) {
-      console.warn(`[AIAgent] ⚠️ Ignoring ${workflow.optimizedSteps.length} optimized steps - AI Agent requires original ${workflow.steps.length} steps for reliable execution`);
-      console.warn(`[AIAgent] ⚠️ Optimizer removed ${workflow.steps.length - workflow.optimizedSteps.length} steps which may be essential for sequential UI interactions`);
-    }
-    
-    const originalSteps = workflow.steps; // Keep reference to original steps for elementText lookup
-    
-    // ============================================================================
-    // 📊 VARIABLE SUBSTITUTION: Build step→variable mapping
-    // Variables are detected at recording time and stored in workflow.variables
-    // User provides values in variableValues with keys matching variableName
-    // ============================================================================
-    const stepToVariable: Map<number, { variableName: string; fieldName: string }> = new Map();
-    if (workflow.variables?.variables) {
-      for (const variable of workflow.variables.variables) {
-        stepToVariable.set(variable.stepIndex, {
-          variableName: variable.variableName,
-          fieldName: variable.fieldName,
-        });
-        console.log(`[AIAgent] 📝 Variable mapping: step ${variable.stepIndex} → "${variable.variableName}" (${variable.fieldName})`);
-      }
-    }
-    
-    return steps.map((step, index) => {
-      // Handle TAB_SWITCH steps specially
-      if (step.type === 'TAB_SWITCH') {
-        const tabSwitchPayload = step.payload;
-        const toTitle = (tabSwitchPayload as any).toTitle;
-        const toUrl = (tabSwitchPayload as any).toUrl;
-        
-        return {
-          stepNumber: index + 1,
-          description: step.description || `Switch to tab: ${toTitle || toUrl}`,
-          actionType: 'other',
-          completed: false,
-          stepType: 'TAB_SWITCH',
-          recordedPayload: tabSwitchPayload,
-        } as AgentHint;
-      }
-      
-      const payload = step.payload as WorkflowStepPayload;
-      
-      // If this is an optimized NAVIGATION step, try to find the original step's elementText
-      // The optimizer may have replaced multiple clicks with a single "Navigate directly to [URL]" step
-      let originalElementText = payload.elementText;
-      if (step.type === 'NAVIGATION' && !originalElementText && workflow.optimizationMetadata) {
-        // Find the original steps that were optimized into this step
-        const mapEntry = workflow.optimizationMetadata.optimizationMap.find(
-          entry => entry.optimizedIndex === index
-        );
-        if (mapEntry && mapEntry.originalIndices.length > 0) {
-          // Get elementText from the last original step (usually the one that triggered navigation)
-          const lastOriginalIndex = mapEntry.originalIndices[mapEntry.originalIndices.length - 1];
-          const originalStep = originalSteps[lastOriginalIndex];
-          if (originalStep && isWorkflowStepPayload(originalStep.payload)) {
-            originalElementText = originalStep.payload.elementText;
-            console.log(`[AIAgent] Found original elementText "${originalElementText}" from step ${lastOriginalIndex}`);
-          }
-        }
-      }
-      
-      // Determine action type
-      let actionType: AgentHint['actionType'] = 'other';
-      if (step.type === 'CLICK') actionType = 'click';
-      else if (step.type === 'INPUT') actionType = 'type';
-      else if (step.type === 'NAVIGATION') {
-        // ALWAYS convert NAVIGATION to click - never use direct URL navigation
-        // This prevents the agent from navigating to stale/wrong URLs
-        // (e.g., navigating to Account/001ABC when user is on Account/001XYZ)
-        // The agent should always click through the UI to navigate naturally
-        actionType = 'click';
-        console.log(`[AIAgent] Converting NAVIGATION step to 'click' (always click-through)`);
-      }
-      else if (step.type === 'SCROLL') actionType = 'scroll';
-
-      // Substitute variables in value
-      let value = payload.value;
-      let originalValue = payload.value; // Keep for reference
-      
-      // ============================================================================
-      // 📊 VARIABLE SUBSTITUTION: Use user-provided values
-      // 1. Check if this step has a detected variable → use variableValues[variableName]
-      // 2. Fallback: Replace {{varName}} patterns (legacy support)
-      // ============================================================================
-      const stepVariable = stepToVariable.get(index);
-      if (stepVariable && variableValues && variableValues[stepVariable.variableName] !== undefined) {
-        const userValue = variableValues[stepVariable.variableName];
-        console.log(`[AIAgent] 📝 Variable substitution: step ${index} "${originalValue}" → "${userValue}" (${stepVariable.fieldName})`);
-        value = userValue;
-      } else if (value && variableValues) {
-        // Fallback: Replace {{varName}} patterns
-        value = value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-          return variableValues[varName] ?? match;
-        });
-      }
-
-      // Extract placeholder from context if available
-      const placeholder = payload.context?.uniqueAttributes?.placeholder || 
-                          payload.context?.formCoordinates?.label;
-      
-      // Build flexible description
-      // Instead of: "Enter 1000 in Budget Amount"
-      // Use: "Enter value in Budget Amount (recorded: 1000)"
-      // This tells AI the intent, but allows flexibility
-      let description = step.description;
-      
-      // For NAVIGATION steps, ALWAYS use elementText, not URL
-      // This is critical because optimized workflows may have "Navigate directly to [URL]" descriptions
-      // which confuse the AI into trying to navigate instead of clicking
-      if (step.type === 'NAVIGATION') {
-        // Use originalElementText if we found it from the original steps
-        const elementTextToUse = originalElementText || payload.elementText;
-        
-        if (elementTextToUse) {
-          description = `Click on "${elementTextToUse}"`;
-          console.log(`[AIAgent] NAVIGATION hint: Using elementText "${elementTextToUse}" instead of URL`);
-        } else if (payload.url) {
-          // If no elementText but we have a URL, try to extract meaningful text from the URL
-          // or use a generic description that encourages clicking through UI
-          const urlPath = payload.url.split('/').pop() || '';
-          description = `Navigate to ${urlPath} (click through UI, do not use direct URL navigation)`;
-          console.log(`[AIAgent] NAVIGATION hint: No elementText, using URL path "${urlPath}"`);
-        } else {
-          // Fallback: generic description that emphasizes clicking
-          description = `Click to navigate (do not use direct URL navigation)`;
-          console.log(`[AIAgent] NAVIGATION hint: No elementText or URL, using generic click description`);
-        }
-      } else if (step.type === 'INPUT' && originalValue && originalValue !== value) {
-        // User changed the value
-        const fieldName = placeholder || payload.elementText || 'field';
-        description = `Enter "${value}" in ${fieldName} (originally: "${originalValue}")`;
-      } else if (step.type === 'INPUT' && value) {
-        const fieldName = placeholder || payload.elementText || 'field';
-        description = `Enter "${value}" in ${fieldName}`;
-      } else {
-        description = step.description || `${step.type} on ${payload.elementText || payload.selector}`;
-      }
-
-      // Extract recorded locator data for candidate matching
-      const recordedSelector = payload.selector;
-      
-      // CRITICAL: Extract fallback selectors - these contain container-scoped XPaths!
-      // e.g., "//div[descendant::*[contains(normalize-space(.), 'Widget Title')]]//button"
-      // These are THE KEY to reliably finding the right element among duplicates!
-      const recordedFallbackSelectors = payload.fallbackSelectors || [];
-      
-      const recordedTestId = payload.context?.uniqueAttributes?.['data-testid'] || 
-                            payload.context?.uniqueAttributes?.['data-test-id'];
-      
-      // Extract aria-label from semantic anchors (critical for exact matching)
-      const recordedAriaLabel = payload.aiEvidence?.semanticAnchors?.ariaLabel ||
-                                payload.context?.uniqueAttributes?.['aria-label'];
-      
-      // Extract scope hint from context (e.g., widget/container title)
-      // 🎯 PRIORITY ORDER:
-      // 1. payload.scope (from locatorBundle - MOST RELIABLE)
-      //    - WIDGET: use scope.title
-      //    - NEAREST_SECTION: use scope.headingText
-      //    - TABLE_ROW: use scope.anchorText
-      //    - MODAL: no specific hint needed
-      // 2. payload.context?.container?.text (legacy DOM-based detection)
-      // 3. DO NOT USE semanticAnchors.textLabel (that's the element's OWN text!)
-      let recordedScopeHint: string | undefined;
-      
-      if (payload.scope) {
-        switch (payload.scope.kind) {
-          case 'WIDGET':
-            recordedScopeHint = (payload.scope as any).title;
-            break;
-          case 'NEAREST_SECTION':
-            recordedScopeHint = (payload.scope as any).headingText;
-            break;
-          case 'TABLE_ROW':
-            recordedScopeHint = (payload.scope as any).anchorText;
-            break;
-          case 'MODAL':
-            // Modal scope doesn't need a specific hint (modal detection is automatic)
-            recordedScopeHint = undefined;
-            break;
-          default:
-            recordedScopeHint = undefined;
-        }
-      }
-      
-      // Fallback: legacy container.text
-      if (!recordedScopeHint) {
-        recordedScopeHint = payload.context?.container?.text;
-      }
-      
-      // DO NOT use aiEvidence.semanticAnchors.textLabel as fallback!
-      // That's the element's own text, not the container!
-      
-      // AI widget context available for future use when it's more reliable
-      const aiWidgetTitle = payload.aiWidgetContext?.widgetTitle;
-      const aiWidgetConfidence = payload.aiWidgetContext?.confidence || 0;
-      
-      if (recordedScopeHint) {
-        console.log(`[AIAgent] 📍 Using DOM-detected scope: "${recordedScopeHint}"`);
-        if (aiWidgetTitle && aiWidgetTitle !== recordedScopeHint) {
-          console.log(`[AIAgent] ℹ️ AI suggested "${aiWidgetTitle}" (confidence: ${aiWidgetConfidence.toFixed(2)}) but using DOM result`);
-        }
-      }
-      
-      // Extract row key if element was in a table
-      const recordedRowKey = payload.context?.gridCoordinates?.rowHeader || 
-                            payload.context?.gridCoordinates?.cellReference;
-      
-      // Extract nearby anchor text for disambiguation
-      const nearbyText = payload.aiEvidence?.semanticAnchors?.nearbyText || 
-                        payload.context?.siblings?.before || 
-                        [];
-
-      // Extract natural language context if available (from workflow-translator)
-      const stepWithNL = step as any;
-      const naturalLanguage = stepWithNL.naturalLanguage ? {
-        intent: stepWithNL.naturalLanguage.intent,
-        precondition: stepWithNL.naturalLanguage.precondition,
-        expectedOutcome: stepWithNL.naturalLanguage.expectedOutcome,
-        dependencies: stepWithNL.naturalLanguage.dependencies || [],
-      } : undefined;
-      
-      // Extract scroll amount for SCROLL actions
-      let scrollAmount: number | undefined = undefined;
-      let scrollDirection: 'up' | 'down' | 'left' | 'right' | undefined = undefined;
-      let scrollContainer: string | undefined = undefined;
-      if (step.type === 'SCROLL') {
-        // Extract scroll container selector (critical for apps like Gainsight!)
-        // ALWAYS extract this, even if scroll amount is unknown
-        scrollContainer = (payload as any).elementScrollContainer?.selector ||
-                         (payload as any).scrollContainer?.selector;
-        
-        // Get viewport info which contains scroll delta
-        const viewport = payload.viewport;
-        const elementScrollContainer = viewport?.elementScrollContainer;
-        
-        // Debug: Show FULL payload to see what we're working with
-        console.log(`[AIAgent] 📜 SCROLL step payload:`, JSON.stringify({
-          viewport: viewport ? {
-            scrollDeltaX: viewport.scrollDeltaX,
-            scrollDeltaY: viewport.scrollDeltaY,
-            scrollX: viewport.scrollX,
-            scrollY: viewport.scrollY,
-            elementScrollContainer,
-          } : null,
-          // Legacy fields
-          deltaY: (payload as any).deltaY,
-          scrollAmount: (payload as any).scrollAmount,
-        }, null, 2));
-        
-        // 🎯 NEW: Extract scroll delta from viewport (recorded by new scroll capture)
-        // Priority: viewport.scrollDeltaY > container.scrollDeltaY > legacy deltaY > legacy scrollAmount
-        let scrollDelta: number | undefined = undefined;
-        
-        // Check container scroll delta first (for container scrolls)
-        if (elementScrollContainer?.scrollDeltaY !== undefined) {
-          scrollDelta = elementScrollContainer.scrollDeltaY;
-          console.log(`[AIAgent] ✅ Found container scrollDeltaY: ${scrollDelta}px`);
-        }
-        // Check viewport scroll delta (for window scrolls)
-        else if (viewport?.scrollDeltaY !== undefined) {
-          scrollDelta = viewport.scrollDeltaY;
-          console.log(`[AIAgent] ✅ Found viewport scrollDeltaY: ${scrollDelta}px`);
-        }
-        // Legacy: check old deltaY field
-        else if ((payload as any).deltaY !== undefined) {
-          scrollDelta = (payload as any).deltaY;
-          console.log(`[AIAgent] ✅ Found legacy deltaY: ${scrollDelta}px`);
-        }
-        // Legacy: check scrollAmount field
-        else if ((payload as any).scrollAmount !== undefined) {
-          scrollDelta = (payload as any).scrollAmount;
-          console.log(`[AIAgent] ✅ Found legacy scrollAmount: ${scrollDelta}px`);
-        }
-        
-        // If we have a delta, use it
-        if (typeof scrollDelta === 'number' && scrollDelta !== 0) {
-          scrollAmount = Math.abs(Math.round(scrollDelta));
-          scrollDirection = scrollDelta > 0 ? 'down' : 'up';
-          console.log(`[AIAgent] ✅ Using scroll delta: ${scrollAmount}px ${scrollDirection} in "${scrollContainer || 'window'}"`);
-        } else {
-          // Fallback: use a reasonable default scroll amount
-          console.log(`[AIAgent] ⚠️ No scroll delta in payload, using default 400px in "${scrollContainer || 'window'}"`);
-          const desc = description.toLowerCase();
-          scrollDirection = desc.includes('up') ? 'up' : 
-                           desc.includes('left') ? 'left' :
-                           desc.includes('right') ? 'right' : 'down';
-          scrollAmount = 400; // Reasonable default for scrolling in dashboards
-        }
-        
-        // CRITICAL: Always log the scroll container so we can debug
-        if (scrollContainer) {
-          console.log(`[AIAgent] ✅ Found scroll container: "${scrollContainer}"`);
-        } else {
-          console.warn('[AIAgent] ⚠️ No scroll container recorded - will scroll window');
-        }
-      }
-
-      return {
-        stepNumber: index + 1,
-        description,
-        actionType,
-        // For NAVIGATION steps, prefer originalElementText if we found it
-        targetText: (step.type === 'NAVIGATION' && originalElementText) ? originalElementText : payload.elementText,
-        targetRole: payload.elementRole,
-        targetPlaceholder: placeholder,
-        targetSelector: payload.selector,
-        value,
-        completed: false,
-        referenceScreenshot: payload.visualSnapshot?.annotated || payload.visualSnapshot?.viewport,
-        clickPoint: payload.visualSnapshot?.clickPoint,
-        
-        // New fields for candidate matching
-        recordedSelector,
-        recordedFallbackSelectors: recordedFallbackSelectors.length > 0 ? recordedFallbackSelectors : undefined,
-        recordedTestId,
-        recordedAriaLabel,
-        recordedScopeHint,
-        recordedRowKey,
-        nearbyText: nearbyText.length > 0 ? nearbyText : undefined,
-        
-        // For SCROLL actions
-        scrollAmount,
-        scrollDirection,
-        scrollContainer,
-        
-        // Natural language context
-        naturalLanguage,
-        
-        // Iframe context - for cross-frame execution
-        iframeContext: payload.iframeContext,
-      };
-    });
+    return this.hintExtractor.extractHints(workflow, variableValues);
   }
 
   /**
    * Check if the current hint's expected outcome is already satisfied
-   * Returns a skip reason if satisfied, null otherwise
+   * Delegates to HintExtractor module
    */
   private checkIfOutcomeAlreadySatisfied(
     hint: AgentHint,
     observation: AgentObservation
   ): string | null {
-    if (!hint.naturalLanguage?.expectedOutcome) {
-      return null;
-    }
-    
-    const outcome = hint.naturalLanguage.expectedOutcome.toLowerCase();
-    
-    // Parse the observation's domMapText to check current state
-    const domMapText = observation.domMapText.toLowerCase();
-    
-    // Check if dropdown-related outcome is satisfied
-    // BUT: Don't skip if this is an OPTION CLICK (selecting from an open dropdown)
-    if ((outcome.includes('dropdown') || outcome.includes('menu')) && 
-        (outcome.includes('open') || outcome.includes('appear') || outcome.includes('show'))) {
-      // If the hint is clicking an option/menuitem role, DON'T skip even if dropdown is open
-      // because we need to SELECT from the dropdown, not just open it
-      const isOptionClick = hint.targetRole === 'option' || hint.targetRole === 'menuitem' || 
-                           hint.actionType === 'click' && (hint.targetText || '').length > 0;
-      
-      if (!isOptionClick && (domMapText.includes('dropdown is open') || domMapText.includes('active dropdown'))) {
-        return 'Dropdown is already open';
-      }
-    }
-    
-    // Check if modal-related outcome is satisfied
-    if ((outcome.includes('modal') || outcome.includes('dialog') || outcome.includes('popup') || outcome.includes('form')) && 
-        (outcome.includes('open') || outcome.includes('appear') || outcome.includes('show'))) {
-      if (domMapText.includes('modal is open') || domMapText.includes('active modal')) {
-        return 'Modal/dialog is already open';
-      }
-    }
-    
-    // Check if field value is already set
-    if (hint.actionType === 'type' && hint.value) {
-      // Look for the field in the DOM map text
-      const targetText = (hint.targetText || hint.targetPlaceholder || '').toLowerCase();
-      if (targetText) {
-        // Regex to find the field and its current value
-        const fieldPattern = new RegExp(`\\[(?:textbox|spinbutton)\\][^\\n]*(?:${targetText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})[^\\n]*value\\s*=\\s*["']?${hint.value}["']?`, 'i');
-        if (fieldPattern.test(observation.domMapText)) {
-          return `Field already has value "${hint.value}"`;
-        }
-      }
-    }
-    
-    return null;
+    return this.hintExtractor.checkIfOutcomeAlreadySatisfied(hint, observation);
   }
 
   /**
@@ -3423,6 +2755,83 @@ export class AIAgent {
     if (this.state.status === 'running') {
       this.state.status = 'paused';
     }
+  }
+
+  /**
+   * Detect if the action was intermediate (preparation) vs goal (completion)
+   * 
+   * Example: Hint says "CLICK on BOGO" but AI clicked combobox to open dropdown.
+   * This is an intermediate action - the goal (selecting BOGO) hasn't been achieved yet.
+   * 
+   * @returns true if action was intermediate, false if it achieved the hint's goal
+   */
+  private detectIntermediateAction(
+    hint: AgentHint,
+    action: AgentAction,
+    observation: AgentObservation
+  ): boolean {
+    // Strategy 1: Dropdown selection detection
+    // If hint mentions a specific option text (like "BOGO", "UberEats Growth")
+    // AND the action was a click on combobox/listbox (NOT the option itself)
+    // THEN it's intermediate (opening dropdown to reveal options)
+    
+    if (action.type === 'click' && hint.actionType === 'click') {
+      const hintTargetText = (hint.targetText || '').toLowerCase().trim();
+      const hintDescription = (hint.description || '').toLowerCase();
+      const actionTargetRole = action.params.target?.role?.toLowerCase() || '';
+      const actionTargetText = (action.params.target?.text || action.params.target?.name || '').toLowerCase().trim();
+      
+      // Check if hint is about selecting a specific option
+      const hintMentionsSpecificOption = hintTargetText.length > 0 && 
+        !hintDescription.includes('dropdown') && 
+        !hintDescription.includes('menu') &&
+        !hintDescription.includes('combobox');
+      
+      // Check if action clicked a combobox/listbox (opening it)
+      const actionClickedDropdownTrigger = 
+        actionTargetRole === 'combobox' || 
+        actionTargetRole === 'listbox' ||
+        actionTargetRole === 'button';  // Some dropdowns use buttons as triggers
+      
+      // Check if the action's target text matches the hint's target text
+      const actionMatchesHintTarget = 
+        actionTargetText.length > 0 && 
+        hintTargetText.length > 0 &&
+        (actionTargetText.includes(hintTargetText) || hintTargetText.includes(actionTargetText));
+      
+      if (hintMentionsSpecificOption && actionClickedDropdownTrigger && !actionMatchesHintTarget) {
+        // Hint wanted specific option, but action clicked dropdown trigger
+        // This is intermediate - need to select the actual option next
+        console.log(`[AIAgent] 🔍 Intermediate action detected:`);
+        console.log(`  - Hint target: "${hintTargetText}"`);
+        console.log(`  - Action clicked: ${actionTargetRole} "${actionTargetText}"`);
+        console.log(`  - Reason: Opened dropdown but didn't select option yet`);
+        return true;
+      }
+      
+      // Additional check: If dropdown just opened (observation shows it)
+      // AND hint target text doesn't match action target
+      // THEN it's intermediate
+      if (observation.hasOpenDropdown && hintMentionsSpecificOption && !actionMatchesHintTarget) {
+        console.log(`[AIAgent] 🔍 Intermediate action detected:`);
+        console.log(`  - Hint target: "${hintTargetText}"`);
+        console.log(`  - Dropdown opened: YES`);
+        console.log(`  - Options available:`, observation.dropdownOptions);
+        console.log(`  - Reason: Dropdown opened but option not selected yet`);
+        return true;
+      }
+    }
+    
+    // Strategy 2: Modal/popup opening detection
+    // If hint is about interacting with content INSIDE a modal
+    // AND action opened the modal (but didn't interact with content yet)
+    // THEN it's intermediate
+    
+    // For now, we'll focus on dropdown detection as that's the primary issue
+    // Future: Add modal detection, "Show more" button detection, etc.
+    
+    // Default: Assume action achieved the goal
+    return false;
   }
 
   private sleep(ms: number): Promise<void> {

@@ -13,6 +13,7 @@
 import { aiConfig } from './ai-config';
 import type { WorkflowStep, WorkflowStepPayload } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
+import { SpreadsheetHelpers } from './spreadsheet-helpers';
 
 /**
  * Definition of a detected variable in a workflow
@@ -133,7 +134,56 @@ export class VariableDetector {
     console.log(`[VariableDetector] Starting detection for ${steps.length} total steps`);
     console.log(`[VariableDetector] Step types:`, steps.map(s => s.type));
 
-    // Filter steps to only those that could contain variables
+    // FAST PATH: Extract spreadsheet variables directly (no AI needed)
+    const spreadsheetVariables: any[] = [];
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (step.type === 'INPUT' && isWorkflowStepPayload(step.payload)) {
+        const payload = step.payload;
+        // Use centralized helper to extract cell reference
+        const cellRef = SpreadsheetHelpers.extractCellReference(payload);
+        
+        if (cellRef) {
+          const variable = {
+            stepIndex: i,
+            stepId: `${payload.timestamp}`,
+            stepType: step.type,
+            fieldName: cellRef, // Use cell reference as field name (e.g., "A2", "B2")
+            variableName: SpreadsheetHelpers.generateVariableName(cellRef), // e.g., "cellA2", "cellB2"
+            defaultValue: payload.value || '',
+            isVariable: true,
+            confidence: 1.0, // 100% confident - we captured it directly
+            reasoning: `Spreadsheet INPUT in cell ${cellRef} - using cell reference as variable name`,
+            cellReference: cellRef,
+          };
+          console.log(`[VariableDetector] 📊 Found spreadsheet INPUT at step ${i}:`, {
+            stepIndex: i,
+            stepId: variable.stepId,
+            cellRef,
+            value: payload.value,
+            fieldName: variable.fieldName,
+            variableName: variable.variableName,
+            fromSpreadsheetContext: !!payload.spreadsheetContext,
+            fromGridCoordinates: !!payload.context?.gridCoordinates,
+          });
+          spreadsheetVariables.push(variable);
+        }
+      }
+    }
+    
+    if (spreadsheetVariables.length > 0) {
+      console.log(`[VariableDetector] ⚡ Created ${spreadsheetVariables.length} spreadsheet variables instantly (no AI needed):`, 
+        spreadsheetVariables.map(v => `${v.fieldName}="${v.defaultValue}"`));
+      
+      // Return spreadsheet variables immediately - no AI analysis needed!
+      return {
+        variables: spreadsheetVariables,
+        detectedAt: Date.now(),
+        analysisCount: 0, // No AI calls made
+      };
+    }
+
+    // Filter steps to only those that could contain variables (NON-spreadsheet steps)
     const stepsForAnalysis = this.filterStepsForAnalysis(steps);
 
     if (stepsForAnalysis.length === 0) {
@@ -155,7 +205,7 @@ export class VariableDetector {
     })));
 
     try {
-      // Call Edge Function
+      // Call Edge Function for NON-spreadsheet steps only
       const response = await this.callEdgeFunction(stepsForAnalysis, steps, initialFullPageSnapshot);
       
       // Filter to only confirmed variables
@@ -596,9 +646,9 @@ export class VariableDetector {
       }
     }
 
-    // Extract column header and cell reference from grid coordinates (for spreadsheets)
-    const columnHeader = payload.context?.gridCoordinates?.columnHeader;
-    let cellReference = payload.context?.gridCoordinates?.cellReference;
+    // Extract column header and cell reference using centralized helpers
+    const columnHeader = SpreadsheetHelpers.extractColumnHeader(payload) || undefined;
+    let cellReference = SpreadsheetHelpers.extractCellReference(payload) || undefined;
     
     // CRITICAL FIX: If label matches a cell reference pattern (A15, B15, etc.) and cellReference doesn't match,
     // use the label as the cellReference. This fixes timing issues where Name Box hasn't updated yet.
@@ -613,6 +663,8 @@ export class VariableDetector {
       console.log(`[VariableDetector] Spreadsheet context for step ${stepIndex}:`, {
         columnHeader,
         cellReference,
+        fromSpreadsheetContext: !!payload.spreadsheetContext,
+        fromGridCoordinates: !!payload.context?.gridCoordinates,
         rowIndex: payload.context?.gridCoordinates?.rowIndex,
         columnIndex: payload.context?.gridCoordinates?.columnIndex,
       });

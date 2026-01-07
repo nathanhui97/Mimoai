@@ -343,27 +343,23 @@ async function analyzeStep(
     pageContext.url.includes('office365.com')
   ) : false;
   
-  // CRITICAL: For spreadsheet steps, we MUST have the snapshot to read column headers
-  // Log warning if snapshot is missing but should be included
-  const needsSnapshot = isDataTablePage || isSpreadsheetStep || isSpreadsheetUrl;
+  // For spreadsheet steps, skip snapshot-based header detection
+  // Just use cell reference as variable name (users can rename in UI)
+  const needsSnapshot = false; // Disabled - use cell references instead
   const hasSnapshot = !!initialFullPageSnapshot;
   const shouldIncludeSnapshot = !!(hasSnapshot && needsSnapshot);
   
-  if (needsSnapshot && !hasSnapshot) {
-    console.warn(`[detect_variables] ⚠️ WARNING: Step ${metadata.stepIndex} needs snapshot but it's missing!`, {
-      isSpreadsheetStep,
-      isDataTablePage,
-      isSpreadsheetUrl,
-      cellReference: metadata.cellReference,
-      columnHeader: metadata.columnHeader,
-      pageUrl: pageContext?.url?.substring(0, 80) || 'N/A',
-      message: 'Snapshot is required to read column headers from spreadsheet. AI will fall back to cell references.',
-    });
-  }
+  // Snapshot-based header detection disabled for reliability
+  // Using cell references as default variable names instead
+  console.log(`[detect_variables] Using cell reference as variable name for step ${metadata.stepIndex}:`, {
+    cellReference: metadata.cellReference,
+    columnHeader: metadata.columnHeader,
+    message: 'Snapshot-based header detection disabled. Users can rename variables in UI.',
+  });
   
   console.log(`[detect_variables] analyzeStep for step ${metadata.stepIndex} - Full page snapshot check:`, {
     hasInitialSnapshot: hasSnapshot,
-    snapshotLength: initialFullPageSnapshot?.substring(0, 50) || 'N/A', // First 50 chars for logging
+    snapshotLength: initialFullPageSnapshot?.length || 0,
     pageType: pageContext?.pageType,
     pageUrl: pageContext?.url?.substring(0, 80) || 'N/A', // First 80 chars
     isDataTablePage,
@@ -373,6 +369,8 @@ async function analyzeStep(
     shouldIncludeSnapshot,
     cellReference: metadata.cellReference,
     columnHeader: metadata.columnHeader,
+    label: metadata.label,
+    value: metadata.value,
   });
   
   // Add initial full page snapshot FIRST (before cell snapshots) so AI sees headers first
@@ -462,8 +460,32 @@ CRITICAL: fieldName must be the actual header text, NOT "${cellRef}" or "${colum
   if (!afterSnapshot) {
     if (metadata.stepType === 'INPUT' || metadata.stepType === 'KEYBOARD') {
       // For INPUT steps without snapshots, add a note in the prompt
+      let inputNote = '\n\nNOTE: No screenshot available for this input field, but the value entered is: "' + (metadata.value || '') + '".';
+      
+      // ENHANCED: For spreadsheet steps, provide additional context
+      if (metadata.cellReference) {
+        inputNote += `\n\nThis is a SPREADSHEET INPUT in cell ${metadata.cellReference}.`;
+        
+        if (metadata.columnHeader) {
+          // We have the column header - use it!
+          inputNote += `\nColumn header: "${metadata.columnHeader}"`;
+          inputNote += `\n\nIMPORTANT: Use the column header "${metadata.columnHeader}" as the fieldName. Do NOT use the cell reference "${metadata.cellReference}" as fieldName.`;
+        } else {
+          // No column header - give AI guidance
+          const columnLetter = metadata.cellReference.charAt(0);
+          inputNote += `\nColumn letter: ${columnLetter}`;
+          inputNote += `\n\nColumn header was not captured. Infer the field name based on:`;
+          inputNote += `\n1. The value being entered: "${metadata.value}"`;
+          inputNote += `\n2. Common spreadsheet patterns (A=Name, B=Email, C=Phone, etc.)`;
+          inputNote += `\n3. Context from the label: "${metadata.label || 'N/A'}"`;
+          inputNote += `\n\nIMPORTANT: Provide a meaningful fieldName (e.g., "Name", "Email", "Phone"), NOT "${metadata.cellReference}" or "${columnLetter}".`;
+        }
+      } else {
+        inputNote += ' Analyze based on the value, field label, and input type.';
+      }
+      
       parts[0] = { 
-        text: prompt + '\n\nNOTE: No screenshot available for this input field, but the value entered is: "' + (metadata.value || '') + '". Analyze based on the value, field label, and input type.'
+        text: prompt + inputNote
       };
     } else if (metadata.stepType === 'CLICK' && metadata.isDropdown) {
       // For DROPDOWN CLICK steps without snapshots, add a note with available options

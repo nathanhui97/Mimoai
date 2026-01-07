@@ -425,31 +425,41 @@ You are working in a spreadsheet (Google Sheets / Excel).
 Active cell: ${ctx.sheetState.activeCell?.reference || 'unknown'}
 Sheet: "${ctx.sheetState.sheetName}"
 
-### 🚨 CRITICAL: YOU MUST RETURN cellRef FOR ALL SPREADSHEET ACTIONS
+### 🚨 CRITICAL: YOU MUST RETURN cellRef AND text FOR ALL SPREADSHEET TYPE ACTIONS
 
 When the hint says "Enter X" or "Type Y" on a spreadsheet:
 1. **Extract the cell reference** from the hint's recordedAriaLabel (like "A2", "B3", "C5")
-2. **Return it as cellRef** in your response
+2. **Use the EXACT value from "Value to enter" field** as the text parameter
+3. **Return both cellRef AND text** in your response
 
 ### RESPONSE FORMAT FOR SPREADSHEETS
 
 For typing text into a cell:
 {"action": "type", "cellRef": "A2", "text": "the value to type"}
 
+CRITICAL: The "text" field MUST be the EXACT value from the hint's "Value to enter" field.
+DO NOT extract the value from the description - use the "Value to enter" field!
+
 For clicking a cell:
 {"action": "click", "cellRef": "B3"}
 
-### How to Find the Cell Reference
+### How to Find the Cell Reference and Value
 
 Look at the current hint's information:
 - recordedAriaLabel might say "A2" or "Cell B3" → Extract the cell reference
+- "Value to enter" shows the EXACT text to type → Use this as the text parameter
 - Check fallback selectors for patterns like [aria-label="C5"]
 - Use the active cell if no cell reference in hint
 
 ### Example Workflow
 
-Hint: "Enter 'nathan' in field", recordedAriaLabel: "A2"
+Hint: "Enter 'nathan' in field", recordedAriaLabel: "A2", Value to enter: "nathan"
 → Response: {"action": "type", "cellRef": "A2", "text": "nathan"}
+NOTE: The "text" value comes from "Value to enter", not from the description!
+
+Hint: "Enter value", recordedAriaLabel: "B3", Value to enter: "john@example.com"
+→ Response: {"action": "type", "cellRef": "B3", "text": "john@example.com"}
+NOTE: Use the EXACT value from "Value to enter" field!
 
 Hint: "CLICK on element", recordedAriaLabel: "B3"
 → Response: {"action": "click", "cellRef": "B3"}
@@ -458,6 +468,7 @@ Hint: "CLICK on element", recordedAriaLabel: "B3"
 - Always execute the typing action
 - Don't assume cells are already filled
 - The hardcoded engine will handle the actual typing
+- ALWAYS use the value from "Value to enter" field, not from the description
 `;
   }
 
@@ -656,6 +667,10 @@ PRIORITY ORDER (follow strictly):
 📜 AVAILABLE ACTIONS:
 - **click**: Click a button/link/option
 - **type**: Type text into an input field
+  - ⚠️ CRITICAL: For TYPE actions, you MUST use the value from "Value to enter" field in the current hint
+  - DO NOT extract the value from the description - use the "Value to enter" field exactly as shown
+  - Example: If hint shows "Value to enter: john@example.com", your response must have "text": "john@example.com"
+  - Example response: {"action": "type", "target": {...}, "text": "value from Value to enter field", ...}
 - **select**: Select an option from a dropdown
 - **scroll**: Scroll to reveal hidden elements (use when needed element isn't visible)
   - Use with "direction": "down" or "up" and "amount": pixels (e.g., 300)
@@ -732,7 +747,7 @@ YOUR RESPONSE MUST LOOK EXACTLY LIKE THIS:
 REQUIRED FIELDS:
 - "chooseCandidateIndex": INTEGER from 0 to ${currentCandidates.length - 1} (REQUIRED!)
 - "action": "click" | "type" | "select" | etc.
-- "text": "text to type" (only if action is type)
+- "text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
 - "reasoning": "why you chose this candidate"
 - "confidence": 0.0-1.0
 - "hintStepIndex": ${currentHintIndex}
@@ -750,7 +765,7 @@ WHEN NO CANDIDATES (free-form target):
     "id": "id attribute if shown",
     "scopeHint": "USE THE recordedScopeHint FROM CURRENT HINT IF PROVIDED - this is critical for disambiguation!"
   },
-  "text": "text to type (for type action)",
+  "text": "EXACT value from 'Value to enter' field (REQUIRED for type action - use the exact value shown in the current hint!)",
   "option": "option text (for select action)",
   "url": "https://example.com (for open_tab action)",
   "direction": "down" | "up" (for scroll action),

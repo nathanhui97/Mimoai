@@ -504,14 +504,61 @@ function buildPrompt(payload: StepDescriptionPayload): string {
     if (step.payload.url) prompt += `- URL: ${step.payload.url}\n`;
     prompt += `\nGenerate a description like: "Navigate to [page name]" or "Go to [page/URL]"\n`;
   } else if (step.type === 'KEYBOARD') {
-    if (step.payload.keyboardDetails?.key) {
-      prompt += `- Key: ${step.payload.keyboardDetails.key}\n`;
-    }
+    const keyboardDetails = step.payload.keyboardDetails;
+    const isCopy = keyboardDetails?.key?.toLowerCase() === 'c' && 
+                   (keyboardDetails.modifiers?.ctrl || keyboardDetails.modifiers?.meta);
+    const isPaste = keyboardDetails?.key?.toLowerCase() === 'v' && 
+                    (keyboardDetails.modifiers?.ctrl || keyboardDetails.modifiers?.meta);
     
-    if (hasVisualSnapshot) {
-      prompt += `\n🎯 Use the visual snapshot to understand the context. Generate: "Press [key]" or "Press [key] to [action]"\n`;
+    if (isCopy) {
+      const clipboardData = step.payload.aiEvidence?.clipboardMetadata;
+      if (clipboardData?.copiedValue) {
+        prompt += `\n🎯 COPY OPERATION DETECTED\n\n`;
+        prompt += `The user pressed Ctrl+C (or Cmd+C on Mac) to copy data.\n`;
+        prompt += `- Copied Value: "${clipboardData.copiedValue.substring(0, 200)}${clipboardData.copiedValue.length > 200 ? '...' : ''}"\n`;
+        prompt += `- Source Location: ${clipboardData.sourceSelector}\n\n`;
+        prompt += `Your task: Generate a description that explains WHAT was copied and its semantic meaning.\n`;
+        prompt += `Examples:\n`;
+        prompt += `- If it's an email: "Copy email address from contact field"\n`;
+        prompt += `- If it's a name: "Copy contact name"\n`;
+        prompt += `- If it's a phone number: "Copy phone number"\n`;
+        prompt += `- If it's text: "Copy text: [first 20 chars]"\n`;
+        prompt += `\nAnalyze the copied value and provide semantic reasoning about what type of data it is.\n`;
+      } else {
+        prompt += `- Key: Copy (Ctrl+C/Cmd+C)\n`;
+        prompt += `- Action: User copied selected text\n`;
+      }
+    } else if (isPaste) {
+      const clipboardData = step.payload.aiEvidence?.clipboardMetadata;
+      if (clipboardData?.copiedValue) {
+        prompt += `\n🎯 PASTE OPERATION DETECTED\n\n`;
+        prompt += `The user pressed Ctrl+V (or Cmd+V on Mac) to paste previously copied data.\n`;
+        prompt += `- Pasted Value: "${clipboardData.copiedValue.substring(0, 200)}${clipboardData.copiedValue.length > 200 ? '...' : ''}"\n`;
+        prompt += `- Original Source: ${clipboardData.sourceSelector}\n`;
+        if (step.payload.label) {
+          prompt += `- Target Field: "${step.payload.label}"\n`;
+        }
+        prompt += `\nYour task: Generate a description that explains WHAT was pasted and WHERE.\n`;
+        prompt += `Examples:\n`;
+        prompt += `- "Paste email address into contact form"\n`;
+        prompt += `- "Paste copied name into name field"\n`;
+        prompt += `- "Paste phone number into phone field"\n`;
+        prompt += `\nInclude both the semantic meaning of the data AND the target location.\n`;
+      } else {
+        prompt += `- Key: Paste (Ctrl+V/Cmd+V)\n`;
+        prompt += `- Action: User pasted clipboard content\n`;
+      }
     } else {
-      prompt += `\nGenerate a description like: "Press [key]" or "Press [key] to [action]"\n`;
+      // Existing handling for other keys (Enter, Tab, Escape)
+      if (step.payload.keyboardDetails?.key) {
+        prompt += `- Key: ${step.payload.keyboardDetails.key}\n`;
+      }
+      
+      if (hasVisualSnapshot) {
+        prompt += `\n🎯 Use the visual snapshot to understand the context. Generate: "Press [key]" or "Press [key] to [action]"\n`;
+      } else {
+        prompt += `\nGenerate a description like: "Press [key]" or "Press [key] to [action]"\n`;
+      }
     }
   } else if (step.type === 'SCROLL') {
     if (step.payload.viewport) {

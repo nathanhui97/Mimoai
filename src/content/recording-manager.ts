@@ -1,5 +1,8 @@
 /**
  * RecordingManager - Manages event listeners and captures user interactions
+ * 
+ * This is the main orchestrator for recording user actions.
+ * Delegates to specialized modules for element finding, step enrichment, and publishing.
  */
 
 import { SelectorEngine } from './selector-engine';
@@ -26,23 +29,25 @@ import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep, WorkflowStepPayload } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 // import type { PageAnalysis, PageType } from '../types/visual'; // Removed - not needed anymore
-// Reliable Replayer enhancements
-import { buildLocatorBundle } from '../lib/locator-builder';
-import { 
-  inferClickIntent, 
-  inferInputIntent, 
-  inferKeyboardIntent,
-  inferSuccessCondition,
-  buildStepGoal 
-} from '../lib/intent-inference';
+// Reliable Replayer enhancements - now in StepEnricher module
 import { WidgetIdentifierService } from '../lib/widget-identifier';
 import type { LocatorBundle } from '../types/locator';
 import type { Intent, StepGoal } from '../types/intent';
 import type { SuggestedCondition } from '../types/conditions';
 
+// Extracted recording modules
+import { ElementFinder } from './recording/element-finder';
+import { StepPublisher } from './recording/step-publisher';
+import { StepEnricher } from './recording/step-enricher';
+
 export class RecordingManager {
   // Feature flag for reliable replayer enhancements
   private readonly ENABLE_RELIABLE_RECORDING = true;
+  
+  // Extracted modules
+  private readonly elementFinder: ElementFinder;
+  private readonly stepPublisher: StepPublisher;
+  private readonly stepEnricher: StepEnricher;
   
   private isRecording: boolean = false;
   private inputDebounceTimer: number | null = null;
@@ -54,6 +59,7 @@ export class RecordingManager {
   private mousedownHandler: ((event: MouseEvent) => void) | null = null;
   private scrollHandler: ((event: Event) => void) | null = null;
   private copyHandler: ((event: ClipboardEvent) => void) | null = null;
+  private pasteHandler: ((event: ClipboardEvent) => void) | null = null;
   private scrollDebounceTimer: number | null = null;
   private lastScrollStep: { scrollX: number; scrollY: number; timestamp: number; container?: Element } | null = null;
   private pendingScrollEvent: Event | null = null; // Store the scroll event for processing after debounce
@@ -85,10 +91,21 @@ export class RecordingManager {
   // Track pending click callbacks that can be forcibly executed on stop()
   private pendingClickCallbacks: Array<{ callback: () => Promise<void>; timeoutId?: number }> = [];
   // NOTE: Removed currentPageAnalysis and pageAnalysisPending to prevent zoom issues
-  // Full page snapshot at recording start (for spreadsheet column header detection)
-  private initialFullPageSnapshot: string | null = null;
-  // Promise for tracking snapshot capture completion
-  private initialSnapshotPromise: Promise<void> | null = null;
+  // NOTE: Removed initialFullPageSnapshot and initialSnapshotPromise
+  // Snapshot-based header detection was unreliable - now using cell references as default variable names
+  // private initialFullPageSnapshot: string | null = null;
+  // private initialSnapshotPromise: Promise<void> | null = null;
+
+  constructor() {
+    // Initialize extracted modules
+    this.elementFinder = new ElementFinder();
+    this.stepEnricher = new StepEnricher({ enableReliableRecording: this.ENABLE_RELIABLE_RECORDING });
+    this.stepPublisher = new StepPublisher(() => ({
+      currentTabUrl: this.currentTabUrl,
+      currentTabTitle: this.currentTabTitle,
+      currentTabIndex: this.currentTabIndex,
+    }));
+  }
 
   /**
    * Start recording - attach event listeners
@@ -114,8 +131,10 @@ export class RecordingManager {
     // The page analysis captures a full page screenshot which zooms out on spreadsheets
     // console.log('🎨 GhostWriter: Skipping page type analysis to prevent zoom issues');
 
-    // NOTE: Removed initial snapshot capture to prevent zoom/flash issues
-    // Users will rename variables in the UI instead
+    // Snapshot capture disabled - using cell references as variable names instead
+    // This is more reliable than trying to detect headers from screenshots
+    // Users can rename variables in the UI after recording
+    console.log('📸 GhostWriter: Snapshot-based header detection disabled (using cell references)');
 
     // Setup click handler - use CAPTURE phase to catch events before React/Base UI stops propagation
     // This is critical for dropdown options that might have stopPropagation() called
@@ -137,12 +156,40 @@ export class RecordingManager {
 
     // Setup keyboard handler - only capture important keys (Enter, Tab, Escape)
     // Wrap in async handler since handleKeyboard is now async
+    // Use capture phase (true) to catch events even if they're stopped from bubbling
     this.keyboardHandler = ((event: KeyboardEvent) => {
+      // Debug logging for copy/paste shortcuts to help diagnose issues
+      const key = event.key?.toLowerCase();
+      const hasCopyPasteKey = (key === 'c' || key === 'v') && (event.ctrlKey || event.metaKey);
+      
+      // TEMPORARY: Log ALL keyboard events with modifiers to debug
+      if (event.ctrlKey || event.metaKey) {
+        console.log('⌨️ GhostWriter: Keyboard event with modifier:', {
+          key: event.key,
+          code: event.code,
+          ctrlKey: event.ctrlKey,
+          metaKey: event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          target: (event.target as HTMLElement)?.tagName,
+          isRecording: this.isRecording,
+          isCopyPaste: hasCopyPasteKey
+        });
+      }
+      
+      if (hasCopyPasteKey) {
+        console.log('⌨️ GhostWriter: Copy/paste shortcut detected! Processing...');
+      }
+      
       this.handleKeyboard(event).catch((error) => {
         console.error('Error in keyboard handler:', error);
       });
     }) as (event: KeyboardEvent) => void;
-    document.addEventListener('keydown', this.keyboardHandler, false);
+    // Use capture phase on WINDOW (not document) to catch events even earlier
+    // This is critical for apps like Google Sheets that prevent event bubbling
+    window.addEventListener('keydown', this.keyboardHandler, true);
+    
+    console.log('GhostWriter: Keyboard listener registered on window with capture phase');
 
     // Setup focus handler to clear cache when focusing on a new element
     this.focusHandler = this.handleFocus.bind(this);
@@ -159,6 +206,10 @@ export class RecordingManager {
     // Setup copy handler to track clipboard operations (Phase 6: Data lineage)
     this.copyHandler = this.handleCopy.bind(this);
     document.addEventListener('copy', this.copyHandler, false);
+
+    // Setup paste handler to track paste operations (for additional context)
+    this.pasteHandler = this.handlePaste.bind(this);
+    document.addEventListener('paste', this.pasteHandler, false);
 
     console.log('Recording started');
   }
@@ -189,12 +240,13 @@ export class RecordingManager {
       try {
         // Capture the pending input value now
         // Use the captured timestamp if available, otherwise use current time
-        // Pass lastInputValue explicitly to prevent race conditions
+        // Pass lastInputValue AND pendingCellReference explicitly to prevent race conditions
         await this.captureInputValue(
           this.currentInputElement as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
           this.pendingInputTimestamp || Date.now(),
           null, // no beforeSignals
-          this.lastInputValue // CRITICAL: Pass cached value explicitly
+          this.lastInputValue, // CRITICAL: Pass cached value explicitly
+          this.pendingCellReference || undefined // CRITICAL: Pass cached cell ref explicitly
         );
         console.log('✅ GhostWriter: Pending input step flushed successfully');
       } catch (error) {
@@ -337,7 +389,7 @@ export class RecordingManager {
     }
 
     if (this.keyboardHandler) {
-      document.removeEventListener('keydown', this.keyboardHandler, false);
+      window.removeEventListener('keydown', this.keyboardHandler, true); // true = capture phase (matches addEventListener)
       this.keyboardHandler = null;
     }
 
@@ -359,6 +411,11 @@ export class RecordingManager {
     if (this.copyHandler) {
       document.removeEventListener('copy', this.copyHandler, false);
       this.copyHandler = null;
+    }
+
+    if (this.pasteHandler) {
+      document.removeEventListener('paste', this.pasteHandler, false);
+      this.pasteHandler = null;
     }
 
     // ============================================
@@ -508,709 +565,94 @@ export class RecordingManager {
     await this.sendStep(step);
   }
 
-  // NOTE: Removed captureInitialSnapshot() method
-  // No longer needed since we removed DOM-based header capture and visual snapshots
+  /**
+   * Capture initial full page snapshot for spreadsheet column header detection
+   * DISABLED: Snapshot-based header detection was unreliable
+   * Now using cell references as default variable names (users can rename in UI)
+   */
+  // private async captureInitialSnapshot(): Promise<void> {
+  //   try {
+  //     console.log('📸 GhostWriter: Capturing initial snapshot for column headers...');
+  //     
+  //     // Capture full page at current zoom level (don't zoom out to avoid flash)
+  //     // The AI will analyze the entire page to read column headers
+  //     const fullPageResult = await VisualSnapshotService.captureFullPage(0.7);
+  //     const snapshot = fullPageResult?.screenshot;
+  //     
+  //     if (snapshot) {
+  //       this.initialFullPageSnapshot = snapshot;
+  //       console.log('📸 GhostWriter: Initial snapshot captured successfully:', {
+  //         length: snapshot.length,
+  //         sizeMB: (snapshot.length / 1024 / 1024).toFixed(2),
+  //       });
+  //     } else {
+  //       console.warn('📸 GhostWriter: Failed to capture initial snapshot - snapshot is null');
+  //     }
+  //   } catch (error) {
+  //     console.error('📸 GhostWriter: Error capturing initial snapshot:', error);
+  //     // Don't throw - recording should continue even if snapshot fails
+  //   }
+  // }
 
   /**
    * Get the initial full page snapshot captured at recording start (synchronous version).
-   * Used for spreadsheet column header detection.
-   * @deprecated Use getInitialFullPageSnapshotAsync() instead to ensure capture is complete
+   * DISABLED: Snapshot-based header detection disabled for reliability
+   * @deprecated Snapshot capture is disabled, returns null
    */
   getInitialFullPageSnapshot(): string | null {
-    console.log('📸 GhostWriter: getInitialFullPageSnapshot called (sync)', {
-      hasSnapshot: !!this.initialFullPageSnapshot,
-      snapshotLength: this.initialFullPageSnapshot?.length || 0,
-      isSpreadsheetDomain: VisualSnapshotService.isSpreadsheetDomain(),
-    });
-    return this.initialFullPageSnapshot;
+    console.log('📸 GhostWriter: Snapshot capture disabled - using cell references for variables');
+    return null;
   }
 
   /**
    * Get the initial full page snapshot captured at recording start (async version).
-   * Used for spreadsheet column header detection.
-   * Note: Snapshot is captured asynchronously when recording starts, so it may not be available immediately.
+   * DISABLED: Snapshot-based header detection disabled for reliability
+   * @deprecated Snapshot capture is disabled, returns null
    */
   async getInitialFullPageSnapshotAsync(): Promise<string | null> {
-    console.log('📸 GhostWriter: getInitialFullPageSnapshotAsync called', {
-      hasSnapshot: !!this.initialFullPageSnapshot,
-      snapshotLength: this.initialFullPageSnapshot?.length || 0,
-      isSpreadsheetDomain: VisualSnapshotService.isSpreadsheetDomain(),
-      hasPromise: !!this.initialSnapshotPromise,
-    });
-    
-    // If snapshot is already available, return it immediately
-    if (this.initialFullPageSnapshot) {
-      console.log('📸 GhostWriter: Snapshot already available, returning immediately');
-      return this.initialFullPageSnapshot;
-    }
-    
-    // If capture is in progress, await it
-    if (this.initialSnapshotPromise) {
-      console.log('📸 GhostWriter: Waiting for snapshot capture to complete...');
-      await this.initialSnapshotPromise;
-      console.log('📸 GhostWriter: Snapshot capture completed, snapshot available:', !!this.initialFullPageSnapshot);
-    }
-    
-    return this.initialFullPageSnapshot;
+    console.log('📸 GhostWriter: Snapshot capture disabled - using cell references for variables');
+    return null;
   }
 
   /**
    * Check if element is a list item or option (for dropdown/menu items)
+   * Delegates to ElementFinder module
    */
   private isListItemOrOption(element: Element): boolean {
-    const role = element.getAttribute('role');
-    if (role === 'option' || role === 'menuitem' || role === 'listitem') {
-      console.log('🔍 GhostWriter: Element is list item/option (by role):', role);
-      return true;
-    }
-
-    const tagName = element.tagName.toLowerCase();
-    if (tagName === 'li' || tagName === 'option') {
-      console.log('🔍 GhostWriter: Element is list item/option (by tag):', tagName);
-      return true;
-    }
-
-    // Check class names for common patterns
-    const className = element.className?.toString().toLowerCase() || '';
-    if (className.includes('option') || 
-        className.includes('menuitem') || 
-        className.includes('list-item') ||
-        className.includes('dropdown-item') ||
-        className.includes('select-option')) {
-      console.log('🔍 GhostWriter: Element is list item/option (by class):', className.substring(0, 50));
-      return true;
-    }
-
-    // CRITICAL: Check if element is inside a dropdown/listbox/menu container
-    // Many React dropdowns don't set role="option" on the option elements themselves
-    // They just use div elements inside a [role="listbox"] or [role="menu"] container
-    const container = element.closest('[role="listbox"], [role="menu"], [role="list"], select, [data-baseui="listbox"], [data-baseui="menu"]');
-    if (container && element !== container) {
-      // ENHANCED LOGGING: Show container details
-      const containerInfo = {
-        tag: container.tagName,
-        role: container.getAttribute('role'),
-        label: container.getAttribute('aria-label'),
-        id: container.id,
-        elementTag: element.tagName,
-        elementText: (element as HTMLElement).textContent?.trim().substring(0, 50),
-      };
-      
-      // If we're inside a dropdown container, this is very likely a dropdown option
-      // Be permissive: any clickable element inside a listbox/menu is probably an option
-      // This catches cases where the option is a div inside a listbox without explicit roles
-      if (this.isInteractiveElement(element)) {
-        console.log('🔍 GhostWriter: Detected dropdown option inside container:', containerInfo);
-        return true;
-      }
-      
-      // Also check if this is a direct child of the container (even if not explicitly interactive)
-      // Some dropdowns use non-interactive divs that become clickable via event handlers
-      const isDirectChild = element.parentElement === container;
-      if (isDirectChild) {
-        console.log('🔍 GhostWriter: Detected direct child of dropdown container as option:', containerInfo);
-        return true;
-      }
-    }
-
-    // Check if parent has list-related role
-    const parent = element.parentElement;
-    if (parent) {
-      const parentRole = parent.getAttribute('role');
-      if (parentRole === 'listbox' || 
-          parentRole === 'menu' || 
-          parentRole === 'list') {
-        console.log('🔍 GhostWriter: Element is list item/option (parent has list role):', parentRole);
-        return true;
-      }
-    }
-
-    return false;
+    return this.elementFinder.isListItemOrOption(element);
   }
 
   /**
    * Check if an element is an overlay (mask, backdrop, etc.)
+   * Delegates to ElementFinder module
    */
   private isOverlayElement(element: Element): boolean {
-    const tagName = element.tagName.toLowerCase();
-    const className = element.className?.toString().toLowerCase() || '';
-    const style = window.getComputedStyle(element as HTMLElement);
-    
-    // Check tag name
-    if (tagName.includes('overlay') || tagName.includes('backdrop') || tagName.includes('mask')) {
-      return true;
-    }
-    
-    // Check class names
-    if (className.includes('overlay') || className.includes('backdrop') || className.includes('mask') || className.includes('modal-backdrop')) {
-      return true;
-    }
-    
-    // Check styles - invisible elements with pointer-events: none are likely overlays
-    if (style.pointerEvents === 'none' && style.position === 'absolute') {
-      return true;
-    }
-    
-    return false;
+    return this.elementFinder.isOverlayElement(element);
   }
 
-  /**
-   * Check if an element is interactive/clickable
-   * IMPORTANT: Must be permissive for modern React/Angular apps that use div/span with click handlers
-   * BUT: Must NOT be too permissive - icons, SVGs, and decorative elements should NOT be considered interactive
-   */
-  private isInteractiveElement(element: Element): boolean {
-    const htmlEl = element as HTMLElement;
-    const tagName = element.tagName.toLowerCase();
-    const style = window.getComputedStyle(htmlEl);
-    
-    // 0. CRITICAL: Exclude decorative/non-semantic elements (icons, SVGs, etc.)
-    // These should NEVER be recorded - we should record their parent button instead
-    const isDecorativeElement = tagName === 'svg' || 
-                                tagName === 'path' || 
-                                tagName === 'g' ||
-                                tagName.includes('icon') ||  // lightning-primitive-icon, mat-icon, etc.
-                                tagName.includes('-svg') ||
-                                element.getAttribute('role') === 'img' ||
-                                element.getAttribute('role') === 'presentation';
-    
-    if (isDecorativeElement) {
-      console.log('🔍 GhostWriter: Skipping decorative element:', tagName, '- will find parent button');
-      return false;  // Force parent traversal to find the actual button
-    }
-    
-    // 1. Widget elements are always interactive
-    if (tagName.includes('widget') || tagName.includes('gs-report') || 
-        element.className?.toString().includes('widget')) {
-      return true;
-    }
-    
-    // 2. Cursor pointer is a strong indicator (handles React/Angular div/span buttons)
-    if (style.cursor === 'pointer' || style.cursor === 'grab') {
-      return true;
-    }
-    
-    // 3. Standard interactive tags
-    if (['button', 'a', 'select', 'textarea'].includes(tagName) ||
-        (tagName === 'input' && ['button', 'submit', 'checkbox', 'radio'].includes((htmlEl as HTMLInputElement).type))) {
-      return true;
-    }
-    
-    // 4. ARIA roles
-    const role = element.getAttribute('role');
-    if (role && ['button', 'link', 'menuitem', 'tab', 'option'].includes(role)) {
-      return true;
-    }
-    
-    // 5. Fallback: visible element with reasonable size (permissive)
-    // REMOVED: This was TOO permissive and recorded icons/decorative elements
-    // Only use explicit indicators above (cursor, tag, role)
-    
-    return false;
-  }
 
   /**
    * Find the actual clickable element when clicking on an overlay (SYNCHRONOUS version)
-   * This version accepts pre-captured elements to avoid race conditions with disappearing dropdowns
-   * If the element is invisible (overlay), find the widget/container underneath
-   * Returns null if no visible, interactive target can be found
+   * Delegates to ElementFinder module
    */
   private findActualClickableElementSync(element: Element, event: MouseEvent, elementsAtPoint: Element[]): Element | null {
-    // Check if element is visible and not an overlay
-    const isVisible = ElementStateCapture.isElementVisible(element);
-    const isOverlay = this.isOverlayElement(element);
-    
-    // If visible and not an overlay, return as-is
-    if (isVisible && !isOverlay && this.isInteractiveElement(element)) {
-      return element;
-    }
-
-    // Element is invisible or is an overlay, try to find the actual clickable element
-
-    // Strategy 1: Use pre-captured elementsAtPoint (already captured synchronously)
-    // This is more reliable than elementFromPoint (singular) which might return the overlay
-    // PRIORITY: Prefer smaller, more specific elements (buttons, menu items) over large containers (widgets)
-    try {
-      // ENHANCED LOGGING: Log all elements at this point for debugging
-      console.log('🔍 GhostWriter: Elements at click point (', event.clientX, ',', event.clientY, '):', 
-        elementsAtPoint.slice(0, 10).map(el => ({
-          tag: el.tagName,
-          role: el.getAttribute('role'),
-          text: (el as HTMLElement).textContent?.trim().substring(0, 30),
-          classes: el.className?.toString().substring(0, 50),
-          isVisible: ElementStateCapture.isElementVisible(el),
-          isOverlay: this.isOverlayElement(el),
-          isListItem: this.isListItemOrOption(el),
-          size: `${el.getBoundingClientRect().width}x${el.getBoundingClientRect().height}`
-        }))
-      );
-      
-      // Filter for visible, interactive elements that are not overlays
-      // CRITICAL: Be permissive for list items/options (portal elements)
-      const visibleElements = elementsAtPoint.filter(el => {
-        if (el === element) return false; // Skip the original overlay element
-        if (this.isOverlayElement(el)) return false; // Skip other overlays
-        
-        // For list items/options, be more permissive with visibility
-        const isListItemOrOption = this.isListItemOrOption(el);
-        const isVisible = ElementStateCapture.isElementVisible(el);
-        if (!isVisible && !isListItemOrOption) return false; // Must be visible (unless list item/option)
-        
-        return this.isInteractiveElement(el); // Must be interactive
-      });
-      
-      console.log('🔍 GhostWriter: Filtered to', visibleElements.length, 'visible, interactive elements');
-      
-      if (visibleElements.length > 0) {
-        // PRIORITY: Prefer smaller, more specific elements over large containers
-        // Sort by: buttons/menu items first, then by size (smaller = more specific)
-        const sorted = visibleElements.sort((a, b) => {
-          const aTag = a.tagName.toLowerCase();
-          const bTag = b.tagName.toLowerCase();
-          const aRole = a.getAttribute('role');
-          const bRole = b.getAttribute('role');
-          
-          // Prioritize buttons, menu items, links
-          const aIsSpecific = aTag === 'button' || aTag === 'a' || aRole === 'button' || aRole === 'menuitem' || aRole === 'option';
-          const bIsSpecific = bTag === 'button' || bTag === 'a' || bRole === 'button' || bRole === 'menuitem' || bRole === 'option';
-          
-          if (aIsSpecific && !bIsSpecific) return -1;
-          if (!aIsSpecific && bIsSpecific) return 1;
-          
-          // If both are specific or both are not, prefer smaller elements (more specific)
-          const aRect = a.getBoundingClientRect();
-          const bRect = b.getBoundingClientRect();
-          const aSize = aRect.width * aRect.height;
-          const bSize = bRect.width * bRect.height;
-          
-          // Prefer smaller elements (they're more specific)
-          return aSize - bSize;
-        });
-        
-        // ENHANCED LOGGING: Show all candidates and why the selected one was chosen
-        console.log('🔍 GhostWriter: Sorted candidates:', sorted.slice(0, 5).map((el, idx) => {
-          const tag = el.tagName.toLowerCase();
-          const role = el.getAttribute('role');
-          const rect = el.getBoundingClientRect();
-          const isSpecific = tag === 'button' || tag === 'a' || role === 'button' || role === 'menuitem' || role === 'option';
-          return {
-            rank: idx + 1,
-            tag,
-            role,
-            text: (el as HTMLElement).textContent?.trim().substring(0, 30),
-            size: `${rect.width}x${rect.height}`,
-            isSpecific,
-            isListItem: this.isListItemOrOption(el),
-          };
-        }));
-        
-        const selected = sorted[0];
-        const selectedTag = selected.tagName.toLowerCase();
-        const selectedRole = selected.getAttribute('role');
-        const selectedText = (selected as HTMLElement).textContent?.trim().substring(0, 50);
-        console.log('✅ GhostWriter: Selected element from elementsFromPoint:', selectedTag, 'Role:', selectedRole, 'Text:', selectedText, 'Size:', selected.getBoundingClientRect().width, 'x', selected.getBoundingClientRect().height);
-        
-        // ENHANCED LOGGING: Check if there are multiple dropdown containers
-        const dropdownContainers = elementsAtPoint.filter(el => 
-          el.getAttribute('role') === 'listbox' || 
-          el.getAttribute('role') === 'menu' ||
-          el.getAttribute('role') === 'combobox'
-        );
-        if (dropdownContainers.length > 1) {
-          console.warn('⚠️ GhostWriter: Multiple dropdown containers detected at click point!', {
-            count: dropdownContainers.length,
-            containers: dropdownContainers.map(el => ({
-              role: el.getAttribute('role'),
-              label: el.getAttribute('aria-label'),
-              id: el.id,
-            }))
-          });
-        }
-        
-        return selected;
-      }
-    } catch (error) {
-      console.warn('GhostWriter: Error using elementsFromPoint:', error);
-    }
-
-    // Strategy 2: Traverse up the DOM to find interactive elements (buttons, menu items) FIRST
-    // Only fall back to widget containers if no interactive element is found
-    let current: Element | null = element.parentElement;
-    let level = 0;
-    const maxLevels = 10;
-    let foundInteractiveElement: Element | null = null;
-    const widgetTags = ['gs-report-widget-element', 'gs-widget', 'widget', 'gridster-item'];
-
-    while (current && level < maxLevels && current !== document.body) {
-      const tagName = current.tagName.toLowerCase();
-      const role = current.getAttribute('role');
-      
-      // PRIORITY: Look for actual interactive elements (buttons, menu items, etc.)
-      // These should be preferred over widget containers
-      const isInteractive = this.isInteractiveElement(current);
-      const isButton = tagName === 'button' || role === 'button' || role === 'menuitem';
-      const isMenuItem = role === 'menuitem' || role === 'option' || role === 'listitem';
-      const isLink = tagName === 'a' || role === 'link';
-      
-      if (isInteractive && (isButton || isMenuItem || isLink)) {
-        // Found an actual interactive element - prefer this over widget containers
-        if (ElementStateCapture.isElementVisible(current)) {
-          foundInteractiveElement = current;
-          // Continue searching to see if there's a more specific element (closer to click)
-        }
-      }
-      
-      // Only check for widget containers if we haven't found an interactive element yet
-      if (!foundInteractiveElement && widgetTags.some(wt => tagName.includes(wt))) {
-        // Check if it's visible and interactive
-        if (ElementStateCapture.isElementVisible(current) && this.isInteractiveElement(current)) {
-          // Only use widget as fallback if no interactive element was found
-          if (level < 3) {
-            // Widget is close to the element, might be the actual target
-            // But prefer interactive elements found later
-            current = current.parentElement;
-            level++;
-            continue;
-          }
-        }
-      }
-
-      current = current.parentElement;
-      level++;
-    }
-    
-    // Return the interactive element if found, otherwise continue to Strategy 3
-    if (foundInteractiveElement) {
-      console.log('GhostWriter: Found interactive element in parent hierarchy:', foundInteractiveElement.tagName, 'Role:', foundInteractiveElement.getAttribute('role'));
-      return foundInteractiveElement;
-    }
-
-    // Strategy 3: If element is an overlay, search for widget elements in parent hierarchy
-    if (isOverlay) {
-      let parent: Element | null = element.parentElement;
-      level = 0;
-      while (parent && level < 5 && parent !== document.body) {
-        // Look for widget elements within the parent
-        for (const widgetTag of widgetTags) {
-          const widget = parent.querySelector(widgetTag);
-          if (widget && ElementStateCapture.isElementVisible(widget) && this.isInteractiveElement(widget)) {
-            return widget;
-          }
-        }
-        parent = parent.parentElement;
-        level++;
-      }
-    }
-
-      // Strategy 4: Try to find any visible, interactive element near the click point
-      // This is a last resort - look for siblings or nearby elements
-      try {
-        const rect = element.getBoundingClientRect();
-        const centerX = rect.left + rect.width / 2;
-        const centerY = rect.top + rect.height / 2;
-        
-        // Try elementsFromPoint at the center of the element
-        const elementsAtCenter = document.elementsFromPoint(centerX, centerY);
-        for (const el of elementsAtCenter) {
-          if (el === element) continue;
-          if (this.isOverlayElement(el)) continue;
-          
-          // Check if visible and interactive
-          if (ElementStateCapture.isElementVisible(el) && this.isInteractiveElement(el)) {
-            return el;
-          }
-        }
-      } catch (error) {
-        // Ignore errors in fallback strategy
-      }
-
-      // CRITICAL: If the original element is a list item/option, return it even if visibility checks fail
-      // Portal elements might have visibility quirks, but we still want to record them
-      if (this.isListItemOrOption(element)) {
-        console.log('GhostWriter: Returning list item/option element despite visibility/overlay checks (portal element)');
-        return element;
-      }
-
-      // If no better target found, return null (caller will skip recording)
-      console.warn('GhostWriter: Could not find visible, interactive element for click. Original element:', element.tagName, 'Visible:', isVisible, 'Overlay:', isOverlay);
-      return null;
+    return this.elementFinder.findActualClickableElementSync(element, event, elementsAtPoint);
   }
 
   /**
-   * DEPRECATED: Find the actual clickable element when clicking on an overlay (LEGACY async version)
-   * This method is no longer used - replaced by findActualClickableElementSync to avoid race conditions
-   * Kept for reference only
-   * @deprecated Use findActualClickableElementSync to prevent dropdown race conditions
+   * Get the actual element from an event (handles Shadow DOM)
+   * Delegates to ElementFinder module
    */
-  // @ts-ignore - Deprecated method kept for reference
-  private _DEPRECATED_findActualClickableElement(element: Element, event: MouseEvent): Element | null {
-    // Check if element is visible and not an overlay
-    const isVisible = ElementStateCapture.isElementVisible(element);
-    const isOverlay = this.isOverlayElement(element);
-    
-    // If visible and not an overlay, return as-is
-    if (isVisible && !isOverlay && this.isInteractiveElement(element)) {
-      return element;
-    }
-
-    // Element is invisible or is an overlay, try to find the actual clickable element
-
-    // Strategy 1: Use elementsFromPoint to get ALL elements at click coordinates
-    // This is more reliable than elementFromPoint (singular) which might return the overlay
-    // PRIORITY: Prefer smaller, more specific elements (buttons, menu items) over large containers (widgets)
-    try {
-      const elementsAtPoint = document.elementsFromPoint(event.clientX, event.clientY);
-      
-      // ENHANCED LOGGING: Log all elements at this point for debugging
-      console.log('🔍 GhostWriter: Elements at click point (', event.clientX, ',', event.clientY, '):', 
-        elementsAtPoint.slice(0, 10).map(el => ({
-          tag: el.tagName,
-          role: el.getAttribute('role'),
-          text: (el as HTMLElement).textContent?.trim().substring(0, 30),
-          classes: el.className?.toString().substring(0, 50),
-          isVisible: ElementStateCapture.isElementVisible(el),
-          isOverlay: this.isOverlayElement(el),
-          isListItem: this.isListItemOrOption(el),
-          size: `${el.getBoundingClientRect().width}x${el.getBoundingClientRect().height}`
-        }))
-      );
-      
-      // Filter for visible, interactive elements that are not overlays
-      // CRITICAL: Be permissive for list items/options (portal elements)
-      const visibleElements = elementsAtPoint.filter(el => {
-        if (el === element) return false; // Skip the original overlay element
-        if (this.isOverlayElement(el)) return false; // Skip other overlays
-        
-        // For list items/options, be more permissive with visibility
-        const isListItemOrOption = this.isListItemOrOption(el);
-        const isVisible = ElementStateCapture.isElementVisible(el);
-        if (!isVisible && !isListItemOrOption) return false; // Must be visible (unless list item/option)
-        
-        return this.isInteractiveElement(el); // Must be interactive
-      });
-      
-      console.log('🔍 GhostWriter: Filtered to', visibleElements.length, 'visible, interactive elements');
-      
-      if (visibleElements.length > 0) {
-        // PRIORITY: Prefer smaller, more specific elements over large containers
-        // Sort by: buttons/menu items first, then by size (smaller = more specific)
-        const sorted = visibleElements.sort((a, b) => {
-          const aTag = a.tagName.toLowerCase();
-          const bTag = b.tagName.toLowerCase();
-          const aRole = a.getAttribute('role');
-          const bRole = b.getAttribute('role');
-          
-          // Prioritize buttons, menu items, links
-          const aIsSpecific = aTag === 'button' || aTag === 'a' || aRole === 'button' || aRole === 'menuitem' || aRole === 'option';
-          const bIsSpecific = bTag === 'button' || bTag === 'a' || bRole === 'button' || bRole === 'menuitem' || bRole === 'option';
-          
-          if (aIsSpecific && !bIsSpecific) return -1;
-          if (!aIsSpecific && bIsSpecific) return 1;
-          
-          // If both are specific or both are not, prefer smaller elements (more specific)
-          const aRect = a.getBoundingClientRect();
-          const bRect = b.getBoundingClientRect();
-          const aSize = aRect.width * aRect.height;
-          const bSize = bRect.width * bRect.height;
-          
-          // Prefer smaller elements (they're more specific)
-          return aSize - bSize;
-        });
-        
-        // ENHANCED LOGGING: Show all candidates and why the selected one was chosen
-        console.log('🔍 GhostWriter: Sorted candidates:', sorted.slice(0, 5).map((el, idx) => {
-          const tag = el.tagName.toLowerCase();
-          const role = el.getAttribute('role');
-          const rect = el.getBoundingClientRect();
-          const isSpecific = tag === 'button' || tag === 'a' || role === 'button' || role === 'menuitem' || role === 'option';
-          return {
-            rank: idx + 1,
-            tag,
-            role,
-            text: (el as HTMLElement).textContent?.trim().substring(0, 30),
-            size: `${rect.width}x${rect.height}`,
-            isSpecific,
-            isListItem: this.isListItemOrOption(el),
-          };
-        }));
-        
-        const selected = sorted[0];
-        const selectedTag = selected.tagName.toLowerCase();
-        const selectedRole = selected.getAttribute('role');
-        const selectedText = (selected as HTMLElement).textContent?.trim().substring(0, 50);
-        console.log('✅ GhostWriter: Selected element from elementsFromPoint:', selectedTag, 'Role:', selectedRole, 'Text:', selectedText, 'Size:', selected.getBoundingClientRect().width, 'x', selected.getBoundingClientRect().height);
-        
-        // ENHANCED LOGGING: Check if there are multiple dropdown containers
-        const dropdownContainers = elementsAtPoint.filter(el => 
-          el.getAttribute('role') === 'listbox' || 
-          el.getAttribute('role') === 'menu' ||
-          el.getAttribute('role') === 'combobox'
-        );
-        if (dropdownContainers.length > 1) {
-          console.warn('⚠️ GhostWriter: Multiple dropdown containers detected at click point!', {
-            count: dropdownContainers.length,
-            containers: dropdownContainers.map(el => ({
-              role: el.getAttribute('role'),
-              label: el.getAttribute('aria-label'),
-              id: el.id,
-            }))
-          });
-        }
-        
-        return selected;
-      }
-    } catch (error) {
-      console.warn('GhostWriter: Error using elementsFromPoint:', error);
-    }
-
-    // Strategy 2: Traverse up the DOM to find interactive elements (buttons, menu items) FIRST
-    // Only fall back to widget containers if no interactive element is found
-    let current: Element | null = element.parentElement;
-    let level = 0;
-    const maxLevels = 10;
-    let foundInteractiveElement: Element | null = null;
-    const widgetTags = ['gs-report-widget-element', 'gs-widget', 'widget', 'gridster-item'];
-
-    while (current && level < maxLevels && current !== document.body) {
-      const tagName = current.tagName.toLowerCase();
-      const role = current.getAttribute('role');
-      
-      // PRIORITY: Look for actual interactive elements (buttons, menu items, etc.)
-      // These should be preferred over widget containers
-      const isInteractive = this.isInteractiveElement(current);
-      const isButton = tagName === 'button' || role === 'button' || role === 'menuitem';
-      const isMenuItem = role === 'menuitem' || role === 'option' || role === 'listitem';
-      const isLink = tagName === 'a' || role === 'link';
-      
-      if (isInteractive && (isButton || isMenuItem || isLink)) {
-        // Found an actual interactive element - prefer this over widget containers
-        if (ElementStateCapture.isElementVisible(current)) {
-          foundInteractiveElement = current;
-          // Continue searching to see if there's a more specific element (closer to click)
-        }
-      }
-      
-      // Only check for widget containers if we haven't found an interactive element yet
-      if (!foundInteractiveElement && widgetTags.some(wt => tagName.includes(wt))) {
-        // Check if it's visible and interactive
-        if (ElementStateCapture.isElementVisible(current) && this.isInteractiveElement(current)) {
-          // Only use widget as fallback if no interactive element was found
-          if (level < 3) {
-            // Widget is close to the element, might be the actual target
-            // But prefer interactive elements found later
-            current = current.parentElement;
-            level++;
-            continue;
-          }
-        }
-      }
-
-      current = current.parentElement;
-      level++;
-    }
-    
-    // Return the interactive element if found, otherwise continue to Strategy 3
-    if (foundInteractiveElement) {
-      console.log('GhostWriter: Found interactive element in parent hierarchy:', foundInteractiveElement.tagName, 'Role:', foundInteractiveElement.getAttribute('role'));
-      return foundInteractiveElement;
-    }
-
-    // Strategy 3: If element is an overlay, search for widget elements in parent hierarchy
-    if (isOverlay) {
-      let parent: Element | null = element.parentElement;
-      level = 0;
-      while (parent && level < 5 && parent !== document.body) {
-        // Look for widget elements within the parent
-        for (const widgetTag of widgetTags) {
-          const widget = parent.querySelector(widgetTag);
-          if (widget && ElementStateCapture.isElementVisible(widget) && this.isInteractiveElement(widget)) {
-            return widget;
-          }
-        }
-        parent = parent.parentElement;
-        level++;
-      }
-    }
-
-      // Strategy 4: Try to find any visible, interactive element near the click point
-      // This is a last resort - look for siblings or nearby elements
-      try {
-        const rect = element.getBoundingClientRect();
-        const centerX = rect.left + rect.width / 2;
-        const centerY = rect.top + rect.height / 2;
-        
-        // Try elementsFromPoint at the center of the element
-        const elementsAtCenter = document.elementsFromPoint(centerX, centerY);
-        for (const el of elementsAtCenter) {
-          if (el === element) continue;
-          if (this.isOverlayElement(el)) continue;
-          
-          // CRITICAL: For list items/options, be more permissive with visibility
-          const isListItemOrOption = this.isListItemOrOption(el);
-          const isVisible = ElementStateCapture.isElementVisible(el);
-          const isInteractive = this.isInteractiveElement(el);
-          
-          if ((isVisible || isListItemOrOption) && isInteractive) {
-            return el;
-          }
-        }
-      } catch (error) {
-        // Ignore errors in fallback strategy
-      }
-
-      // CRITICAL: If the original element is a list item/option, return it even if visibility checks fail
-      // Portal elements might have visibility quirks, but we still want to record them
-      if (this.isListItemOrOption(element)) {
-        console.log('GhostWriter: Returning list item/option element despite visibility/overlay checks (portal element)');
-        return element;
-      }
-
-      // If no better target found, return null (caller will skip recording)
-      console.warn('GhostWriter: Could not find visible, interactive element for click. Original element:', element.tagName, 'Visible:', isVisible, 'Overlay:', isOverlay);
-      return null;
-  }
-
   private getActualElement(event: Event): Element | null {
-    // Use composedPath to get the actual element (works across shadow boundaries)
-    if ('composedPath' in event) {
-      const path = event.composedPath();
-      // First element in path is the actual target
-      if (path.length > 0 && path[0] instanceof Element) {
-        return path[0] as Element;
-      }
-    }
-    
-    // Fallback to target
-    return (event.target as Element) || null;
+    return this.elementFinder.getActualElement(event);
   }
 
   /**
    * Find the scrollable container for an element
+   * Delegates to ElementFinder module
    */
   private findScrollContainer(element: Element): HTMLElement | null {
-    let current: Element | null = element;
-    const maxLevels = 10;
-    let level = 0;
-
-    while (current && level < maxLevels && current !== document.body && current !== document.documentElement) {
-      if (current instanceof HTMLElement) {
-        const style = window.getComputedStyle(current);
-        const overflow = style.overflow || style.overflowY || style.overflowX;
-        
-        // Check if element is scrollable
-        if (overflow === 'auto' || overflow === 'scroll') {
-          // Verify it actually scrolls
-          if (current.scrollHeight > current.clientHeight || current.scrollWidth > current.clientWidth) {
-            return current;
-          }
-        }
-      }
-      
-      current = current.parentElement;
-      level++;
-    }
-
-    return null;
+    return this.elementFinder.findScrollContainer(element);
   }
 
 
@@ -2229,26 +1671,63 @@ export class RecordingManager {
       // This prevents losing values when user rapidly types across cells
       // Must happen BEFORE we update lastInputValue and currentInputElement!
       // ============================================
-      if (this.inputDebounceTimer !== null && this.currentInputElement && this.currentInputElement !== target) {
-        console.log('📊 GhostWriter: User switched cells - flushing previous input before starting new timer');
-        clearTimeout(this.inputDebounceTimer);
+      
+      // For spreadsheets, check if cell reference changed (not just element, since sheets reuse same editor)
+      // Use robust Name Box detection with fallback selectors (same strategy as ContextScanner)
+      let currentCellRef: string | null = null;
+      if (VisualSnapshotService.isSpreadsheetDomain()) {
+        // Try multiple Name Box selectors (Google Sheets may change their DOM structure)
+        const nameBoxSelectors = [
+          '#t-name-box', // Most common (Google Sheets)
+          '#t-name-box-input', // Alternative (some Google Sheets versions)
+          '[id*="name-box"]', // Partial match fallback
+        ];
+        
+        for (const selector of nameBoxSelectors) {
+          try {
+            const nameBox = document.querySelector(selector) as HTMLInputElement;
+            if (nameBox && nameBox.value && /^[A-Z]+\d+$/i.test(nameBox.value)) {
+              currentCellRef = nameBox.value.toUpperCase();
+              break; // Found it, stop searching
+            }
+          } catch (e) {
+            // Invalid selector or DOM access error, try next
+            continue;
+          }
+        }
+      }
+      
+      const elementChanged = this.currentInputElement && this.currentInputElement !== target;
+      const cellChanged = currentCellRef && this.pendingCellReference && currentCellRef !== this.pendingCellReference;
+      const shouldFlush = this.inputDebounceTimer !== null && (elementChanged || cellChanged);
+      
+      if (shouldFlush) {
+        console.log('📊 GhostWriter: User switched cells - flushing previous input before starting new timer', {
+          elementChanged,
+          cellChanged,
+          previousCell: this.pendingCellReference,
+          currentCell: currentCellRef,
+        });
+        clearTimeout(this.inputDebounceTimer!); // Non-null assertion: shouldFlush guarantees this is not null
         this.inputDebounceTimer = null;
         
         // The previous element data is still in the instance variables (not yet overwritten)
         const previousElement = this.currentInputElement;
         const previousTimestamp = this.pendingInputTimestamp;
         const previousValue = this.lastInputValue;
+        const previousCellRef = this.pendingCellReference; // Save before clearing
         
         // Flush the previous input synchronously
-        // pendingCellReference still has the PREVIOUS cell's reference!
-        // Pass previousValue explicitly to prevent it from being overwritten before flush completes
+        // Pass previousCellRef explicitly to prevent Name Box race condition
+        // (Name Box is already updated to NEW cell by the time flush runs)
         if (previousValue && previousElement) {
-          console.log('📊 GhostWriter: Flushing previous cell input:', { previousValue, cellRef: this.pendingCellReference });
+          console.log('📊 GhostWriter: Flushing previous cell input:', { previousValue, cellRef: previousCellRef });
           this.captureInputValue(
             previousElement as HTMLInputElement | HTMLTextAreaElement | HTMLElement,
             previousTimestamp || Date.now(),
             null, // no beforeSignals
-            previousValue // CRITICAL: Pass explicit value so it doesn't get overwritten
+            previousValue, // CRITICAL: Pass explicit value so it doesn't get overwritten
+            previousCellRef || undefined // CRITICAL: Pass explicit cell ref (Name Box is already updated!)
           );
         }
         
@@ -2256,7 +1735,7 @@ export class RecordingManager {
         this.pendingCellReference = null;
         this.pendingInputTimestamp = null;
       } else if (this.inputDebounceTimer !== null) {
-        // Same element - just clear the timer to restart debounce
+        // Same element AND same cell - just clear the timer to restart debounce
         clearTimeout(this.inputDebounceTimer);
       }
 
@@ -2283,19 +1762,28 @@ export class RecordingManager {
       
       // CRITICAL: Capture cell reference SYNCHRONOUSLY for Google Sheets
       // This prevents the C→E bug where clicking away updates the Name Box before we capture
-      if (VisualSnapshotService.isSpreadsheetDomain()) {
-        const nameBox = document.querySelector('#t-name-box') as HTMLInputElement;
-        if (nameBox && nameBox.value && /^[A-Z]+\d+$/i.test(nameBox.value)) {
-          this.pendingCellReference = nameBox.value.toUpperCase();
-          console.log('📊 GhostWriter: Captured cell reference at input time:', this.pendingCellReference);
-        }
+      // Reuse the currentCellRef we already captured above (no need to read DOM again)
+      if (VisualSnapshotService.isSpreadsheetDomain() && currentCellRef) {
+        this.pendingCellReference = currentCellRef;
+        console.log('📊 GhostWriter: Captured cell reference at input time:', this.pendingCellReference);
       }
 
       // Set new timer for current element
       this.inputDebounceTimer = window.setTimeout(() => {
         // Don't capture if recording was stopped
         if (!this.isRecording) return;
-        this.captureInputValue(target as HTMLInputElement | HTMLTextAreaElement | HTMLElement, this.pendingInputTimestamp!);
+        
+        // CRITICAL: Pass pending cell ref explicitly (captured at input time)
+        // Don't rely on reading Name Box later (it might have changed)
+        const cellRefToUse = this.pendingCellReference || undefined;
+        
+        this.captureInputValue(
+          target as HTMLInputElement | HTMLTextAreaElement | HTMLElement, 
+          this.pendingInputTimestamp!,
+          null, // no beforeSignals
+          undefined, // no fallbackValue
+          cellRefToUse // Pass cell ref captured at input time
+        );
         this.pendingInputTimestamp = null; // Clear after use
         this.pendingCellReference = null; // Clear after use
       }, this.DEBOUNCE_DELAY);
@@ -2437,17 +1925,43 @@ export class RecordingManager {
   private async handleKeyboard(event: KeyboardEvent): Promise<void> {
     if (!this.isRecording) return;
 
-    // Only capture specific important keys
+    // Check for copy/paste shortcuts (check both lowercase and uppercase, as some browsers/apps send uppercase with modifiers)
+    const isCopy = (event.key.toLowerCase() === 'c' || event.code === 'KeyC') && 
+                   (event.ctrlKey || event.metaKey) &&
+                   !event.shiftKey && !event.altKey; // Only pure Ctrl+C/Cmd+C
+    const isPaste = (event.key.toLowerCase() === 'v' || event.code === 'KeyV') && 
+                    (event.ctrlKey || event.metaKey) &&
+                    !event.shiftKey && !event.altKey; // Only pure Ctrl+V/Cmd+V
+    
+    // Debug logging for copy/paste detection
+    if (isCopy || isPaste) {
+      console.log('⌨️ GhostWriter: Copy/paste shortcut detected:', {
+        key: event.key,
+        code: event.code,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        isCopy,
+        isPaste,
+        target: event.target
+      });
+    }
+    
+    // Only capture specific important keys OR copy/paste shortcuts
     const importantKeys = ['Enter', 'Tab', 'Escape'];
-    if (!importantKeys.includes(event.key)) {
+    const isImportantKey = importantKeys.includes(event.key);
+    
+    if (!isImportantKey && !isCopy && !isPaste) {
       return;
     }
 
     // Don't capture if user is typing in an input (that's handled by input handler)
+    // EXCEPTION: Allow paste in inputs (Ctrl+V/Cmd+V) and copy from inputs
     const target = event.target as HTMLElement;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
-      // Only capture Enter in inputs (for form submission)
-      if (event.key !== 'Enter') {
+      // Only capture Enter in inputs (for form submission) or paste/copy shortcuts
+      if (event.key !== 'Enter' && !isPaste && !isCopy) {
         return;
       }
     }
@@ -2627,6 +2141,69 @@ export class RecordingManager {
             : undefined
         } : undefined,
       };
+
+      // Add clipboard metadata for copy/paste operations
+      if (isCopy) {
+        // Wait longer for handleCopy() to store clipboard data (copy event fires slightly after keyboard event)
+        await new Promise(resolve => setTimeout(resolve, 200));
+        try {
+          const result = await chrome.storage.local.get('ghostwriter_clipboard');
+          const clipboardData = result.ghostwriter_clipboard as {
+            text: string;
+            sourceSelector: string;
+            timestamp: number;
+          } | undefined;
+          
+          if (clipboardData && clipboardData.text) {
+            console.log('📋 GhostWriter: Copy keyboard shortcut detected, adding clipboard metadata');
+            stepPayload.aiEvidence = {
+              ...stepPayload.aiEvidence,
+              clipboardMetadata: {
+                sourceSelector: clipboardData.sourceSelector,
+                copiedValue: clipboardData.text.length > 500 
+                  ? clipboardData.text.substring(0, 500) + '...' 
+                  : clipboardData.text,
+                timestamp: clipboardData.timestamp
+              }
+            };
+          }
+        } catch (error) {
+          console.warn('GhostWriter: Failed to get clipboard data for copy step:', error);
+        }
+      } else if (isPaste) {
+        // Check for recent clipboard data
+        try {
+          const result = await chrome.storage.local.get('ghostwriter_clipboard');
+          const clipboardData = result.ghostwriter_clipboard as {
+            text: string;
+            sourceSelector: string;
+            timestamp: number;
+          } | undefined;
+          
+          if (clipboardData && clipboardData.text) {
+            const age = Date.now() - clipboardData.timestamp;
+            const tenMinutesInMs = 10 * 60 * 1000;
+            
+            if (age < tenMinutesInMs) {
+              console.log('📋 GhostWriter: Paste keyboard shortcut detected, adding clipboard metadata');
+              stepPayload.aiEvidence = {
+                ...stepPayload.aiEvidence,
+                clipboardMetadata: {
+                  sourceSelector: clipboardData.sourceSelector,
+                  copiedValue: clipboardData.text.length > 500 
+                    ? clipboardData.text.substring(0, 500) + '...' 
+                    : clipboardData.text,
+                  timestamp: clipboardData.timestamp
+                }
+              };
+            } else {
+              console.log('📋 GhostWriter: Clipboard data too old for paste operation');
+            }
+          }
+        } catch (error) {
+          console.warn('GhostWriter: Failed to get clipboard data for paste step:', error);
+        }
+      }
 
       // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
       const reliableData = this.enrichStepWithReliableData(actualElement, 'KEYBOARD', undefined, keyboardDetails.key);
@@ -2977,17 +2554,59 @@ export class RecordingManager {
   }
 
   /**
+   * Handle paste events to track data lineage (Phase 6)
+   * This provides additional context for paste operations
+   */
+  private handlePaste(_event: ClipboardEvent): void {
+    if (!this.isRecording) return;
+
+    try {
+      // Get the target element where paste is happening
+      const target = _event.target as HTMLElement;
+      
+      if (!target) {
+        return;
+      }
+
+      // Try to get clipboard data from the event
+      const pastedText = _event.clipboardData?.getData('text/plain');
+      
+      if (!pastedText || pastedText.trim().length === 0) {
+        console.log('📋 GhostWriter: Paste event detected but no text data available');
+        return;
+      }
+
+      // Generate selector for target element
+      const selectors = SelectorEngine.generateSelectors(target);
+      
+      console.log('📋 GhostWriter: Paste detected:', {
+        textLength: pastedText.length,
+        targetSelector: selectors.primary.substring(0, 50),
+        targetTag: target.tagName
+      });
+
+      // Note: We don't create a workflow step here - the keyboard handler (Ctrl+V/Cmd+V) creates the step
+      // This handler just provides additional logging and could be used for future enhancements
+      
+    } catch (error) {
+      console.warn('GhostWriter: Failed to handle paste event:', error);
+    }
+  }
+
+  /**
    * Capture the final value of an input element
    * @param element The input element
    * @param captureTimestamp The timestamp when the input event first fired (not when debounce completed)
    * @param beforeSignals Optional before signals for outcome diffing
    * @param fallbackValue Optional explicit value to use (for flush scenarios where cached value might be stale)
+   * @param explicitCellRef Optional explicit cell reference (for flush scenarios where Name Box has already been updated)
    */
   private async captureInputValue(
     element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | HTMLElement,
     captureTimestamp: number,
     beforeSignals?: ReturnType<typeof capturePageSignals> | null,
-    fallbackValue?: string
+    fallbackValue?: string,
+    explicitCellRef?: string
   ): Promise<void> {
     try {
       // Check if element is contenteditable
@@ -3319,6 +2938,29 @@ export class RecordingManager {
       const elementAnalysis = ElementAnalyzer.analyze(element);
       console.log('🔍 GhostWriter: Element Analysis (INPUT):\n' + ElementAnalyzer.formatAnalysis(elementAnalysis));
 
+      // NEW: For INPUT steps in spreadsheets, capture spreadsheet context (same as CLICK steps)
+      let inputSpreadsheetContext: any = undefined;
+      if (VisualSnapshotService.isSpreadsheetDomain()) {
+        // Get grid coordinates from the scanned context
+        const scanResult = ContextScanner.scan(element);
+        // Use explicit cell ref if provided (from flush), else use cached, else use scanned
+        const effectiveCellRef = explicitCellRef || this.pendingCellReference || scanResult.gridCoordinates?.cellReference;
+        
+        if (effectiveCellRef) {
+          console.log('📊 RecordingManager: Adding spreadsheet context to INPUT step:', { cellRef: effectiveCellRef });
+          inputSpreadsheetContext = {
+            recordedIntent: {
+              cellRef: effectiveCellRef,
+              columnHeader: scanResult.gridCoordinates?.columnHeader,
+              column: effectiveCellRef.match(/^([A-Z]+)/)?.[1] || '',
+              wasEmpty: true, // INPUT steps are always typing into cells
+              wasAppendPosition: false, // Will be determined during execution
+              reasoning: `User typed "${value}" in cell ${effectiveCellRef}`,
+            }
+          };
+        }
+      }
+
       // Build step payload first (without wait conditions)
       const stepPayload: WorkflowStep['payload'] = {
         selector: selectors.primary,
@@ -3347,6 +2989,8 @@ export class RecordingManager {
         retryStrategy,
         focusEvents,
         networkConditions,
+        // NEW: Spreadsheet context for intelligent cell targeting during execution
+        spreadsheetContext: inputSpreadsheetContext,
         context: context ? {
           // Only include siblings if they have content, and only include non-empty arrays
           siblings: (context.siblings.before.length > 0 || context.siblings.after.length > 0) ? {
@@ -3365,27 +3009,32 @@ export class RecordingManager {
             const scanned = ContextScanner.scan(element);
             // CRITICAL FIX: If we have a cached cell reference from input time, use it instead of current Name Box
             // This fixes the C→E bug where clicking away updates Name Box before we capture
-            if (this.pendingCellReference && scanned.gridCoordinates) {
-              console.log(`📊 GhostWriter: Using cached cell reference "${this.pendingCellReference}" instead of "${scanned.gridCoordinates.cellReference}" (fixes C→E bug)`);
-              scanned.gridCoordinates.cellReference = this.pendingCellReference;
-            }
-            // NOTE: Previously looked up column headers here, but removed for simplicity
-            // Users will rename variables in the UI instead
-            // Cell reference (e.g., "A5", "B10") will be used as the default variable name
-            console.log(`[RecordingManager] ContextScanner.scan result for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference });
-            return scanned;
-          })()),
-        } : ((() => {
-          const scanned = ContextScanner.scan(element);
-          // CRITICAL FIX: If we have a cached cell reference from input time, use it instead of current Name Box
-          if (this.pendingCellReference && scanned.gridCoordinates) {
-            console.log(`📊 GhostWriter: Using cached cell reference "${this.pendingCellReference}" instead of "${scanned.gridCoordinates.cellReference}" (fixes C→E bug)`);
-            scanned.gridCoordinates.cellReference = this.pendingCellReference;
+          // CRITICAL: Use explicit cell ref if provided (from flush), else use cached, else use scanned
+          // Priority: explicitCellRef > this.pendingCellReference > scanned.gridCoordinates.cellReference
+          const effectiveCellRef = explicitCellRef || this.pendingCellReference || scanned.gridCoordinates?.cellReference;
+          if (scanned.gridCoordinates && effectiveCellRef && effectiveCellRef !== scanned.gridCoordinates.cellReference) {
+            console.log(`📊 GhostWriter: Overriding cell reference "${scanned.gridCoordinates.cellReference}" → "${effectiveCellRef}" (explicit: ${!!explicitCellRef}, cached: ${!!this.pendingCellReference})`);
+            scanned.gridCoordinates.cellReference = effectiveCellRef;
           }
           // NOTE: Previously looked up column headers here, but removed for simplicity
           // Users will rename variables in the UI instead
           // Cell reference (e.g., "A5", "B10") will be used as the default variable name
-          console.log(`[RecordingManager] ContextScanner.scan result (no context) for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference });
+          console.log(`[RecordingManager] ContextScanner.scan result for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference, usedExplicitRef: !!explicitCellRef });
+          return scanned;
+          })()),
+        } : ((() => {
+          const scanned = ContextScanner.scan(element);
+          // CRITICAL: Use explicit cell ref if provided (from flush), else use cached, else use scanned
+          // Priority: explicitCellRef > this.pendingCellReference > scanned.gridCoordinates.cellReference
+          const effectiveCellRef = explicitCellRef || this.pendingCellReference || scanned.gridCoordinates?.cellReference;
+          if (scanned.gridCoordinates && effectiveCellRef && effectiveCellRef !== scanned.gridCoordinates.cellReference) {
+            console.log(`📊 GhostWriter: Overriding cell reference "${scanned.gridCoordinates.cellReference}" → "${effectiveCellRef}" (explicit: ${!!explicitCellRef}, cached: ${!!this.pendingCellReference})`);
+            scanned.gridCoordinates.cellReference = effectiveCellRef;
+          }
+          // NOTE: Previously looked up column headers here, but removed for simplicity
+          // Users will rename variables in the UI instead
+          // Cell reference (e.g., "A5", "B10") will be used as the default variable name
+          console.log(`[RecordingManager] ContextScanner.scan result (no context) for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference, usedExplicitRef: !!explicitCellRef });
           return scanned;
         })()),
         similarity: similarElements.length > 0 ? {
@@ -3502,71 +3151,10 @@ export class RecordingManager {
 
   /**
    * Send a workflow step to the side panel
+   * Delegates to StepPublisher module
    */
   private sendStep(step: WorkflowStep): void {
-    try {
-      // Debug: Verify visualSnapshot is in the step before sending
-      if (isWorkflowStepPayload(step.payload)) {
-        const hasVisualSnapshot = !!step.payload.visualSnapshot;
-        if (hasVisualSnapshot && step.payload.visualSnapshot) {
-          const snapshot = step.payload.visualSnapshot;
-          console.log('📸 GhostWriter: Sending step with visualSnapshot - viewport:', snapshot.viewport?.substring(0, 50) || 'missing', '...');
-        } else {
-          console.warn('📸 GhostWriter: Sending step WITHOUT visualSnapshot');
-        }
-
-        // NOTE: Removed page type addition to prevent zoom issues
-      }
-
-      chrome.runtime.sendMessage({
-        type: 'RECORDED_STEP',
-        payload: { 
-          step,
-          tabUrl: this.currentTabUrl || undefined,
-          tabTitle: this.currentTabTitle || undefined,
-          tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
-        },
-      } as import('../types/messages').RecordedStepMessage);
-      
-      // Generate description asynchronously (non-blocking)
-      this.generateStepDescription(step).catch((error) => {
-        console.warn('GhostWriter: Failed to generate step description:', error);
-      });
-    } catch (error) {
-      console.error('Error sending step:', error);
-    }
-  }
-
-  // NOTE: Removed analyzeCurrentPage() and getCurrentPageType() methods
-  // These were causing zoom issues during recording start on spreadsheets
-  // Page type analysis is not critical for recording functionality
-
-  /**
-   * Generate natural language description for a step (async, non-blocking)
-   */
-  private async generateStepDescription(step: WorkflowStep): Promise<void> {
-    try {
-      const result = await AIService.generateStepDescription(step);
-      if (result.description) {
-        // Update step with description
-        const stepId = step.payload.timestamp.toString();
-        const updatedStep: WorkflowStep = {
-          ...step,
-          description: result.description,
-        };
-        
-        // Send update message to side panel
-        chrome.runtime.sendMessage({
-          type: 'UPDATE_STEP',
-          payload: { stepId, step: updatedStep }
-        } as import('../types/messages').UpdateStepMessage);
-        
-        console.log(`📝 GhostWriter: Generated description for step: "${result.description}"`);
-      }
-    } catch (error) {
-      // Fail silently - description is enhancement
-      console.warn('GhostWriter: Description generation failed:', error);
-    }
+    this.stepPublisher.sendStep(step);
   }
 
   /**
@@ -3709,6 +3297,10 @@ export class RecordingManager {
   /**
    * Enrich step with reliable replayer data (LocatorBundle, Intent, Success Conditions)
    */
+  /**
+   * Enrich step with reliable replayer data (LocatorBundle, Intent, Success Conditions)
+   * Delegates to StepEnricher module
+   */
   private enrichStepWithReliableData(
     element: Element,
     stepType: 'CLICK' | 'INPUT' | 'KEYBOARD',
@@ -3720,47 +3312,7 @@ export class RecordingManager {
     stepGoal: StepGoal;
     suggestedCondition: SuggestedCondition;
   } | null {
-    if (!this.ENABLE_RELIABLE_RECORDING) {
-      return null;
-    }
-
-    try {
-      // Build comprehensive locator bundle with all strategies and features
-      const locatorBundle = buildLocatorBundle(element, document);
-      
-      // Infer machine-readable intent based on step type and element context
-      let intent: Intent;
-      switch (stepType) {
-        case 'CLICK':
-          intent = inferClickIntent(element);
-          break;
-        case 'INPUT':
-          intent = inferInputIntent(element, value || '');
-          break;
-        case 'KEYBOARD':
-          intent = inferKeyboardIntent(key || 'Enter');
-          break;
-      }
-      
-      // Build complete step goal with description and expected outcome
-      const stepGoal = buildStepGoal(intent, element);
-      
-      // Suggest success condition based on intent and context
-      const suggestedCondition = inferSuccessCondition(intent, element);
-      
-      console.log('🎯 GhostWriter: Enriched step with reliable data:', {
-        intent: intent.kind,
-        strategiesFound: locatorBundle.strategies.length,
-        hasScope: !!locatorBundle.scope,
-        disambiguators: locatorBundle.disambiguators.length,
-        conditionConfidence: suggestedCondition.confidence,
-      });
-      
-      return { locatorBundle, intent, stepGoal, suggestedCondition };
-    } catch (error) {
-      console.warn('GhostWriter: Failed to enrich step with reliable data:', error);
-      return null;
-    }
+    return this.stepEnricher.enrichStep(element, stepType, value, key);
   }
 }
 

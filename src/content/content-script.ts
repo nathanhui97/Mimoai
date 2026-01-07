@@ -3,11 +3,17 @@
  * Runs on all URLs and handles DOM interaction recording/replay
  */
 
+// Import version checker FIRST to detect stale code
+import { VersionChecker, EXTENSION_VERSION, BUILD_HASH } from '../lib/version-checker';
+
 // IMMEDIATE LOG - This should appear if script loads at all
-// Version identifier for debugging - update this when making significant changes
-const EXTENSION_VERSION = 'v0.1.1-starting-page-validation';
 const BUILD_TIMESTAMP = new Date().toISOString();
-console.log(`🚀 mimoai: Content script loaded (${EXTENSION_VERSION}) - ${BUILD_TIMESTAMP}`);
+console.log(`🚀 mimoai: Content script loaded (${EXTENSION_VERSION}) [${BUILD_HASH}] - ${BUILD_TIMESTAMP}`);
+
+// Check version immediately to detect cached code
+VersionChecker.checkVersion('content-script').catch(err => {
+  console.error('Failed to check version:', err);
+});
 
 // Dynamically detect build hash from script URL
 try {
@@ -45,6 +51,7 @@ import { AIWorkflowAnalyzer } from './ai-workflow-analyzer';
 import { PatternDetector } from './pattern-detector';
 import { AIDataBuilder } from './ai-data-builder';
 import { VisualSnapshotService } from './visual-snapshot';
+import { SheetStateExtractor } from './sheet-state-extractor';
 import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep } from '../types/workflow';
 // import { isWorkflowStepPayload } from '../types/workflow'; // Unused after removing Universal Engine
@@ -393,6 +400,39 @@ function handleFullMessage(
           data: { initialFullPageSnapshot: snapshot || null },
         });
         return false;
+      }
+
+      case 'GET_COLUMN_HEADERS': {
+        // Fetch column headers for spreadsheet cells
+        (async () => {
+          try {
+            const cellRefs = message.payload?.cellRefs || [];
+            if (cellRefs.length === 0) {
+              sendResponse({
+                success: true,
+                data: { headers: {} },
+              });
+              return;
+            }
+            
+            console.log('[content-script] Fetching headers for cells:', cellRefs);
+            const headersMap = await SheetStateExtractor.getHeadersForCells(cellRefs);
+            const headers = Object.fromEntries(headersMap);
+            
+            console.log('[content-script] Headers fetched:', headers);
+            sendResponse({
+              success: true,
+              data: { headers },
+            });
+          } catch (error) {
+            console.error('[content-script] Error fetching column headers:', error);
+            sendResponse({
+              success: false,
+              error: error instanceof Error ? error.message : 'Failed to fetch column headers',
+            });
+          }
+        })();
+        return true; // Keep channel open for async response
       }
 
       case 'REFRESH_PAGE': {

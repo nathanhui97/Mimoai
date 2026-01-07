@@ -397,6 +397,23 @@ export class AIService {
       };
     }
 
+    // FAST PATH: Skip AI for spreadsheet INPUT steps - use simple template instead
+    if (step.type === 'INPUT') {
+      const payload = step.payload;
+      const cellRef = payload.spreadsheetContext?.recordedIntent?.cellRef || 
+                     payload.context?.gridCoordinates?.cellReference;
+      
+      if (cellRef) {
+        // Use simple template for spreadsheet cells - no AI needed!
+        const description = `Enter "${payload.value}" into cell ${cellRef}`;
+        console.log(`[AIService] 📊 Skipping AI for spreadsheet INPUT (cell ${cellRef}) - using template`);
+        return {
+          description,
+          confidence: 1,
+        };
+      }
+    }
+
     try {
       // Generate cache key (include visual snapshot hash to differentiate similar steps)
       // CRITICAL: Include decisionSpace selectedText and selectedIndex to differentiate dropdown items
@@ -405,6 +422,13 @@ export class AIService {
       // Use first 500 chars of snapshot (instead of 200) to better differentiate widgets with similar selectors
       const snapshotHash = step.payload.visualSnapshot?.elementSnippet?.substring(0, 500) || 
                           step.payload.visualSnapshot?.viewport?.substring(0, 500);
+      
+      // Include clipboard metadata in cache key for copy/paste operations
+      // This ensures different copy/paste operations get different descriptions
+      const clipboardMetadata = step.payload.aiEvidence?.clipboardMetadata;
+      const clipboardValue = clipboardMetadata?.copiedValue ? 
+        clipboardMetadata.copiedValue.substring(0, 100) : // Use first 100 chars for cache key
+        undefined;
       
       const cacheKey = AICache.generateKey({
         type: 'step_description',
@@ -422,6 +446,10 @@ export class AIService {
         elementBounds: step.payload.elementBounds ? 
           `${step.payload.elementBounds.x},${step.payload.elementBounds.y},${step.payload.elementBounds.width},${step.payload.elementBounds.height}` : 
           undefined,
+        // Include clipboard metadata to differentiate copy/paste operations
+        clipboardValue: clipboardValue,
+        keyboardKey: step.payload.keyboardDetails?.key,
+        keyboardModifiers: step.payload.keyboardDetails?.modifiers,
       });
 
       // Check local cache first
@@ -433,10 +461,17 @@ export class AIService {
       const isWidgetClick = step.payload.selector?.includes('gs-report-widget-element') || 
                            step.payload.selector?.includes('widget-element');
       
-      // Skip cache for widget clicks that have visual snapshots but no decisionSpace
-      // These are widget clicks (not menu items) and should be analyzed fresh based on the visual snapshot
-      // to identify the specific widget title
-      if (hasVisualSnapshot && isWidgetClick && !hasDecisionSpace) {
+      // Skip cache for copy/paste operations - they should always get fresh descriptions based on clipboard content
+      const isCopyPasteOperation = step.type === 'KEYBOARD' && 
+        ((step.payload.keyboardDetails?.key?.toLowerCase() === 'c' && 
+          (step.payload.keyboardDetails?.modifiers?.ctrl || step.payload.keyboardDetails?.modifiers?.meta)) ||
+         (step.payload.keyboardDetails?.key?.toLowerCase() === 'v' && 
+          (step.payload.keyboardDetails?.modifiers?.ctrl || step.payload.keyboardDetails?.modifiers?.meta)));
+      
+      if (isCopyPasteOperation) {
+        console.log('GhostWriter: Skipping cache for copy/paste operation (will analyze fresh based on clipboard content)');
+        // Don't check cache - go straight to AI analysis to get semantic description
+      } else if (hasVisualSnapshot && isWidgetClick && !hasDecisionSpace) {
         console.log('GhostWriter: Skipping cache for widget click with visual snapshot (will analyze fresh to identify specific widget)');
         // Don't check cache - go straight to AI analysis
       } else {

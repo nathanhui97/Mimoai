@@ -12,7 +12,8 @@ export class ElementTextCapture {
     const tagName = element.tagName.toLowerCase();
     
     // For buttons, links, labels, and interactive elements
-    if (['button', 'a', 'label', 'span', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tagName)) {
+    // CRITICAL: Include 'li' and 'option' for dropdown/menu items!
+    if (['button', 'a', 'label', 'span', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'option'].includes(tagName)) {
       // PRIORITY 1: Check aria-label first (most reliable for buttons/icons)
       if (tagName === 'button' || tagName === 'a' || element.getAttribute('role') === 'button') {
         const ariaLabel = element.getAttribute('aria-label');
@@ -88,10 +89,37 @@ export class ElementTextCapture {
     // For input elements with value
     if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
       // Don't capture input values as element text (that's in the value field)
-      // But we can capture placeholder if no other text
+      // PRIORITY 1: Check aria-label first (most reliable)
+      const ariaLabel = element.getAttribute('aria-label');
+      if (ariaLabel && ariaLabel.trim().length > 0) {
+        return ariaLabel.trim();
+      }
+      
+      // PRIORITY 2: Check associated label element
+      const id = element.id;
+      if (id) {
+        const labelElement = document.querySelector(`label[for="${id}"]`);
+        if (labelElement && labelElement.textContent) {
+          const labelText = labelElement.textContent.trim();
+          if (labelText.length > 0) {
+            console.log('[ElementText] 📝 Using associated label for input:', labelText);
+            return labelText;
+          }
+        }
+      }
+      
+      // PRIORITY 3: Check placeholder text
       const placeholder = element.placeholder;
-      if (placeholder) {
+      if (placeholder && placeholder.trim().length > 0) {
         return placeholder.trim();
+      }
+      
+      // PRIORITY 4: Check name attribute (common in forms)
+      const name = element.name;
+      if (name && name.trim().length > 0) {
+        // Convert camelCase/snake_case to readable text
+        const readable = name.replace(/([A-Z])/g, ' $1').replace(/_/g, ' ').trim();
+        return readable;
       }
     }
 
