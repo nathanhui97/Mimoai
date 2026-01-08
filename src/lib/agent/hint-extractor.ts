@@ -343,6 +343,10 @@ export class HintExtractor {
     // Extract scope hint
     let recordedScopeHint: string | undefined;
     
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'hint-extractor.ts:346',message:'SCOPE_EXTRACT_START',data:{payloadScope:payload.scope,containerText:payload.context?.container?.text?.substring(0,100)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
     if (payload.scope) {
       switch (payload.scope.kind) {
         case 'WIDGET':
@@ -360,6 +364,10 @@ export class HintExtractor {
     if (!recordedScopeHint) {
       recordedScopeHint = payload.context?.container?.text;
     }
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'hint-extractor.ts:370',message:'SCOPE_EXTRACTED',data:{recordedScopeHint,payloadScopeKind:payload.scope?.kind},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     
     const recordedRowKey = payload.context?.gridCoordinates?.rowHeader || 
                           payload.context?.gridCoordinates?.cellReference;

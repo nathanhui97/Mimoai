@@ -41,7 +41,8 @@ export async function executeClick(
     console.log('[SimpleClick] Detected dropdown option/menu item, checking if in scrollable container...');
     
     // Find parent listbox/menu
-    const listbox = targetElement.closest('[role="listbox"], [role="menu"], [role="listitem"]');
+    const { MenuDetector } = await import('../../menu-detector');
+    const listbox = MenuDetector.findParentMenu(targetElement);
     if (listbox) {
       console.log('[SimpleClick] Found parent listbox/menu, scrolling option into view...');
       
@@ -58,9 +59,15 @@ export async function executeClick(
                                  listboxRect.right <= window.innerWidth;
         
         if (!isListboxVisible) {
-          console.log('[SimpleClick] Listbox not fully visible, scrolling listbox into view...');
-          listbox.scrollIntoView({ block: 'center', behavior: 'instant' });
-          await sleep(150);
+          // CRITICAL: Only scroll if listbox is NOT in shadow DOM
+          const isListboxInShadowDOM = listbox.getRootNode() instanceof ShadowRoot;
+          if (!isListboxInShadowDOM) {
+            console.log('[SimpleClick] Listbox not fully visible, scrolling listbox into view...');
+            listbox.scrollIntoView({ block: 'center', behavior: 'instant' });
+            await sleep(150);
+          } else {
+            console.log('[SimpleClick] ⚠️ Listbox in shadow DOM - widget already visible, skipping scroll');
+          }
         }
       }
       
@@ -81,9 +88,15 @@ export async function executeClick(
     if (!interactability.ok) {
       // If element is obscured, try scrolling it into view
       if (interactability.reason?.includes('obscured')) {
-        console.log('[SimpleClick] Element obscured, scrolling into view...');
-        (targetElement as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
-        await sleep(300);
+        // CRITICAL: Only scroll if element is NOT in shadow DOM
+        const isInShadowDOM = targetElement.getRootNode() instanceof ShadowRoot;
+        if (!isInShadowDOM) {
+          console.log('[SimpleClick] Element obscured, scrolling into view...');
+          (targetElement as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' });
+          await sleep(300);
+        } else {
+          console.log('[SimpleClick] ⚠️ Element in shadow DOM - widget already visible, skipping scroll');
+        }
         
         // Re-check interactability after scrolling
         interactability = checkInteractability(targetElement);
@@ -367,11 +380,9 @@ async function verifyClickSuccess(
   }
   
   // Check if dropdown appeared
-  const newDropdown = document.querySelector(
-    '[role="listbox"]:not([hidden]), ' +
-    '[role="menu"]:not([hidden])'
-  );
-  if (newDropdown && isVisible(newDropdown)) {
+  const { MenuDetector } = await import('../../menu-detector');
+  const newDropdown = MenuDetector.findVisibleMenu();
+  if (newDropdown) {
     return true;
   }
   

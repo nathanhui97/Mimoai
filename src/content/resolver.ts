@@ -13,6 +13,7 @@ import type { Intent } from '../types/intent';
 import { resolveScopeContainer } from '../types/scope';
 import { CandidateFinder } from './candidate-finder';
 import type { CandidateResult } from './candidate-finder';
+import { MenuDetector } from './menu-detector';
 
 /**
  * Metrics collected during resolution
@@ -64,18 +65,29 @@ export class Resolver {
   ): ResolveResult {
     const startTime = Date.now();
     
+    // 🎯 CRITICAL: For menu items, skip scope and search document-wide
+    // Menu items are often in portals/overlays outside the widget DOM tree
+    const roleStrategy = bundle.strategies.find(s => s.type === 'role');
+    const rolePart = roleStrategy?.value?.split(':')[0]; // Extract role part (e.g., "menuitem" from "menuitem:Download Data")
+    const isMenuItem = rolePart === 'menuitem' || rolePart === 'option';
+    
     // Find scope container
     // CRITICAL: If scope resolution fails, fall back to document-wide search
     // We'll use scope for disambiguation later if multiple candidates are found
-    let scopeContainer = bundle.scope 
+    // SKIP scope for menu items - they're in portals/overlays
+    let scopeContainer = (!isMenuItem && bundle.scope)
       ? resolveScopeContainer(bundle.scope, doc)
       : doc.body;
     
-    if (!scopeContainer) {
-      const scopeDesc = bundle.scope?.kind === 'WIDGET' 
-        ? `${bundle.scope.kind}:${bundle.scope.title}`
-        : bundle.scope?.kind || 'unknown';
-      console.warn(`[Resolver] ⚠️ Scope "${scopeDesc}" not found, falling back to document-wide search`);
+    if (!scopeContainer || (isMenuItem && bundle.scope)) {
+      if (isMenuItem) {
+        console.log(`[Resolver] 🎯 Menu item detected - skipping scope, searching document-wide (menus are in portals)`);
+      } else {
+        const scopeDesc = bundle.scope?.kind === 'WIDGET' 
+          ? `${bundle.scope.kind}:${bundle.scope.title}`
+          : bundle.scope?.kind || 'unknown';
+        console.warn(`[Resolver] ⚠️ Scope "${scopeDesc}" not found, falling back to document-wide search`);
+      }
       scopeContainer = doc.body; // Fall back to full document search
       // DON'T abort - continue with document-wide search and use scope for disambiguation later
     }
@@ -113,8 +125,28 @@ export class Resolver {
       allCandidates.push(...candidates);
     }
     
+    // CRITICAL: If looking for menu items, filter to ONLY items in the currently visible menu
+    // This prevents finding "Download Data" from OTHER widgets' menus
+    let filteredCandidates = allCandidates;
+    if (bundle.role === 'menuitem' || bundle.role === 'option') {
+      const visibleMenu = MenuDetector.findVisibleMenu();
+      
+      if (visibleMenu) {
+        const menuItems = MenuDetector.extractMenuItems(visibleMenu);
+        console.log(`[Resolver] 🎯 Filtering ${allCandidates.length} candidates to only those in the visible menu (${menuItems.length} items)`);
+        
+        filteredCandidates = allCandidates.filter(candidate => 
+          menuItems.includes(candidate.element)
+        );
+        
+        console.log(`[Resolver] ✅ Filtered to ${filteredCandidates.length} candidates in visible menu`);
+      } else {
+        console.warn(`[Resolver] ⚠️ No visible menu found - can't filter menu item candidates`);
+      }
+    }
+    
     // Deduplicate by element
-    const uniqueCandidates = this.deduplicateCandidates(allCandidates);
+    const uniqueCandidates = this.deduplicateCandidates(filteredCandidates);
     
     // Score all candidates
     const scoredCandidates = uniqueCandidates.map(candidate => 

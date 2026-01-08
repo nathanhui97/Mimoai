@@ -386,9 +386,25 @@ export class RecoveryEngine {
       const element = document.querySelector(target);
       if (element) {
         try {
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          // Wait for scroll to complete
-          await this.sleep(500);
+          // CRITICAL: Only scroll if element is NOT in shadow DOM
+          const isInShadowDOM = element.getRootNode() instanceof ShadowRoot;
+          const rect = element.getBoundingClientRect();
+          const isInViewport = (
+            rect.top >= 0 &&
+            rect.left >= 0 &&
+            rect.bottom <= window.innerHeight &&
+            rect.right <= window.innerWidth
+          );
+          
+          if (!isInShadowDOM && !isInViewport) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Wait for scroll to complete
+            await this.sleep(500);
+          } else if (isInShadowDOM) {
+            console.log('[RecoveryEngine] ⚠️ Element in shadow DOM - widget already visible, skipping scroll');
+          } else {
+            console.log('[RecoveryEngine] Element already in viewport, skipping scroll');
+          }
           
           return {
             success: true,

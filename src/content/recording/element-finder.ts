@@ -42,7 +42,8 @@ export class ElementFinder {
     // CRITICAL: Check if element is inside a dropdown/listbox/menu container
     // Many React dropdowns don't set role="option" on the option elements themselves
     // They just use div elements inside a [role="listbox"] or [role="menu"] container
-    const container = element.closest('[role="listbox"], [role="menu"], [role="list"], select, [data-baseui="listbox"], [data-baseui="menu"]');
+    // Use traditional selector for synchronous operation during recording
+    const container = element.closest('[role="listbox"], [role="menu"], [role="list"], select, ul, ol');
     if (container && element !== container) {
       // ENHANCED LOGGING: Show container details
       const containerInfo = {

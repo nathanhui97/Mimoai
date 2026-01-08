@@ -240,15 +240,34 @@ export class VisionAssist {
     // Step 2: Click the validated element (NOT raw coordinates)
     const element = validation.matchedElement!;
     
-    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // CRITICAL: Only scroll if element is NOT in shadow DOM and NOT in viewport
+    // Elements inside shadow roots should NEVER trigger page scrolls!
+    const isInShadowDOM = element.getRootNode() instanceof ShadowRoot;
+    const rect = element.getBoundingClientRect();
+    const isInViewport = (
+      rect.top >= 0 &&
+      rect.left >= 0 &&
+      rect.bottom <= window.innerHeight &&
+      rect.right <= window.innerWidth
+    );
+    
+    if (!isInShadowDOM && !isInViewport) {
+      console.log('[Tier3Vision] Element not in viewport, scrolling into view');
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else if (isInShadowDOM) {
+      console.log('[Tier3Vision] ⚠️ Element in shadow DOM - NEVER scroll page (widget already visible)');
+    } else {
+      console.log('[Tier3Vision] Element already in viewport, skipping scroll');
+    }
     
     if (element instanceof HTMLElement) {
       element.focus();
     }
     
-    const rect = element.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
+    // Reuse rect if already computed, otherwise get fresh one
+    const elementRect = element.getBoundingClientRect();
+    const centerX = elementRect.left + elementRect.width / 2;
+    const centerY = elementRect.top + elementRect.height / 2;
     
     element.dispatchEvent(new MouseEvent('mousedown', {
       bubbles: true,

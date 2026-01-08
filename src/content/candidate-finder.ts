@@ -78,20 +78,32 @@ export class CandidateFinder {
   ): Map<LocatorType, CandidateResult[]> {
     const results = new Map<LocatorType, CandidateResult[]>();
     
+    // CRITICAL: Check if we're looking for a menu item
+    // Menu items are rendered in portals/overlays OUTSIDE the widget scope, so we MUST search document-wide
+    const isMenuItem = bundle.role === 'menuitem' || bundle.role === 'option';
+    
     // Resolve scope container
     // CRITICAL: If scope resolution fails, fall back to document-wide search
     // We'll use scope for disambiguation later if multiple candidates are found
-    let scopeContainer = bundle.scope 
-      ? resolveScopeContainer(bundle.scope, doc)
-      : doc.body;
+    let scopeContainer: Element | null;
     
-    if (!scopeContainer) {
-      const scopeDesc = bundle.scope?.kind === 'WIDGET' 
-        ? `${bundle.scope.kind}:${bundle.scope.title}`
-        : bundle.scope?.kind || 'unknown';
-      console.warn(`[CandidateFinder] ⚠️ Scope "${scopeDesc}" not found, falling back to document-wide search`);
-      scopeContainer = doc.body; // Fall back to full document search
-      // DON'T abort - continue with document-wide search and use scope for disambiguation later
+    if (isMenuItem) {
+      // Menu items are in portals - ALWAYS search document-wide
+      console.log(`[CandidateFinder] 🎯 Menu item detected (role: ${bundle.role}) - searching document-wide (menus are in portals)`);
+      scopeContainer = doc.body;
+    } else {
+      scopeContainer = bundle.scope 
+        ? resolveScopeContainer(bundle.scope, doc)
+        : doc.body;
+      
+      if (!scopeContainer) {
+        const scopeDesc = bundle.scope?.kind === 'WIDGET' 
+          ? `${bundle.scope.kind}:${bundle.scope.title}`
+          : bundle.scope?.kind || 'unknown';
+        console.warn(`[CandidateFinder] ⚠️ Scope "${scopeDesc}" not found, falling back to document-wide search`);
+        scopeContainer = doc.body; // Fall back to full document search
+        // DON'T abort - continue with document-wide search and use scope for disambiguation later
+      }
     }
     
     // Find candidates for each strategy
@@ -120,7 +132,7 @@ export class CandidateFinder {
       if (isDropdownOption) {
         console.log('CandidateFinder: No candidates found in scope, searching entire document for dropdown option...');
         // Search entire document body for dropdown options
-        const allOptions = doc.querySelectorAll('[role="option"], li[role="option"], [role="listbox"] [role="option"], li');
+        const allOptions = doc.querySelectorAll('[role="option"], [role="menuitem"], li, .mat-menu-item, .slds-listbox__option, .MuiMenuItem-root, .ant-dropdown-menu-item');
         for (const option of Array.from(allOptions)) {
           if (this.isElementVisible(option)) {
             // Get text from the option (including nested children)
@@ -129,7 +141,7 @@ export class CandidateFinder {
             // If no direct text, check nested children (for wrapper divs)
             if (!optionText || optionText.length === 0) {
               const childTextElements = option.querySelectorAll('div, span, p, label');
-              for (const child of Array.from(childTextElements)) {
+              for (const child of Array.from(childTextElements) as Element[]) {
                 const childText = child.textContent?.trim();
                 if (childText && childText.length > 0) {
                   optionText = childText;
@@ -156,7 +168,7 @@ export class CandidateFinder {
                     let clickableElement = option;
                     if (option.getAttribute('role') === 'option' || option.tagName === 'LI') {
                       const clickableChildren = option.querySelectorAll('div, span, button, a');
-                      for (const child of Array.from(clickableChildren)) {
+                      for (const child of Array.from(clickableChildren) as Element[]) {
                         const childText = child.textContent?.trim();
                         if (childText && TextMatcher.similarityScore(textToMatch, childText) >= 0.7) {
                           if (child instanceof HTMLElement && this.isElementVisible(child)) {

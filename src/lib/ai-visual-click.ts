@@ -1068,14 +1068,31 @@ export class AIVisualClickService {
     _coordinates: { x: number; y: number }
   ): Promise<boolean> {
     try {
-      // Scroll element into view if needed
-      element.scrollIntoView({ block: 'center', behavior: 'instant' });
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-      // Get updated coordinates after scroll
+      // CRITICAL: Only scroll if element is NOT in shadow DOM and NOT in viewport
+      // Elements inside shadow roots should NEVER trigger page scrolls!
+      const isInShadowDOM = element.getRootNode() instanceof ShadowRoot;
       const rect = element.getBoundingClientRect();
-      const clickX = rect.left + rect.width / 2;
-      const clickY = rect.top + rect.height / 2;
+      const isInViewport = (
+        rect.top >= 0 &&
+        rect.left >= 0 &&
+        rect.bottom <= window.innerHeight &&
+        rect.right <= window.innerWidth
+      );
+      
+      if (!isInShadowDOM && !isInViewport) {
+        console.log('[AIVisualClick] Element not in viewport, scrolling into view');
+        element.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } else if (isInShadowDOM) {
+        console.log('[AIVisualClick] ⚠️ Element in shadow DOM - NEVER scroll page (widget already visible)');
+      } else {
+        console.log('[AIVisualClick] Element already in viewport, skipping scroll');
+      }
+
+      // Get updated coordinates after scroll (reuse rect if already computed)
+      const elementRect = element.getBoundingClientRect();
+      const clickX = elementRect.left + elementRect.width / 2;
+      const clickY = elementRect.top + elementRect.height / 2;
 
       // Create and dispatch mouse events
       const options = {

@@ -134,6 +134,12 @@ interface DOMAgentRequest {
   // Ranked candidates for LLM selection (max 8)
   currentCandidates?: RankedCandidate[];
   
+  // Available widgets on the page (for LLM to choose from when scope is ambiguous)
+  availableWidgets?: string[];
+  
+  // Inherited scope hint (if recorded scope was wrong, use this instead)
+  inheritedScopeHint?: string;
+  
   // NEW: Spreadsheet context (only present on sheet domains)
   spreadsheetContext?: {
     isSpreadsheet: true;
@@ -361,7 +367,7 @@ serve(async (req) => {
 // ============================================================================
 
 function buildAgentPrompt(payload: DOMAgentRequest): string {
-  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot } = payload;
+  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint } = payload;
   
   // Find the current hint to focus on
   const currentHint = hints.find((h, i) => i >= currentHintIndex && !h.completed);
@@ -546,7 +552,11 @@ ${currentHint
      ${currentHint.targetRole ? `Target role: ${currentHint.targetRole}` : ''}
      ${currentHint.targetPlaceholder ? `Placeholder: "${currentHint.targetPlaceholder}"` : ''}
      ${currentHint.value ? `Value to enter: "${currentHint.value}"` : ''}
-     ${currentHint.recordedScopeHint ? `📍 LOOK IN WIDGET/SECTION: "${currentHint.recordedScopeHint}" ⚠️ CRITICAL - Element is in this container!` : ''}
+     ${inheritedScopeHint 
+       ? `📍 LOOK IN WIDGET/SECTION: "${inheritedScopeHint}" ⚠️ CRITICAL - Using inherited scope from previous step (recorded scope "${currentHint.recordedScopeHint}" doesn't match any widget)`
+       : currentHint.recordedScopeHint 
+         ? `📍 LOOK IN WIDGET/SECTION: "${currentHint.recordedScopeHint}" ⚠️ CRITICAL - Element is in this container!`
+         : ''}
      ${currentHint.recordedAriaLabel ? `🏷️ aria-label: "${currentHint.recordedAriaLabel}"` : ''}
      ${currentHint.nearbyText?.length > 0 ? `🔍 Nearby text: [${currentHint.nearbyText.join(', ')}]` : ''}
      ${currentHint.failureCount ? `⚠️ This hint has failed ${currentHint.failureCount} times already!` : ''}
@@ -579,6 +589,15 @@ ${currentHint
      YOU MUST: Return "hintStepIndex": ${hints.indexOf(currentHint)} in your response`
   : 'All steps completed - check if goal is achieved'}
 
+${availableWidgets.length > 0 ? `
+## 📊 Available Widgets on Page
+
+The following widgets are visible on the page. Use this to help choose the correct element:
+${availableWidgets.map((w, i) => `  ${i + 1}. "${w}"`).join('\n')}
+
+💡 TIP: If the hint mentions a widget name or you just clicked "More Options" in a widget, look for candidates in that same widget!
+` : ''}
+
 ${currentCandidates.length > 0 ? `
 ## 🎯 Candidates (YOU MUST CHOOSE ONE)
 
@@ -594,10 +613,13 @@ DO NOT invent a new target. DO NOT return a target with role/name/text.
 ONLY return chooseCandidateIndex.
 
 ✅ SEMANTIC MATCHING - Choose the BEST candidate by:
-   1. FIRST: Match recordedScopeHint from hint to candidate's scope/widget (HIGHEST PRIORITY!)
-      - If hint shows "📍 LOOK IN WIDGET/SECTION: XYZ", find candidate with matching scope/widget
+   1. FIRST: Match widget scope (HIGHEST PRIORITY!)
+      - If hint shows "📍 LOOK IN WIDGET/SECTION: XYZ", find candidate with matching widget title
+      - If inheritedScopeHint is provided, use that instead of recordedScopeHint
+      - If you just clicked "More Options" in a widget, the next action (like "Download Data") should be in the SAME widget
       - Example: hint has "OFFERS EXPIRING", choose candidate with widget="OFFERS EXPIRING..."
-   2. SECOND: Match ROLE (combobox, button, textbox, etc.)
+      - Example: previous step was in "BRAND SALES OVERVIEW", current step should also be in "BRAND SALES OVERVIEW"
+   2. SECOND: Match ROLE (combobox, button, textbox, menuitem, etc.)
    3. THIRD: Match NAME/PLACEHOLDER (partial or fuzzy match is OK)
    4. If only ONE candidate matches both scope AND role → select it even if unlabeled
 

@@ -80,6 +80,10 @@ export class Tier1Executor {
   static async execute(action: AgentAction): Promise<Tier1ExecutionResult> {
     console.log(`[Tier1] 🎯 Executing: ${action.type}`, action.params.target || action.params);
 
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:80',message:'TIER1_EXECUTE_START',data:{actionType:action.type,targetRole:action.params.target?.role,targetName:action.params.target?.name?.substring(0,50),scopeHint:action.params.target?.scopeHint},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+
     try {
       switch (action.type) {
         case 'click':
@@ -156,6 +160,10 @@ export class Tier1Executor {
       };
     }
 
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:160',message:'TIER1_CLICK_START',data:{targetRole:target.role,targetName:target.name?.substring(0,50),scopeHint:target.scopeHint},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+
     // Build locator bundle from semantic target
     const bundle = this.buildLocatorBundle(target);
     
@@ -224,6 +232,39 @@ export class Tier1Executor {
     const actualElementText = element.textContent?.trim().substring(0, 50) || '';
     console.log(`[Tier1] ✅ Clicking element: ${element.tagName} ${actualElementText}`);
     this.clickElement(element);
+    
+    // CRITICAL: If this is a dropdown trigger (e.g., "More Options"), wait for menu to appear
+    // This ensures menu items are visible before the next step tries to click them
+    const ariaLabel = element.getAttribute('aria-label')?.toLowerCase() || '';
+    const elementText = element.textContent?.toLowerCase() || '';
+    const role = element.getAttribute('role');
+    
+    const isDropdownTrigger = element.getAttribute('aria-haspopup') === 'true' ||
+                             element.getAttribute('aria-expanded') !== null ||
+                             element.getAttribute('aria-controls') !== null ||
+                             ((element.tagName === 'BUTTON' || role === 'button') && 
+                              (ariaLabel.includes('more') || 
+                               ariaLabel.includes('options') ||
+                               ariaLabel.includes('menu') ||
+                               elementText.includes('more') || 
+                               elementText.includes('options')));
+    
+    console.log(`[Tier1] 🔍 Dropdown trigger check: role=${role}, ariaLabel="${ariaLabel.substring(0,30)}", text="${elementText.substring(0,30)}", isDropdownTrigger=${isDropdownTrigger}`);
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:250',message:'DROPDOWN_TRIGGER_CHECK',data:{role,ariaLabel:ariaLabel.substring(0,50),elementText:elementText.substring(0,50),isDropdownTrigger},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'MENU'})}).catch(()=>{});
+    // #endregion
+    
+    if (isDropdownTrigger) {
+      console.log(`[Tier1] 🔽 Dropdown trigger detected, waiting for menu to appear...`);
+      const { waitForDropdownMenu } = await import('../content/universal-execution/state-verifier');
+      const menu = await waitForDropdownMenu(2000); // Wait up to 2 seconds for menu
+      if (menu) {
+        console.log(`[Tier1] ✅ Dropdown menu appeared with ${menu.querySelectorAll('[role="menuitem"], [role="option"]').length} options`);
+      } else {
+        console.warn(`[Tier1] ⚠️ Dropdown menu didn't appear within 2 seconds, continuing anyway`);
+      }
+    }
     
     // Wait for stability
     await StateWaitEngine.waitForStability({
@@ -498,17 +539,35 @@ export class Tier1Executor {
         let score = 0;
         const className = el.className?.toString() || '';
         const tagName = el.tagName.toLowerCase();
+        const rect = el.getBoundingClientRect();
+        const viewportHeight = window.innerHeight;
+        
+        // CRITICAL: Heavily favor viewport-sized containers
+        // Elements taking up most of the viewport are almost always the main scroll area
+        const viewportCoverage = rect.height / viewportHeight;
+        if (viewportCoverage > 0.8) score += 100; // Covers 80%+ of viewport
+        else if (viewportCoverage > 0.6) score += 80; // Covers 60%+ of viewport
+        else if (viewportCoverage > 0.4) score += 50; // Covers 40%+ of viewport
+        else if (viewportCoverage > 0.2) score += 20; // Covers 20%+ of viewport
+        
+        // CRITICAL: Penalize tiny visible areas (e.g., dropdowns, small widgets)
+        // If clientHeight < 100px, it's probably not the main scroll container
+        if (el.clientHeight < 100) score -= 50;
+        else if (el.clientHeight < 200) score -= 20;
         
         // Prefer elements with content-related classes
         if (className.includes('content')) score += 50;
         if (className.includes('main')) score += 40;
         if (className.includes('scroll')) score += 30;
-        if (className.includes('wrapper')) score += 20;
+        if (className.includes('wrapper')) score += 10; // Reduced - too generic
         if (className.includes('container')) score += 10;
         if (className.includes('page')) score += 15;
         if (className.includes('app')) score += 10;
         if (className.includes('viewer')) score += 25;
         if (className.includes('renderer')) score += 25;
+        
+        // Gainsight-specific: gridster is the main dashboard container
+        if (className.includes('gridster')) score += 60;
         
         // Prefer semantic elements
         if (tagName === 'main') score += 60;
@@ -522,6 +581,11 @@ export class Tier1Executor {
         
         // Deprioritize body (too generic)
         if (tagName === 'body') score -= 20;
+        
+        // Deprioritize filter/dropdown/navigation elements
+        if (className.includes('filter') || className.includes('dropdown') || className.includes('nav')) {
+          score -= 30;
+        }
         
         // Only consider elements with reasonable score
         if (score > 0) {
@@ -1016,8 +1080,45 @@ export class Tier1Executor {
   ): Promise<Tier1ExecutionResult> {
     console.log('[Tier1] Resolving element with', bundle.strategies.length, 'strategies');
     
-    // PRIORITY 1: Try recorded fallback selectors FIRST!
-    // But sort them by SPECIFICITY - specific selectors should come before broad container XPaths
+      // PRIORITY 1: Try recorded fallback selectors FIRST!
+      // But sort them by SPECIFICITY - specific selectors should come before broad container XPaths
+      // NOTE: 2 days ago, this worked for menu items with fuzzy text matching - we should try it first
+      
+      // CRITICAL: For menu items, check if dropdown menu is visible first
+      const targetRole = bundle.strategies.find(s => s.type === 'role')?.value;
+      const rolePart = targetRole?.split(':')[0];
+      const isMenuItem = rolePart === 'menuitem' || rolePart === 'option';
+      
+      if (isMenuItem) {
+        const { MenuDetector } = await import('../content/menu-detector');
+        
+        // CRITICAL: First check if menu is already visible (menu might already be open)
+        let menu = MenuDetector.findVisibleMenu();
+        
+        // #region agent log
+        const nameStrategy = bundle.strategies.find(s => (s.type as string) === 'name' || (s.type as string) === 'text' || (s.type as string) === 'aria-label');
+        fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1083',message:'MENU_ITEM_RESOLVE_START',data:{menuFound:!!menu,menuOptionsCount:menu ? MenuDetector.extractMenuItems(menu).length : 0,targetName:nameStrategy?.value?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        
+        if (menu) {
+          const items = MenuDetector.extractMenuItems(menu);
+          console.log(`[Tier1] ✅ Menu already visible: ${menu.tagName}.${menu.className.substring(0, 30)} with ${items.length} items`);
+        } else {
+          console.warn(`[Tier1] ⚠️ Menu item resolution attempted but no dropdown menu is visible! Waiting for menu...`);
+          // Menu not visible yet - wait for it to appear (e.g., after clicking trigger)
+          const waitResult = await MenuDetector.waitForMenu(2000);
+          menu = waitResult.menu;
+          if (menu) {
+            console.log(`[Tier1] ✅ Menu found via ${waitResult.method} (${waitResult.confidence} confidence) with ${MenuDetector.extractMenuItems(menu).length} items`);
+          } else {
+            console.error(`[Tier1] ❌ Menu never appeared - menu items won't be findable!`);
+          }
+        }
+      }
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1075',message:'RESOLVE_ELEMENT_START',data:{hasFallbackSelectors:!!bundle.recordedFallbackSelectors,fallbackCount:bundle.recordedFallbackSelectors?.length || 0,strategiesCount:bundle.strategies.length,scopeHint:bundle.scopeHint,isMenuItem},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
     if (bundle.recordedFallbackSelectors && bundle.recordedFallbackSelectors.length > 0) {
       console.log(`[Tier1] 🎯 Trying ${bundle.recordedFallbackSelectors.length} recorded fallback selectors...`);
       
@@ -1025,7 +1126,12 @@ export class Tier1Executor {
       // This ensures we try [aria-label="X"] BEFORE //section[contains(.,"Y")]//button
       const sortedSelectors = [...bundle.recordedFallbackSelectors].sort((a, b) => {
         const scoreSelector = (sel: string): number => {
-          // Highest priority: Attribute-based selectors (very specific)
+          // Highest priority: Shadow-piercing selectors with aria-label (very specific)
+          // These target a specific element inside a specific shadow host
+          if (sel.includes(' >> ') && sel.includes('[aria-label=')) return 110;
+          if (sel.includes(' >> ')) return 105;
+          
+          // High priority: Attribute-based selectors (very specific)
           if (sel.includes('[aria-label=')) return 100;
           if (sel.includes('[title=')) return 95;
           if (sel.includes('[data-testid=') || sel.includes('[data-test-id=')) return 90;
@@ -1066,6 +1172,10 @@ export class Tier1Executor {
         try {
           let element: Element | null = null;
           
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1109',message:'TRYING_FALLBACK_SELECTOR',data:{selector:selector.substring(0,100),selectorIndex:sortedSelectors.indexOf(selector),totalSelectors:sortedSelectors.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+          
           if (selector.startsWith('//') || selector.startsWith('(//')) {
             // XPath selector
             const result = document.evaluate(
@@ -1076,10 +1186,95 @@ export class Tier1Executor {
               null
             );
             element = result.singleNodeValue as Element | null;
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1118',message:'XPATH_SELECTOR_RESULT',data:{found:!!element,elementText:element?.textContent?.trim()?.substring(0,50),elementTag:element?.tagName},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+          } else if (selector.includes(' >> ')) {
+            // Shadow-piercing selector (e.g., "gs-report-widget-element >> [aria-label='More Options']")
+            console.log(`[Tier1] 🌑 Trying shadow-piercing selector: ${selector.substring(0, 60)}`);
+            const parts = selector.split(' >> ');
+            if (parts.length === 2) {
+              let [hostSelector, innerSelector] = parts;
+              
+              // CRITICAL: Normalize host selector - remove dynamic framework classes
+              // This handles selectors like "gs-report-widget-element.ng-star-inserted"
+              hostSelector = this.normalizeShadowHostSelector(hostSelector);
+              console.log(`[Tier1] 🌑 Normalized host selector: "${hostSelector}"`);
+              
+              // Find all shadow hosts matching the first part
+              let hosts: NodeListOf<Element>;
+              try {
+                hosts = document.querySelectorAll(hostSelector);
+              } catch (selectorError) {
+                console.log(`[Tier1] 🌑 Host selector invalid, trying tag-only fallback`);
+                // Extract just the tag name as last resort
+                const tagMatch = hostSelector.match(/^([a-z][-a-z0-9]*)/i);
+                if (tagMatch) {
+                  hosts = document.querySelectorAll(tagMatch[1]);
+                } else {
+                  continue;
+                }
+              }
+              console.log(`[Tier1] 🌑 Found ${hosts.length} shadow hosts`);
+              
+              // CRITICAL: If there's a scope hint, find ALL matching elements, then filter by widget title
+              // Don't just return the first match!
+              const allMatches: Array<{ element: Element; host: Element }> = [];
+              
+              for (const host of Array.from(hosts)) {
+                if (host.shadowRoot) {
+                  const innerElements = host.shadowRoot.querySelectorAll(innerSelector);
+                  for (const innerElement of Array.from(innerElements)) {
+                    allMatches.push({ element: innerElement, host });
+                  }
+                }
+              }
+              
+              console.log(`[Tier1] 🌑 Found ${allMatches.length} total elements across ${hosts.length} shadow hosts`);
+              
+              // If there's a scope hint, filter by widget title
+              if (bundle.scopeHint && allMatches.length > 1) {
+                console.log(`[Tier1] 🎯 Filtering ${allMatches.length} shadow elements by widget title: "${bundle.scopeHint}"`);
+                
+                for (const match of allMatches) {
+                  // Check if this host's widget title matches the scope
+                  let hostTitle = '';
+                  if (match.host.shadowRoot) {
+                    const titleEl = match.host.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"]');
+                    hostTitle = titleEl?.textContent?.trim() || '';
+                  }
+                  
+                  // Fuzzy match (strip numbers and compare)
+                  const hostTitleLower = hostTitle.toLowerCase();
+                  const scopeHintLower = bundle.scopeHint.toLowerCase();
+                  const hostTitleStripped = hostTitleLower.replace(/\d+$/g, '').trim();
+                  const scopeStripped = scopeHintLower.replace(/\d+$/g, '').trim();
+                  
+                  if (hostTitleLower.includes(scopeStripped) || scopeHintLower.includes(hostTitleStripped)) {
+                    console.log(`[Tier1] ✅ Found element in widget with matching title: "${hostTitle.substring(0, 50)}"`);
+                    element = match.element;
+                    break;
+                  }
+                }
+              } else if (allMatches.length > 0) {
+                // No scope hint or only one match - use first
+                element = allMatches[0].element;
+                console.log(`[Tier1] 🌑 Using first shadow element (no scope filtering needed)`);
+              }
+            }
           } else {
             // CSS selector
             element = document.querySelector(selector);
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1168',message:'CSS_SELECTOR_RESULT',data:{found:!!element,elementText:element?.textContent?.trim()?.substring(0,50),elementTag:element?.tagName},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
           }
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1174',message:'FALLBACK_ELEMENT_CHECK',data:{found:!!element,isVisible:element ? this.isElementVisible(element) : false,elementText:element?.textContent?.trim()?.substring(0,50),expectedTextCount:expectedText.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
           
           if (element && this.isElementVisible(element)) {
             // 🛡️ VERIFICATION: Check if element matches expected text
@@ -1131,11 +1326,101 @@ export class Tier1Executor {
               
               if (!textMatches) {
                 console.log(`[Tier1] ⚠️ Fallback selector found element but text doesn't match. Expected: "${expectedText[0]}", found: "${ariaLabel || elementText.substring(0, 50)}"`);
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1226',message:'FALLBACK_TEXT_MISMATCH',data:{expectedText:expectedText[0],foundText:ariaLabel || elementText.substring(0,50),elementText:elementText.substring(0,50),isDropdownOption},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+                // #endregion
                 continue; // Try next fallback selector
               }
             }
             
+            // 🎯 SCOPE VERIFICATION: Skip for shadow-piercing selectors
+            // Shadow-piercing selectors (e.g., "gs-report-widget-element >> [aria-label='More Options']")
+            // already encode the widget context in the selector itself, so distance-based
+            // verification is incorrect (it would measure from the wrong widget)
+            const isShadowPiercingSelector = selector.includes(' >> ');
+            
+            if (bundle.scopeHint && !isShadowPiercingSelector) {
+              const { resolveScopeContainer } = await import('../types/scope');
+              const widgetElement = resolveScopeContainer({
+                kind: 'WIDGET',
+                title: bundle.scopeHint,
+              }, document);
+              
+              if (widgetElement) {
+                // Check if element is within the widget or near it (for menu items in portals)
+                const widgetRect = widgetElement.getBoundingClientRect();
+                const elementRect = element.getBoundingClientRect();
+                
+                // Calculate distance from widget
+                const widgetCenterX = widgetRect.left + widgetRect.width / 2;
+                const widgetCenterY = widgetRect.top + widgetRect.height / 2;
+                const elementCenterX = elementRect.left + elementRect.width / 2;
+                const elementCenterY = elementRect.top + elementRect.height / 2;
+                const distanceX = Math.abs(elementCenterX - widgetCenterX);
+                const distanceY = Math.abs(elementCenterY - widgetCenterY);
+                const distance = Math.sqrt(distanceX * distanceX + distanceY * distanceY);
+                
+                // For menu items, allow up to 500px distance (menus are in portals)
+                // Check both element's role attribute AND target role from bundle
+                const elementRole = element.getAttribute('role');
+                const targetRoleStrategy = bundle.strategies.find(s => s.type === 'role')?.value;
+                const targetRolePart = targetRoleStrategy?.split(':')[0]; // Extract role part (e.g., "menuitem" from "menuitem:Download Data")
+                const isMenuItem = elementRole === 'menuitem' || elementRole === 'option' || 
+                                  targetRolePart === 'menuitem' || targetRolePart === 'option';
+                const maxDistance = isMenuItem ? 500 : 100;
+                
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1239',message:'FALLBACK_SCOPE_CHECK',data:{scopeHint:bundle.scopeHint,elementText:element.textContent?.trim()?.substring(0,50),elementRole,targetRole:targetRolePart,isMenuItem,distance:Math.round(distance),maxDistance},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+                // #endregion
+                
+                if (distance > maxDistance) {
+                  console.log(`[Tier1] ⚠️ Fallback selector found element but it's ${Math.round(distance)}px from widget "${bundle.scopeHint}" (max: ${maxDistance}px) - trying next selector`);
+                  // #region agent log
+                  fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1242',message:'FALLBACK_SCOPE_REJECTED',data:{scopeHint:bundle.scopeHint,elementText:element.textContent?.trim()?.substring(0,50),distance:Math.round(distance),maxDistance},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+                  // #endregion
+                  continue; // Try next fallback selector
+                }
+              } else {
+                // #region agent log
+                fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1250',message:'FALLBACK_SCOPE_WIDGET_NOT_FOUND',data:{scopeHint:bundle.scopeHint,elementText:element.textContent?.trim()?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+                // #endregion
+              }
+            } else if (isShadowPiercingSelector) {
+              console.log(`[Tier1] 🔍 Shadow-piercing selector - skipping distance-based scope verification (widget context encoded in selector)`);
+            }
+            
             console.log(`[Tier1] ✅ Found via recorded fallback selector: "${selector.substring(0, 60)}..."`);
+            
+            // CRITICAL: For menu triggers (e.g., "More Options"), wait for menu to appear!
+            // Check if this is a dropdown trigger and if so, wait for the menu
+            const ariaLabel = element.getAttribute('aria-label')?.toLowerCase() || '';
+            const elementText = element.textContent?.toLowerCase() || '';
+            const role = element.getAttribute('role');
+            const isDropdownTrigger = element.getAttribute('aria-haspopup') === 'true' ||
+                                     element.getAttribute('aria-expanded') !== null ||
+                                     element.getAttribute('aria-controls') !== null ||
+                                     (role === 'button' && 
+                                      (ariaLabel.includes('more') || 
+                                       ariaLabel.includes('options') ||
+                                       ariaLabel.includes('menu') ||
+                                       elementText.includes('more') || 
+                                       elementText.includes('options')));
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1297',message:'FALLBACK_DROPDOWN_CHECK',data:{isDropdownTrigger,role,ariaLabel:ariaLabel.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'MENU'})}).catch(()=>{});
+            // #endregion
+            
+            if (isDropdownTrigger) {
+              console.log(`[Tier1] 🔽 Dropdown trigger detected (fallback path), waiting for menu...`);
+              const { waitForDropdownMenu } = await import('../content/universal-execution/state-verifier');
+              const menu = await waitForDropdownMenu(2000);
+              if (menu) {
+                console.log(`[Tier1] ✅ Menu appeared with ${menu.querySelectorAll('[role="menuitem"], [role="option"]').length} options`);
+              } else {
+                console.warn(`[Tier1] ⚠️ Menu didn't appear within 2s`);
+              }
+            }
+            
             return {
               status: 'success',
               details: {
@@ -1151,10 +1436,21 @@ export class Tier1Executor {
       }
       
       console.log('[Tier1] ℹ️ Recorded fallback selectors didn\'t find element, trying semantic strategies...');
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1282',message:'FALLBACK_SELECTORS_FAILED',data:{fallbackCount:bundle.recordedFallbackSelectors?.length || 0},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+    } else {
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1286',message:'NO_FALLBACK_SELECTORS',data:{strategiesCount:bundle.strategies.length,scopeHint:bundle.scopeHint},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
     }
     
     // PRIORITY 2: Use Resolver.resolve() with semantic strategies
     const result: ResolveResult = Resolver.resolve(bundle, intent);
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1294',message:'SEMANTIC_RESOLVER_RESULT',data:{status:result.status,candidateCount:result.status === 'ambiguous' ? result.candidates.length : 0,winningStrategy:result.status === 'found' ? result.winningStrategy : undefined},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
     
     if (result.status === 'found') {
       console.log(`[Tier1] ✅ Found via ${result.winningStrategy}`);
@@ -1172,7 +1468,7 @@ export class Tier1Executor {
       
       // AUTO-DISAMBIGUATE: Use deterministic heuristics to pick the best candidate
       // This mimics what a human would do: click the visible one, ignore hidden copies
-      const bestCandidate = this.pickBestCandidate(
+      const bestCandidate = await this.pickBestCandidate(
         result.candidates,
         bundle,
         intent
@@ -1235,11 +1531,11 @@ export class Tier1Executor {
    * 4. Z-INDEX - prefer elements on top
    * 5. DOM ORDER - prefer later elements (more recent renders)
    */
-  private static pickBestCandidate(
+  private static async pickBestCandidate(
     candidates: Array<{ element: Element; matchedText?: string }>,
     bundle: LocatorBundle,
     intent: Intent
-  ): { element: Element; reason: string } | null {
+  ): Promise<{ element: Element; reason: string } | null> {
     if (candidates.length === 0) return null;
     if (candidates.length === 1) return { element: candidates[0].element, reason: 'only one' };
     
@@ -1269,6 +1565,10 @@ export class Tier1Executor {
     let scopeFiltered = visibleCandidates;
     if (bundle.scopeHint) {
       console.log(`[Tier1] 🎯 Filtering by scope hint: "${bundle.scopeHint}"`);
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1337',message:'SCOPE_FILTER_START',data:{scopeHint:bundle.scopeHint,candidateCount:visibleCandidates.length,role:bundle.strategies?.find((s:any)=>s.type==='role')?.value,name:bundle.strategies?.find((s:any)=>s.type==='name')?.value?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
       
       // Helper function for fuzzy title matching (handles dynamic numbers like "STORE48" vs "STORE")
       const fuzzyTitleMatch = (recorded: string, actual: string): boolean => {
@@ -1367,15 +1667,101 @@ export class Tier1Executor {
       if (inScope.length > 0) {
         scopeFiltered = inScope;
         console.log(`[Tier1] 🎯 Filtered to ${inScope.length} inside scope "${bundle.scopeHint}"`);
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1440',message:'SCOPE_FILTER_SUCCESS',data:{inScopeCount:inScope.length,scopeHint:bundle.scopeHint},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
         if (inScope.length === 1) {
           return { element: inScope[0].element, reason: `only one in scope "${bundle.scopeHint}"` };
         }
       } else {
-        // Scope hint not found - log warning but CONTINUE with normal disambiguation
-        // The scope hint is a preference, not a hard requirement
-        console.warn(`[Tier1] ⚠️ Scope hint "${bundle.scopeHint}" not found - proceeding with normal disambiguation`);
-        console.warn(`[Tier1] 💡 Note: Will use visibility, position, and other signals to pick best candidate`);
-        // Don't modify scopeFiltered - continue with all visible candidates
+        // #region agent log
+        fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1449',message:'SCOPE_FILTER_FAILED',data:{scopeHint:bundle.scopeHint,visibleCount:visibleCandidates.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        // Scope hint not found - check if this is a menu item in a portal/overlay
+        // Menu items are often rendered outside the widget DOM tree
+        const role = bundle.strategies.find(s => s.type === 'role')?.value;
+        const isMenuItem = role === 'menuitem' || role === 'option';
+        
+        if (isMenuItem) {
+          // For menu items, search globally but try to find the menu that belongs to the widget
+          // by looking for the trigger button that was just clicked
+          console.log(`[Tier1] 🔍 Menu item detected - searching globally (menu may be in portal/overlay)`);
+          
+          // Try to find the menu overlay and associate it with the widget
+          // Look for the widget first, then find menu items near it
+          const { resolveScopeContainer } = await import('../types/scope');
+          const widgetElement = resolveScopeContainer({
+            kind: 'WIDGET',
+            title: bundle.scopeHint,
+          }, document);
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1461',message:'MENU_ITEM_SEARCH',data:{scopeHint:bundle.scopeHint,widgetFound:!!widgetElement,visibleCandidatesCount:visibleCandidates.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+          
+          if (widgetElement) {
+            // Find menu items that are visible and might belong to this widget
+            // Menu overlays are often positioned near the widget
+            const widgetRect = widgetElement.getBoundingClientRect();
+            const widgetCenterX = widgetRect.left + widgetRect.width / 2;
+            const widgetCenterY = widgetRect.top + widgetRect.height / 2;
+            
+            // Get target text/name for matching
+            const targetText = bundle.strategies.find(s => s.type === 'text')?.value?.toLowerCase() || 
+                              bundle.strategies.find(s => s.type === 'role')?.value?.split(':')[1]?.toLowerCase() || '';
+            
+            // Score candidates by: 1) Text match, 2) Proximity to widget
+            const scoredCandidates = visibleCandidates.map(c => {
+              const rect = c.element.getBoundingClientRect();
+              const candidateCenterX = rect.left + rect.width / 2;
+              const candidateCenterY = rect.top + rect.height / 2;
+              
+              // Calculate distance from widget center
+              const distanceX = Math.abs(candidateCenterX - widgetCenterX);
+              const distanceY = Math.abs(candidateCenterY - widgetCenterY);
+              const distance = Math.sqrt(distanceX * distanceX + distanceY * distanceY);
+              
+              // Prefer candidates within 500px of widget (menu overlays are usually close)
+              const isNearWidget = distance < 500;
+              
+              // Check text match (exact or contains)
+              const candidateText = c.element.textContent?.trim().toLowerCase() || '';
+              const textMatch = targetText && candidateText.includes(targetText);
+              
+              return { candidate: c, distance, isNearWidget, textMatch };
+            });
+            
+            // Sort by: 1) Text match, 2) Proximity to widget
+            scoredCandidates.sort((a, b) => {
+              // First: prioritize text match
+              if (a.textMatch && !b.textMatch) return -1;
+              if (!a.textMatch && b.textMatch) return 1;
+              // Second: prioritize proximity
+              if (a.isNearWidget && !b.isNearWidget) return -1;
+              if (!a.isNearWidget && b.isNearWidget) return 1;
+              return a.distance - b.distance;
+            });
+            
+            scopeFiltered = scoredCandidates.map(sc => sc.candidate);
+            console.log(`[Tier1] 🎯 Menu item search: Found ${scopeFiltered.length} candidates, prioritized by text match + proximity to widget "${bundle.scopeHint}"`);
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1495',message:'MENU_ITEM_SEARCH_RESULT',data:{scopeHint:bundle.scopeHint,filteredCount:scopeFiltered.length,topCandidateText:scopeFiltered[0]?.element?.textContent?.trim()?.substring(0,50),topCandidateDistance:scoredCandidates[0]?.distance},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+            // #endregion
+          } else {
+            // Widget not found, but continue with all candidates
+            console.warn(`[Tier1] ⚠️ Widget "${bundle.scopeHint}" not found for menu item - searching globally`);
+            scopeFiltered = visibleCandidates;
+          }
+        } else {
+          // FAIL SAFELY: Don't click on wrong widget!
+          // This is CRITICAL - if we can't find the element in the recorded scope, we should fail
+          // rather than clicking a random element
+          console.error(`[Tier1] ❌ CRITICAL: No candidates found in recorded scope "${bundle.scopeHint}"`);
+          console.error(`[Tier1] ❌ Refusing to proceed - element may be in wrong widget/container`);
+          console.error(`[Tier1] 💡 Suggestion: Scroll to make the widget visible, or re-record the workflow`);
+          return null; // Fail - let upstream handle the error
+        }
       }
     }
     
@@ -1385,9 +1771,9 @@ export class Tier1Executor {
     
     // For dropdown options: prefer elements inside open listbox/menu
     if (role === 'option' || role === 'menuitem') {
+      const { MenuDetector } = await import('../content/menu-detector');
       const inListbox = scopeFiltered.filter(c => {
-        const listbox = c.element.closest('[role="listbox"], [role="menu"], ul, [class*="dropdown"], [class*="menu"]');
-        return listbox && window.getComputedStyle(listbox).display !== 'none';
+        return MenuDetector.isInsideMenu(c.element);
       });
       
       if (inListbox.length > 0) {
@@ -1626,10 +2012,12 @@ export class Tier1Executor {
     
     console.log(`[Tier1] Built locator bundle with ${strategies.length} strategies:`, strategies.map(s => `${s.type}:${s.value.substring(0, 20)}`));
     
-    // Build scope if scopeHint provided - use WIDGET scope for better widget title matching
-    const scope = target.scopeHint ? {
+    // Build scope if recordedScopeHint or scopeHint provided - use WIDGET scope for better widget title matching
+    // recordedScopeHint comes from hint (has recorded scope), scopeHint comes from LLM
+    const scopeTitle = target.recordedScopeHint || target.scopeHint;
+    const scope = scopeTitle ? {
       kind: 'WIDGET' as const,
-      title: target.scopeHint,
+      title: scopeTitle,
     } : undefined;
     
     if (scope) {
@@ -1650,7 +2038,7 @@ export class Tier1Executor {
       role: target.role,
       // CRITICAL: Pass fallback selectors for reliable disambiguation
       recordedFallbackSelectors: target.recordedFallbackSelectors,
-      scopeHint: target.scopeHint,
+      scopeHint: target.recordedScopeHint || target.scopeHint,  // Use recorded first, fall back to LLM-provided
     };
   }
 
@@ -1782,8 +2170,32 @@ export class Tier1Executor {
    * Click element with proper event dispatching
    */
   private static clickElement(element: Element): void {
-    // Scroll into view
-    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const rect = element.getBoundingClientRect();
+    
+    // CRITICAL: Check if element is in a shadow root
+    // Elements inside shadow roots should NEVER trigger page scrolls!
+    // This is because the shadow host (widget) is already visible
+    const isInShadowDOM = element.getRootNode() instanceof ShadowRoot;
+    
+    // Check if element is in viewport
+    const isInViewport = (
+      rect.top >= 0 &&
+      rect.left >= 0 &&
+      rect.bottom <= window.innerHeight &&
+      rect.right <= window.innerWidth
+    );
+    
+    // Only scroll if:
+    // 1. NOT in shadow DOM (buttons inside widgets should never scroll the page!)
+    // 2. NOT already in viewport
+    if (!isInShadowDOM && !isInViewport) {
+      console.log('[Tier1] Element not in viewport, scrolling into view');
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else if (isInShadowDOM) {
+      console.log('[Tier1] ⚠️ Element in shadow DOM - NEVER scroll page (widget already visible)');
+    } else {
+      console.log('[Tier1] Element already in viewport, skipping scroll');
+    }
     
     // Focus
     if (element instanceof HTMLElement) {
@@ -1791,7 +2203,6 @@ export class Tier1Executor {
     }
     
     // Dispatch events
-    const rect = element.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
     
@@ -1899,6 +2310,37 @@ export class Tier1Executor {
    */
   private static sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+  
+  /**
+   * Normalize a shadow host selector by removing dynamic framework classes
+   * Handles selectors like "gs-report-widget-element.ng-star-inserted" -> "gs-report-widget-element"
+   */
+  private static normalizeShadowHostSelector(selector: string): string {
+    // Dynamic class patterns that should be stripped
+    const dynamicPatterns = [
+      /\.ng-[a-z-]+/gi,          // Angular: .ng-star-inserted, .ng-scope, etc.
+      /\.react-[a-z0-9-]+/gi,    // React
+      /\.v-[a-z0-9-]+/gi,        // Vue: .v-leave, .v-enter, etc.
+      /\.vue-[a-z0-9-]+/gi,      // Vue
+      /\.css-[a-z0-9]+/gi,       // CSS-in-JS
+      /\._css-[a-z0-9]+/gi,      // CSS Modules
+      /\.sc-[a-z0-9]+/gi,        // styled-components
+      /\.emotion-[a-z0-9]+/gi,   // Emotion
+      /\.jss\d+-[a-z0-9]+/gi,    // JSS
+      /\.Mui[A-Z][a-zA-Z0-9-]+/g, // Material-UI
+      /\.[a-z]+-[a-z0-9]{6,}/gi, // Generic random hash classes
+    ];
+    
+    let normalized = selector;
+    for (const pattern of dynamicPatterns) {
+      normalized = normalized.replace(pattern, '');
+    }
+    
+    // Clean up any trailing dots or malformed selectors
+    normalized = normalized.replace(/\.+/g, '.').replace(/\.$/, '');
+    
+    return normalized;
   }
   
   /**

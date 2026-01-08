@@ -21,6 +21,25 @@ export function isRealModal(element: Element): ModalScore {
   let score = 0;
   
   // ============================================================================
+  // CRITICAL: Check for Persistent UI Panels FIRST (before any scoring)
+  // ============================================================================
+  // Persistent panels/sidebars are always visible, not popups
+  // They're part of the page layout, not blocking modals
+  // If detected, immediately reject as modal (don't even calculate score)
+  const rect = element.getBoundingClientRect();
+  const style = window.getComputedStyle(element);
+  const isPersistentPanel = detectPersistentPanel(element, rect, style);
+  if (isPersistentPanel) {
+    console.log('[ModalDetector] 🚫 Persistent panel detected - REJECTING as modal (not a popup)');
+    return { 
+      isModal: false, 
+      score: -20, // Negative score to ensure it's never considered
+      reasons: ['Persistent UI panel detected (always visible, not a popup) - REJECTED'],
+      confidence: 'high' 
+    };
+  }
+  
+  // ============================================================================
   // Signal 1: ARIA Role (Most Reliable - Authoritative)
   // ============================================================================
   const role = element.getAttribute('role');
@@ -53,7 +72,7 @@ export function isRealModal(element: Element): ModalScore {
   // ============================================================================
   // Signal 4: Positioning (Fixed or Absolute)
   // ============================================================================
-  const style = window.getComputedStyle(element);
+  // Note: style already computed above for persistent panel check
   const isFloating = style.position === 'fixed' || style.position === 'absolute';
   if (isFloating) {
     score += 2;
@@ -63,19 +82,24 @@ export function isRealModal(element: Element): ModalScore {
   // ============================================================================
   // Signal 5: Size Constraints (Modals don't fill entire screen)
   // ============================================================================
-  const rect = element.getBoundingClientRect();
+  // Note: rect already computed above for persistent panel check
   const viewportArea = window.innerWidth * window.innerHeight;
   const elementArea = rect.width * rect.height;
   const screenCoverage = elementArea / viewportArea;
   
-  if (screenCoverage < 0.9 && screenCoverage > 0.1) {
-    // Modal-sized (between 10% and 90% of screen)
+  if (screenCoverage < 0.8 && screenCoverage > 0.1) {
+    // Modal-sized (between 10% and 80% of screen)
     score += 2;
     reasons.push(`Modal-sized: ${Math.round(screenCoverage * 100)}% of screen`);
   } else if (screenCoverage >= 0.9) {
-    // Full-screen - likely app container, not modal
+    // Full-screen (90%+) - VERY likely app container, not modal
+    // Real modals almost never cover more than 90% of the viewport
+    score -= 5;
+    reasons.push(`Full-screen: ${Math.round(screenCoverage * 100)}% of screen (heavy penalty: -5)`);
+  } else if (screenCoverage >= 0.8) {
+    // Large element (80-90%) - suspicious, penalize
     score -= 2;
-    reasons.push(`Full-screen: ${Math.round(screenCoverage * 100)}% of screen (penalty)`);
+    reasons.push(`Large element: ${Math.round(screenCoverage * 100)}% of screen (penalty: -2)`);
   }
   
   // ============================================================================
@@ -269,6 +293,108 @@ function detectCenteredPositioning(_element: Element, rect: DOMRect): boolean {
   const isCenteredY = Math.abs(elementCenterY - viewportCenterY) < toleranceY;
   
   return isCenteredX && isCenteredY;
+}
+
+/**
+ * Detect if element is a persistent UI panel (always visible, not a popup modal)
+ * EXPORTED for use in DOM map generation
+ * 
+ * Persistent panels are:
+ * - Always visible on the page (not dynamically appearing)
+ * - Part of the page layout (sidebars, toolbars, panels)
+ * - Not blocking interaction with the page
+ * - Often positioned at edges (left, right, top, bottom)
+ * 
+ * Examples:
+ * - Gainsight "Share Dashboard" sidebar (always visible)
+ * - Salesforce sidebar panels
+ * - Navigation drawers that are always open
+ */
+export function detectPersistentPanel(element: Element, rect: DOMRect, style: CSSStyleDeclaration): boolean {
+  // Signal 1: Positioned at edge of screen (sidebar/panel pattern)
+  const isAtLeftEdge = rect.left < 50; // Within 50px of left edge
+  const isAtRightEdge = rect.right > window.innerWidth - 50; // Within 50px of right edge
+  const isAtTopEdge = rect.top < 50; // Within 50px of top edge
+  const isAtBottomEdge = rect.bottom > window.innerHeight - 50; // Within 50px of bottom edge
+  const isAtEdge = isAtLeftEdge || isAtRightEdge || isAtTopEdge || isAtBottomEdge;
+  
+  // Signal 2: Not centered (panels are at edges, modals are centered)
+  const viewportCenterX = window.innerWidth / 2;
+  const viewportCenterY = window.innerHeight / 2;
+  const elementCenterX = rect.left + rect.width / 2;
+  const elementCenterY = rect.top + rect.height / 2;
+  const distanceFromCenterX = Math.abs(elementCenterX - viewportCenterX);
+  const distanceFromCenterY = Math.abs(elementCenterY - viewportCenterY);
+  const isFarFromCenter = distanceFromCenterX > window.innerWidth * 0.3 || 
+                          distanceFromCenterY > window.innerHeight * 0.3;
+  
+  // Signal 3: Narrow width (sidebars are typically narrow)
+  const widthRatio = rect.width / window.innerWidth;
+  const isNarrow = widthRatio < 0.4; // Less than 40% of viewport width
+  
+  // Signal 4: Full height or tall (panels span vertically)
+  const heightRatio = rect.height / window.innerHeight;
+  const isTall = heightRatio > 0.7; // More than 70% of viewport height
+  
+  // Signal 5: Static or relative positioning (not floating above page)
+  const isStaticOrRelative = style.position === 'static' || style.position === 'relative';
+  
+  // Signal 6: Check for backdrop - persistent panels typically don't have full-page backdrops
+  // But some might have a backdrop element, so we check if it's actually blocking
+  const hasBackdrop = detectBackdrop();
+  
+  // Signal 7: Contains "share", "panel", "sidebar", "drawer" in class/id/title
+  const className = element.className.toString().toLowerCase();
+  const id = element.id.toLowerCase();
+  const title = element.getAttribute('title')?.toLowerCase() || '';
+  const ariaLabel = element.getAttribute('aria-label')?.toLowerCase() || '';
+  const hasPanelKeywords = className.includes('share') || 
+                           className.includes('panel') || 
+                           className.includes('sidebar') || 
+                           className.includes('drawer') ||
+                           id.includes('share') ||
+                           id.includes('panel') ||
+                           id.includes('sidebar') ||
+                           title.includes('share') ||
+                           ariaLabel.includes('share');
+  
+  // Signal 8: Check if element text contains "share" (like "Share Dashboard")
+  const elementText = element.textContent?.toLowerCase() || '';
+  const hasShareText = elementText.includes('share') && elementText.includes('dashboard');
+  
+  // CRITICAL: If element has "share" keyword AND is at edge → definitely persistent panel
+  // This catches Gainsight "Share Dashboard" panels that are always visible
+  if ((hasPanelKeywords || hasShareText) && isAtEdge) {
+    console.log('[ModalDetector] 🎯 Persistent panel detected: Has "share" keyword and is at edge');
+    return true;
+  }
+  
+  // Combination: If at edge AND (narrow OR tall) AND no backdrop → likely persistent panel
+  if (isAtEdge && (isNarrow || isTall) && !hasBackdrop) {
+    return true;
+  }
+  
+  // Combination: If at edge AND static/relative positioning → likely persistent panel
+  if (isAtEdge && isStaticOrRelative) {
+    return true;
+  }
+  
+  // Combination: If far from center AND has panel keywords → likely persistent panel
+  if (isFarFromCenter && hasPanelKeywords) {
+    return true;
+  }
+  
+  // Combination: If narrow AND tall AND at edge → sidebar pattern
+  if (isNarrow && isTall && isAtEdge) {
+    return true;
+  }
+  
+  // Combination: If has "share" text AND not centered → likely persistent panel
+  if (hasShareText && isFarFromCenter) {
+    return true;
+  }
+  
+  return false;
 }
 
 /**

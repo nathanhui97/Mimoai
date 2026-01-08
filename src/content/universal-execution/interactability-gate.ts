@@ -158,10 +158,19 @@ function isInViewport(element: Element): boolean {
 
 /**
  * Scroll element into view if needed
+ * CRITICAL: Never scroll elements inside shadow DOM - they're already visible!
  */
 function scrollIntoViewIfNeeded(element: Element): boolean {
   if (isInViewport(element)) {
     return true;
+  }
+
+  // CRITICAL: Check if element is in shadow DOM
+  // Elements inside shadow roots should NEVER trigger page scrolls!
+  const isInShadowDOM = element.getRootNode() instanceof ShadowRoot;
+  if (isInShadowDOM) {
+    console.log('[InteractabilityGate] ⚠️ Element in shadow DOM - NEVER scroll page (widget already visible)');
+    return true; // Consider it "in viewport" since shadow host is visible
   }
 
   try {

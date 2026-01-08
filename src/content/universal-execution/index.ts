@@ -80,8 +80,6 @@ export {
   isTabControl,
   isModalTrigger,
   isInputElement,
-  getLibraryMenuSelectors,
-  getLibraryOptionSelectors,
   isDropdownPattern,
   isSimpleClickPattern,
   isTextInputPattern,

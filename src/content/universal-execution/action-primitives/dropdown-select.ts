@@ -13,8 +13,7 @@ import type {
 import { resolveElement } from '../element-resolver';
 import { checkInteractability } from '../interactability-gate';
 import { 
-  detectComponentLibrary, 
-  getLibraryOptionSelectors 
+  detectComponentLibrary
 } from '../component-detector';
 import {
   waitForDropdownMenu,
@@ -102,10 +101,10 @@ export async function executeDropdownSelect(
   console.log(`[DropdownSelect] Dropdown opened, menu found`);
 
   // Step 5: Find option in menu
-  const option = await findOption(menu, pattern.selection.optionText, library);
+  const option = await findOption(menu, pattern.selection.optionText);
   if (!option) {
     // List available options for debugging
-    const availableOptions = getAvailableOptions(menu, library);
+    const availableOptions = await getAvailableOptions(menu);
     
     // Try to close dropdown before failing
     await closeDropdown(trigger);
@@ -392,20 +391,13 @@ async function pointerSequenceToOpen(trigger: Element): Promise<void> {
  */
 async function findOption(
   menu: Element,
-  optionText: string,
-  library: ComponentLibrary
+  optionText: string
 ): Promise<Element | null> {
-  // Get option selectors for this library
-  const optionSelectors = getLibraryOptionSelectors(library);
+  // Use MenuDetector to get universal menu items
+  const { MenuDetector } = await import('../../menu-detector');
+  let options = MenuDetector.extractMenuItems(menu);
   
-  // Collect all options
-  let options: Element[] = [];
-  for (const selector of optionSelectors) {
-    const found = menu.querySelectorAll(selector);
-    options.push(...Array.from(found));
-  }
-  
-  // Also check menu children directly
+  // Also check menu children directly as fallback
   options.push(...Array.from(menu.children));
   
   // Deduplicate
@@ -437,7 +429,8 @@ async function findOption(
   }
   
   // Try scrolling to find option (for virtual lists)
-  const scrolledOption = await scrollToFindOption(menu, optionText, optionSelectors);
+  const { MENU_ITEM_SELECTORS } = await import('../../menu-detector');
+  const scrolledOption = await scrollToFindOption(menu, optionText, MENU_ITEM_SELECTORS);
   if (scrolledOption) {
     return scrolledOption;
   }
@@ -487,7 +480,12 @@ async function scrollToFindOption(
     for (const option of options) {
       const text = getOptionText(option).toLowerCase().trim();
       if (text === normalizedTarget || text.includes(normalizedTarget)) {
-        option.scrollIntoView({ block: 'center' });
+        // CRITICAL: Only scroll if option is NOT in shadow DOM
+        // Scrolling within dropdown is OK, but don't scroll the page
+        const isInShadowDOM = option.getRootNode() instanceof ShadowRoot;
+        if (!isInShadowDOM) {
+          option.scrollIntoView({ block: 'center' });
+        }
         return option;
       }
     }
@@ -509,17 +507,15 @@ async function scrollToFindOption(
 /**
  * Get available options for error message
  */
-function getAvailableOptions(menu: Element, library: ComponentLibrary): string[] {
-  const optionSelectors = getLibraryOptionSelectors(library);
+async function getAvailableOptions(menu: Element): Promise<string[]> {
+  const { MenuDetector } = await import('../../menu-detector');
+  const elements = MenuDetector.extractMenuItems(menu);
   const options: string[] = [];
   
-  for (const selector of optionSelectors) {
-    const elements = menu.querySelectorAll(selector);
-    for (const el of elements) {
-      const text = getOptionText(el);
-      if (text && !options.includes(text)) {
-        options.push(text);
-      }
+  for (const el of elements) {
+    const text = getOptionText(el);
+    if (text && !options.includes(text)) {
+      options.push(text);
     }
   }
   
@@ -585,8 +581,12 @@ async function selectOption(
  */
 async function clickOption(option: Element): Promise<void> {
   if (option instanceof HTMLElement) {
-    option.scrollIntoView({ block: 'center' });
-    await sleep(30);
+    // CRITICAL: Only scroll if option is NOT in shadow DOM
+    const isInShadowDOM = option.getRootNode() instanceof ShadowRoot;
+    if (!isInShadowDOM) {
+      option.scrollIntoView({ block: 'center' });
+      await sleep(30);
+    }
     option.click();
   }
 }

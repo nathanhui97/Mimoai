@@ -80,144 +80,9 @@ export function detectComponentLibrary(element: Element): ComponentLibrary {
   return 'custom';
 }
 
-/**
- * Get library-specific menu selectors for dropdowns
- */
-export function getLibraryMenuSelectors(library: ComponentLibrary): string[] {
-  switch (library) {
-    case 'mui':
-      return [
-        '.MuiMenu-paper',
-        '.MuiPaper-root[role="listbox"]',
-        '.MuiAutocomplete-popper',
-        '.MuiPopover-paper',
-        '[role="listbox"]',
-        '[role="menu"]',
-      ];
-    
-    case 'radix':
-      return [
-        '[data-radix-select-viewport]',
-        '[data-radix-select-content]',
-        '[data-radix-menu-content]',
-        '[data-radix-dropdown-menu-content]',
-        '[role="listbox"]',
-      ];
-    
-    case 'antd':
-      return [
-        '.ant-select-dropdown',
-        '.ant-dropdown',
-        '.ant-cascader-menus',
-        '.ant-picker-dropdown',
-        '[role="listbox"]',
-      ];
-    
-    case 'chakra':
-      return [
-        '.chakra-menu__menu-list',
-        '.chakra-select__menu',
-        '[role="listbox"]',
-        '[role="menu"]',
-      ];
-    
-    case 'headless-ui':
-      return [
-        '[data-headlessui-state]',
-        '[role="listbox"]',
-        '[role="menu"]',
-      ];
-    
-    case 'react-select':
-      return [
-        '.react-select__menu',
-        '[class*="__menu"]',
-        '[role="listbox"]',
-      ];
-    
-    case 'bootstrap':
-      return [
-        '.dropdown-menu.show',
-        '.dropdown-menu',
-        '[role="listbox"]',
-      ];
-    
-    default:
-      // Generic selectors
-      return [
-        '[role="listbox"]',
-        '[role="menu"]',
-        '[role="presentation"] [role="option"]',
-        '.dropdown-menu',
-        '.select-menu',
-        '.menu',
-        'ul.options',
-        '[class*="dropdown"][class*="menu"]',
-        '[class*="select"][class*="options"]',
-        '[class*="listbox"]',
-        '[class*="menu-list"]',
-        '[class*="options-list"]',
-      ];
-  }
-}
-
-/**
- * Get library-specific option selectors
- */
-export function getLibraryOptionSelectors(library: ComponentLibrary): string[] {
-  switch (library) {
-    case 'mui':
-      return [
-        '.MuiMenuItem-root',
-        '.MuiAutocomplete-option',
-        '[role="option"]',
-      ];
-    
-    case 'radix':
-      return [
-        '[data-radix-select-item]',
-        '[role="option"]',
-        '[role="menuitem"]',
-      ];
-    
-    case 'antd':
-      return [
-        '.ant-select-item-option',
-        '.ant-dropdown-menu-item',
-        '[role="option"]',
-      ];
-    
-    case 'chakra':
-      return [
-        '.chakra-menu__menuitem',
-        '[role="option"]',
-        '[role="menuitem"]',
-      ];
-    
-    case 'react-select':
-      return [
-        '.react-select__option',
-        '[class*="__option"]',
-        '[role="option"]',
-      ];
-    
-    case 'bootstrap':
-      return [
-        '.dropdown-item',
-        '[role="option"]',
-      ];
-    
-    default:
-      return [
-        '[role="option"]',
-        '[role="menuitem"]',
-        'li',
-        '[data-option]',
-        '[data-value]',
-        'option',
-      ];
-  }
-}
+// Removed: getLibraryMenuSelectors and getLibraryOptionSelectors
+// These functions have been replaced by MenuDetector's universal selector system
+// which works across all frameworks without framework-specific detection.
 
 // ============================================================================
 // Pattern Detection
@@ -491,7 +356,6 @@ function buildDropdownPatternData(
   signature: ElementSignature
 ): DropdownPatternData {
   const library = detectComponentLibrary(element);
-  const menuSelectors = getLibraryMenuSelectors(library);
   
   // Get current value
   let currentValue: string | undefined;
@@ -518,7 +382,7 @@ function buildDropdownPatternData(
       appearsWhere: library === 'mui' || library === 'radix' ? 'portal' : 'below-trigger',
       menuRole: 'listbox',
       optionRole: 'option',
-      menuSelector: menuSelectors[0],
+      menuSelector: '[role="menu"]', // Universal fallback - MenuDetector handles framework-specific detection
     },
   };
 }

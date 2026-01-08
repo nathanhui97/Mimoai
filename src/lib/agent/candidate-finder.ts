@@ -27,7 +27,12 @@ export class CandidateFinder {
     const allElements = [...domMap.interactiveElements, ...domMap.formFields];
     
     // 🎯 PRE-FILTER: If we have a recorded scope hint, only consider elements in that widget
+    // CRITICAL: For menu items, skip scope filtering - they're in portals/overlays outside widget DOM
     // CRITICAL: If dropdown is open, check if hint wants to select from it
+    const isMenuItem = hint.targetRole === 'menuitem' || hint.targetRole === 'option' ||
+                       hint.description?.toLowerCase().includes('from menu') ||
+                       hint.description?.toLowerCase().includes('from dropdown');
+    
     let candidatePool = allElements;
     if (dropdownIsOpen) {
       const isDropdownOption = (el: DOMMapElement) => 
@@ -58,9 +63,16 @@ export class CandidateFinder {
         // Unknown action type - be conservative and include all elements
         console.log(`[CandidateFinder] 🔽 Dropdown is open with unknown hint action "${hint.actionType}" - including ALL ${allElements.length} elements to be safe`);
       }
-    } else if (hint.recordedScopeHint) {
+    } else if (hint.recordedScopeHint && !isMenuItem) {
+      // 🎯 CRITICAL: Skip scope filtering for menu items - they're in portals/overlays
+      // Menu items are rendered outside the widget DOM tree, so scope filtering would exclude them
       // Normal scope filtering when no dropdown
       const scopeHint = hint.recordedScopeHint.toLowerCase();
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'candidate-finder.ts:63',message:'CANDIDATE_SCOPE_FILTER',data:{scopeHint:hint.recordedScopeHint,allElementsCount:allElements.length,uniqueWidgets:[...new Set(allElements.filter(e=>e.widgetTitle).map(e=>e.widgetTitle))].slice(0,10)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      
       const inScope = allElements.filter(el => {
         // Check widgetTitle (exact match or contains)
         if (el.widgetTitle && el.widgetTitle.toLowerCase().includes(scopeHint)) {
@@ -81,12 +93,20 @@ export class CandidateFinder {
         return false;
       });
       
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'candidate-finder.ts:85',message:'CANDIDATE_SCOPE_RESULT',data:{inScopeCount:inScope.length,scopeHint:hint.recordedScopeHint,targetText:hint.targetText?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      
       if (inScope.length > 0) {
         candidatePool = inScope;
         console.log(`[CandidateFinder] 🎯 Pre-filtered to ${inScope.length} elements in recorded scope "${hint.recordedScopeHint}" (from ${allElements.length} total)`);
       } else {
         console.warn(`[CandidateFinder] ⚠️ No elements found in recorded scope "${hint.recordedScopeHint}" - element may not be visible yet. Using all ${allElements.length} elements as fallback.`);
       }
+    } else if (isMenuItem) {
+      // Menu items are in portals/overlays - don't filter by scope, search document-wide
+      console.log(`[CandidateFinder] 🎯 Menu item detected - skipping scope filter, searching document-wide (menus are in portals/overlays)`);
+      // candidatePool stays as allElements (document-wide)
     }
     
     // DEBUG: Log hint details

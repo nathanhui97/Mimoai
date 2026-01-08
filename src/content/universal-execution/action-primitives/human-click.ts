@@ -61,9 +61,15 @@ export async function executeHumanClick(
     }
     
     if (!interactability.ok && interactability.reason?.includes('obscured')) {
-      (targetElement as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'center' });
-      await sleep(80);
-      interactability = checkInteractability(targetElement);
+      // CRITICAL: Only scroll if element is NOT in shadow DOM
+      const isInShadowDOM = targetElement.getRootNode() instanceof ShadowRoot;
+      if (!isInShadowDOM) {
+        (targetElement as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'center' });
+        await sleep(80);
+        interactability = checkInteractability(targetElement);
+      } else {
+        console.log('[HumanClick] ⚠️ Element in shadow DOM - widget already visible, skipping scroll');
+      }
     }
     
     if (!interactability.ok) {

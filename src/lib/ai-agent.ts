@@ -78,6 +78,7 @@ export interface SemanticTarget {
   
   // Scope/context hints
   scopeHint?: string;      // Region to look in: "Sales Overview", "Header", "Modal"
+  recordedScopeHint?: string;  // Scope from recording (widget title, section, etc.)
   nearbyText?: string[];   // Text near the element for disambiguation
   
   // Disambiguation
@@ -696,6 +697,13 @@ export class AIAgent {
             // 🎯 CRITICAL: Wait for lazy-loaded content to render after scroll
             // Check if the NEXT hint requires a specific widget/container
             const nextHint = this.state.hints[this.state.currentHintIndex];
+            
+            // 🔍 DIAGNOSTIC: Always log what widgets are visible after scroll
+            console.log(`[AIAgent] 🔍 Checking what widgets are visible after scroll...`);
+            const { findAllWidgetTitles } = await import('../types/scope');
+            const visibleWidgets = findAllWidgetTitles(document);
+            console.log(`[AIAgent] 🔍 Found ${visibleWidgets.length} widgets: ${visibleWidgets.slice(0, 10).join(', ')}`);
+            
             if (nextHint?.recordedScopeHint) {
               console.log(`[AIAgent] ⏳ Waiting for widget "${nextHint.recordedScopeHint}" to become visible...`);
               
@@ -722,9 +730,86 @@ export class AIAgent {
               }
               
               if (!widgetFound) {
-                console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found after ${maxWaitMs}ms - continuing anyway`);
+                console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found after ${maxWaitMs}ms`);
+                console.warn(`[AIAgent] 🔍 Available widgets: ${visibleWidgets.join(', ')}`);
+                
+                // 🎯 CRITICAL: Try to find the widget in DOM (even if not visible) and scroll to it
+                console.log(`[AIAgent] 🔍 Attempting to find widget in DOM and scroll to it...`);
+                const { resolveScopeContainer } = await import('../types/scope');
+                const widgetElement = resolveScopeContainer({
+                  kind: 'WIDGET',
+                  title: nextHint.recordedScopeHint,
+                }, document);
+                
+                if (widgetElement) {
+                  const rect = widgetElement.getBoundingClientRect();
+                  const isInViewport = rect.top >= 0 && rect.left >= 0 &&
+                                       rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+                                       rect.right <= (window.innerWidth || document.documentElement.clientWidth);
+                  
+                  if (!isInViewport) {
+                    console.log(`[AIAgent] 📜 Widget found but not in viewport (top: ${Math.round(rect.top)}px) - scrolling to it...`);
+                    try {
+                      widgetElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+                      // Wait for scroll animation to complete
+                      await this.sleep(800);
+                      
+                      // Wait for lazy-loaded content after scroll
+                      const { StateWaitEngine } = await import('../content/state-wait-engine');
+                      await StateWaitEngine.waitForStability({
+                        domQuietMs: 800,
+                        networkQuietMs: 1000,
+                        maxWaitMs: 5000,
+                        checkSpinners: true,
+                      });
+                      
+                      // Check again if widget is now visible
+                      const widgetElementAfterScroll = resolveScopeContainer({
+                        kind: 'WIDGET',
+                        title: nextHint.recordedScopeHint,
+                      }, document);
+                      
+                      if (widgetElementAfterScroll) {
+                        const rectAfter = widgetElementAfterScroll.getBoundingClientRect();
+                        const isInViewportAfter = rectAfter.top >= 0 && rectAfter.left >= 0 &&
+                                                  rectAfter.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
+                                                  rectAfter.right <= (window.innerWidth || document.documentElement.clientWidth);
+                        if (isInViewportAfter) {
+                          console.log(`[AIAgent] ✅ Widget "${nextHint.recordedScopeHint}" is now visible after scroll!`);
+                          widgetFound = true;
+                        } else {
+                          console.warn(`[AIAgent] ⚠️ Widget still not in viewport after scroll (top: ${Math.round(rectAfter.top)}px)`);
+                        }
+                      }
+                    } catch (scrollError) {
+                      console.error(`[AIAgent] ❌ Error scrolling to widget:`, scrollError);
+                    }
+                  } else {
+                    console.log(`[AIAgent] ℹ️ Widget is already in viewport`);
+                  }
+                } else {
+                  console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found in DOM at all`);
+                }
+                
+                // #region agent log
+                // Get ALL gs-report-widget-element tags and their text content
+                const gsWidgets = document.querySelectorAll('gs-report-widget-element');
+                const gsWidgetInfo = Array.from(gsWidgets).slice(0, 20).map((w, i) => {
+                  const rect = w.getBoundingClientRect();
+                  const isVisible = rect.width > 0 && rect.height > 0;
+                  const hasShadow = !!w.shadowRoot;
+                  let shadowText = '';
+                  if (w.shadowRoot) {
+                    const titleEl = w.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
+                    shadowText = titleEl?.textContent?.trim()?.substring(0, 60) || '';
+                  }
+                  return { idx: i, isVisible, hasShadow, shadowText, top: Math.round(rect.top) };
+                });
+                fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai-agent.ts:733',message:'SCROLL_WIDGET_NOT_FOUND',data:{searchedFor:nextHint.recordedScopeHint,waitedMs:maxWaitMs,gsWidgetCount:gsWidgets.length,gsWidgetInfo,visibleWidgets:visibleWidgets.slice(0,15),widgetFoundAfterScroll:widgetFound},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B3'})}).catch(()=>{});
+                // #endregion
               }
             } else {
+              console.log(`[AIAgent] ℹ️ Next hint has no scope requirement - available widgets: ${visibleWidgets.slice(0, 5).join(', ')}`);
               // No specific widget required, just wait for general page stability (optimized from 500ms)
               await this.sleep(200);
             }
@@ -1028,6 +1113,37 @@ export class AIAgent {
               console.log(`[AIAgent] 💡 Hint goal: "${currentHint.description}"`);
               console.log(`[AIAgent] 💡 Action taken: ${action.type} "${action.params.target?.name || action.params.target?.text || ''}"`);
               console.log(`[AIAgent] 💡 Need to complete the actual goal in next iteration`);
+              
+              // 🚨 LOOP DETECTION: Check if we've repeated the same intermediate action too many times
+              const actionSignature = `${action.type}:${action.params.target?.name || action.params.target?.text || ''}`;
+              const recentSameActions = this.state.history
+                .slice(-5) // Check last 5 actions
+                .filter(h => {
+                  const hAction = h.action;
+                  const hSignature = `${hAction.type}:${hAction.params.target?.name || hAction.params.target?.text || ''}`;
+                  return hSignature === actionSignature;
+                }).length;
+              
+              if (recentSameActions >= 3) {
+                console.error(`[AIAgent] 🔴 LOOP DETECTED: Same intermediate action repeated ${recentSameActions} times!`);
+                console.error(`[AIAgent] 🔴 Action: ${actionSignature}`);
+                console.error(`[AIAgent] 🔴 Breaking loop by marking hint as failed and skipping modal`);
+                
+                // Mark hint as failed to break the loop
+                currentHint.failureCount = 999; // High number to trigger skip
+                currentHint.completed = false;
+                
+                // Skip to next hint to avoid infinite loop
+                let nextIndex = completedIndex + 1;
+                while (nextIndex < this.state.hints.length && 
+                       (this.state.hints[nextIndex].completed || this.state.hints[nextIndex].skipped)) {
+                  nextIndex++;
+                }
+                this.state.currentHintIndex = nextIndex;
+                
+                console.warn(`[AIAgent] ⚠️ Skipped hint ${completedIndex} due to loop, advanced to hint ${nextIndex}`);
+                continue; // Skip to next iteration
+              }
               
               // DON'T advance currentHintIndex - stay on same hint
               // Reset failure count since action succeeded (just not the goal yet)
@@ -1381,7 +1497,9 @@ export class AIAgent {
       }
 
       // Need recorded selectors for fast-path
-      const selectors = [
+      // CRITICAL: When there's a scope hint, PRIORITIZE selectors with scope/widget context!
+      // These are usually XPath selectors like: //widget[contains(., "Widget Title")]//button
+      let selectors = [
         hint.recordedSelector,
         ...(hint.recordedFallbackSelectors || []),
       ].filter(Boolean) as string[];
@@ -1389,6 +1507,42 @@ export class AIAgent {
       if (selectors.length === 0) {
         console.log('[Hybrid] ⚡ Confidence-based skip: No recorded selectors');
         return { executed: false, confidence: 0 };
+      }
+
+      // CRITICAL: Sort selectors to prioritize widget-scoped ones when there's a scope hint
+      if (hint.recordedScopeHint && selectors.length > 1) {
+        selectors = selectors.sort((a, b) => {
+          // Score selectors by specificity
+          const scoreSelector = (sel: string): number => {
+            // HIGHEST priority: Shadow-piercing selectors with widget host
+            // These find ALL buttons across ALL widgets, perfect for scope filtering
+            if (sel.includes(' >> ')) {
+              if (sel.toLowerCase().includes('widget') || sel.toLowerCase().includes('report')) {
+                return 120; // Highest - finds across all widgets!
+              }
+              return 95; // Shadow-piercing but generic host
+            }
+            
+            // High priority: XPath with widget/scope context
+            // BUT: XPath can't traverse shadow DOM, so lower than shadow-piercing
+            if (sel.includes('descendant') && sel.includes('contains(') && hint.recordedScopeHint) {
+              const scopeWords = hint.recordedScopeHint.toLowerCase().split(' ');
+              const hasWidgetContext = scopeWords.some(word => word.length > 3 && sel.toLowerCase().includes(word));
+              if (hasWidgetContext) return 80; // Good but can't see shadow DOM
+            }
+            
+            // XPath with any context
+            if (sel.startsWith('//') && sel.includes('[')) return 60;
+            
+            // Generic attribute selectors - LOWEST priority when there's scope
+            if (sel.includes('[aria-label=')) return 30;
+            
+            // Class-based selectors
+            return 20;
+          };
+          return scoreSelector(b) - scoreSelector(a); // Higher score first
+        });
+        console.log(`[Hybrid] 🔍 DEBUG: Reordered selectors (scope-aware), trying highest priority first: ${selectors[0].substring(0, 80)}`);
       }
 
       // DEBUG: Log selectors being tried
@@ -1426,6 +1580,53 @@ export class AIAgent {
               console.log(`[Hybrid] 🔍 DEBUG: XPath evaluation failed:`, xpathError);
               continue;
             }
+          } else if (selector.includes(' >> ')) {
+            // Handle shadow-piercing selectors (e.g., "gs-report-widget-element >> [aria-label='More Options']")
+            console.log(`[Hybrid] 🔍 DEBUG: Trying shadow-piercing selector: ${selector.substring(0, 80)}`);
+            const parts = selector.split(' >> ');
+            if (parts.length === 2) {
+              let [hostSelector, innerSelector] = parts;
+              
+              // CRITICAL: Normalize host selector - remove dynamic framework classes
+              // This handles selectors like "gs-report-widget-element.ng-star-inserted"
+              // that were recorded but may not match during replay
+              hostSelector = this.normalizeShadowHostSelector(hostSelector);
+              console.log(`[Hybrid] 🔍 DEBUG: Normalized host selector: "${hostSelector}"`);
+              
+              // Find all shadow hosts matching the first part
+              let hosts: NodeListOf<Element>;
+              try {
+                hosts = document.querySelectorAll(hostSelector);
+              } catch (selectorError) {
+                console.log(`[Hybrid] 🔍 DEBUG: Host selector invalid after normalization, trying tag-only fallback`);
+                // Extract just the tag name as last resort
+                const tagMatch = hostSelector.match(/^([a-z][-a-z0-9]*)/i);
+                if (tagMatch) {
+                  hosts = document.querySelectorAll(tagMatch[1]);
+                } else {
+                  continue;
+                }
+              }
+              console.log(`[Hybrid] 🔍 DEBUG: Found ${hosts.length} shadow hosts for "${hostSelector}"`);
+              
+              const shadowElements: Element[] = [];
+              for (const host of Array.from(hosts)) {
+                if (host.shadowRoot) {
+                  try {
+                    const innerElements = host.shadowRoot.querySelectorAll(innerSelector);
+                    shadowElements.push(...Array.from(innerElements));
+                    console.log(`[Hybrid] 🔍 DEBUG: Found ${innerElements.length} elements in shadow root`);
+                  } catch (innerError) {
+                    console.log(`[Hybrid] 🔍 DEBUG: Inner selector failed:`, innerError);
+                  }
+                }
+              }
+              found = shadowElements;
+              console.log(`[Hybrid] 🔍 DEBUG: Shadow-piercing found ${found.length} total elements`);
+            } else {
+              console.log(`[Hybrid] 🔍 DEBUG: Invalid shadow-piercing selector format`);
+              continue;
+            }
           } else {
             // CSS selector
             found = document.querySelectorAll(selector);
@@ -1448,7 +1649,7 @@ export class AIAgent {
           console.log(`[Hybrid] 🔍 DEBUG: ${visibleCount} of ${found.length} passed visibility+size checks`);
           
           // If we found a match with this selector, stop trying others
-          // This is the KEY: we only try the FIRST selector that matches!
+          // With selector prioritization, we try widget-scoped selectors first, so if they match, we're done!
           if (candidates.length > 0) {
             console.log(`[Hybrid] 🔍 DEBUG: Stopping selector search - found ${candidates.length} candidates with first matching selector`);
             break;
@@ -1468,6 +1669,75 @@ export class AIAgent {
           ariaLabel: c.getAttribute('aria-label'),
           parent: c.parentElement?.tagName,
         })));
+      }
+      
+      // CRITICAL: If there's a scope hint and multiple candidates, filter by scope FIRST
+      if (hint.recordedScopeHint && candidates.length > 1) {
+        console.log(`[Hybrid] 🔍 Filtering ${candidates.length} candidates by scope: "${hint.recordedScopeHint}"`);
+        
+        // For shadow DOM elements, check widget title directly instead of distance
+        const filtered = candidates.filter(c => {
+          // Check if element is in a shadow root
+          const rootNode = c.getRootNode();
+          if (rootNode instanceof ShadowRoot) {
+            const host = rootNode.host;
+            
+            // Get widget title from shadow root
+            let widgetTitle = '';
+            if (host.shadowRoot) {
+              const titleEl = host.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"]');
+              widgetTitle = titleEl?.textContent?.trim() || '';
+            }
+            
+            // Fuzzy match with recorded scope hint
+            if (widgetTitle) {
+              const titleLower = widgetTitle.toLowerCase();
+              const scopeLower = hint.recordedScopeHint!.toLowerCase();
+              const titleStripped = titleLower.replace(/\d+$/g, '').trim();
+              const scopeStripped = scopeLower.replace(/\d+$/g, '').trim();
+              
+              const matches = titleLower.includes(scopeStripped) || 
+                             scopeLower.includes(titleStripped) ||
+                             titleStripped.includes(scopeStripped) ||
+                             scopeStripped.includes(titleStripped);
+              
+              if (matches) {
+                console.log(`[Hybrid] ✅ Candidate in widget "${widgetTitle.substring(0, 50)}" matches scope "${hint.recordedScopeHint}"`);
+                return true;
+              } else {
+                console.log(`[Hybrid] ⚠️ Candidate in widget "${widgetTitle.substring(0, 50)}" does NOT match scope "${hint.recordedScopeHint}"`);
+                return false;
+              }
+            }
+          }
+          
+          // For non-shadow elements, fall back to distance-based filtering
+          const { resolveScopeContainer } = require('../types/scope');
+          const widgetElement = resolveScopeContainer({
+            kind: 'WIDGET',
+            title: hint.recordedScopeHint,
+          }, document);
+          
+          if (widgetElement) {
+            const widgetRect = widgetElement.getBoundingClientRect();
+            const candidateRect = c.getBoundingClientRect();
+            const distance = Math.sqrt(
+              Math.pow(candidateRect.left + candidateRect.width/2 - (widgetRect.left + widgetRect.width/2), 2) +
+              Math.pow(candidateRect.top + candidateRect.height/2 - (widgetRect.top + widgetRect.height/2), 2)
+            );
+            return distance < 500; // Within 500px of widget
+          }
+          
+          return false;
+        });
+        
+        if (filtered.length > 0) {
+          console.log(`[Hybrid] ✅ Scope filter: ${candidates.length} → ${filtered.length} candidates within widget "${hint.recordedScopeHint}"`);
+          candidates.length = 0;
+          candidates.push(...filtered);
+        } else {
+          console.warn(`[Hybrid] ⚠️ Scope filter found no candidates within widget - keeping all ${candidates.length}`);
+        }
       }
       
       // Calculate confidence score
@@ -1510,6 +1780,40 @@ export class AIAgent {
   }
   
   /**
+   * Normalize a shadow host selector by removing dynamic framework classes
+   * Handles selectors like "gs-report-widget-element.ng-star-inserted" -> "gs-report-widget-element"
+   */
+  private normalizeShadowHostSelector(selector: string): string {
+    // Dynamic class patterns that should be stripped
+    const dynamicPatterns = [
+      /\.ng-[a-z-]+/gi,          // Angular: .ng-star-inserted, .ng-scope, etc.
+      /\.react-[a-z0-9-]+/gi,    // React
+      /\.v-[a-z0-9-]+/gi,        // Vue: .v-leave, .v-enter, etc.
+      /\.vue-[a-z0-9-]+/gi,      // Vue
+      /\.css-[a-z0-9]+/gi,       // CSS-in-JS
+      /\._css-[a-z0-9]+/gi,      // CSS Modules
+      /\.sc-[a-z0-9]+/gi,        // styled-components
+      /\.emotion-[a-z0-9]+/gi,   // Emotion
+      /\.jss\d+-[a-z0-9]+/gi,    // JSS
+      /\.Mui[A-Z][a-zA-Z0-9-]+/g, // Material-UI
+      /\.[a-z]+-[a-z0-9]{6,}/gi, // Generic random hash classes
+    ];
+    
+    let normalized = selector;
+    for (const pattern of dynamicPatterns) {
+      normalized = normalized.replace(pattern, '');
+    }
+    
+    // Clean up any trailing dots or malformed selectors
+    normalized = normalized.replace(/\.+/g, '.').replace(/\.$/, '');
+    
+    // If we stripped everything except the tag, that's fine
+    // e.g., "gs-report-widget-element" is still valid
+    
+    return normalized;
+  }
+
+  /**
    * Execute action instantly with high confidence
    * Used when confidence >= 80%
    */
@@ -1527,9 +1831,32 @@ export class AIAgent {
         text: htmlElement.textContent?.slice(0, 50),
       });
 
-      // Scroll into view and focus
-      htmlElement.scrollIntoView({ block: 'center', behavior: 'instant' });
-      await this.sleep(50);
+      // CRITICAL: Check if element is in a shadow root
+      // Elements inside shadow roots should NEVER trigger page scrolls!
+      const rect = htmlElement.getBoundingClientRect();
+      const isInShadowDOM = htmlElement.getRootNode() instanceof ShadowRoot;
+      
+      // Check if element is in viewport
+      const isInViewport = (
+        rect.top >= 0 &&
+        rect.left >= 0 &&
+        rect.bottom <= window.innerHeight &&
+        rect.right <= window.innerWidth
+      );
+      
+      // Only scroll if:
+      // 1. NOT in shadow DOM (buttons inside widgets should never scroll the page!)
+      // 2. NOT already in viewport
+      if (!isInShadowDOM && !isInViewport) {
+        console.log('[Hybrid] Element not in viewport, scrolling into view');
+        htmlElement.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await this.sleep(50);
+      } else if (isInShadowDOM) {
+        console.log('[Hybrid] ⚠️ Element in shadow DOM - NEVER scroll page (widget already visible)');
+      } else {
+        console.log('[Hybrid] Element already in viewport, skipping scroll');
+      }
+      
       htmlElement.focus();
       
       // Execute action
@@ -1713,6 +2040,68 @@ export class AIAgent {
       }
     }
 
+    // Extract all unique widget titles from candidates for LLM context
+    const availableWidgets = new Set<string>();
+    currentCandidates.forEach(c => {
+      if (c.widgetTitle) {
+        availableWidgets.add(c.widgetTitle);
+      }
+    });
+    // Also check DOM map for all widgets on the page
+    domMap.interactiveElements.forEach(el => {
+      if (el.widgetTitle) {
+        availableWidgets.add(el.widgetTitle);
+      }
+    });
+
+    // CRITICAL: Inherit widget scope from previous step for menu items
+    // This fixes cases where menu items have wrong scope (e.g., "Row Height" instead of widget name)
+    // SIMPLE RULE: If previous step was in a widget AND current step is a menu item → use previous step's widget
+    let inheritedScopeHint: string | undefined;
+    const previousStep = this.state.hints[this.state.currentHintIndex - 1];
+    const isMenuItem = nextIncompleteHint?.targetRole === 'menuitem' || 
+                       nextIncompleteHint?.targetRole === 'option' ||
+                       nextIncompleteHint?.description?.toLowerCase().includes('from menu') ||
+                       nextIncompleteHint?.description?.toLowerCase().includes('from dropdown');
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai-agent.ts:1884',message:'SCOPE_INHERITANCE_CHECK',data:{hintIndex:this.state.currentHintIndex,isMenuItem,recordedScopeHint:nextIncompleteHint?.recordedScopeHint,previousScopeHint:previousStep?.recordedScopeHint,targetRole:nextIncompleteHint?.targetRole,description:nextIncompleteHint?.description?.substring(0,80)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    if (isMenuItem && previousStep?.recordedScopeHint) {
+      // Check if previous step's scope matches a widget
+      const { resolveScopeContainer } = await import('../types/scope');
+      const prevScopeContainer = resolveScopeContainer({
+        kind: 'WIDGET',
+        title: previousStep.recordedScopeHint,
+      }, document);
+      
+      if (prevScopeContainer) {
+        inheritedScopeHint = previousStep.recordedScopeHint;
+        console.log(`[AIAgent] 🔄 Inheriting widget scope from previous step: "${inheritedScopeHint}" (menu item should be in same widget as trigger)`);
+      }
+    } else if (nextIncompleteHint?.recordedScopeHint) {
+      // For non-menu items, check if recorded scope matches a widget
+      const { resolveScopeContainer } = await import('../types/scope');
+      const scopeContainer = resolveScopeContainer({
+        kind: 'WIDGET',
+        title: nextIncompleteHint.recordedScopeHint,
+      }, document);
+      
+      if (!scopeContainer && previousStep?.recordedScopeHint) {
+        // Recorded scope doesn't match any widget - try to inherit from previous step
+        const prevScopeContainer = resolveScopeContainer({
+          kind: 'WIDGET',
+          title: previousStep.recordedScopeHint,
+        }, document);
+        
+        if (prevScopeContainer) {
+          inheritedScopeHint = previousStep.recordedScopeHint;
+          console.log(`[AIAgent] 🔄 Inheriting widget scope from previous step: "${inheritedScopeHint}" (recorded scope "${nextIncompleteHint.recordedScopeHint}" doesn't match any widget)`);
+        }
+      }
+    }
+
     // NEW: Extract fresh spreadsheet context if on a spreadsheet domain
     // Extract ALWAYS when on spreadsheet, not just when hint has spreadsheetContext
     let spreadsheetContext: any = undefined;
@@ -1830,6 +2219,12 @@ export class AIAgent {
         score: c.score,
       })),
       
+      // Available widgets on the page (for LLM to choose from)
+      availableWidgets: Array.from(availableWidgets),
+      
+      // Inherited scope hint (if recorded scope was wrong)
+      inheritedScopeHint: inheritedScopeHint,
+      
       // NEW: Spreadsheet context (extracted fresh during replay)
       spreadsheetContext,
       
@@ -1908,6 +2303,10 @@ export class AIAgent {
       let resolvedTarget = result.target;
       let candidateIndex: number | undefined = undefined;
       
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai-agent.ts:2116',message:'LLM_RESPONSE',data:{action:result.action,chooseCandidateIndex:result.chooseCandidateIndex,targetRole:result.target?.role,targetName:result.target?.name?.substring(0,50),candidateCount:currentCandidates.length,reasoning:result.reasoning?.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+      
       // Method 1: AI returned chooseCandidateIndex directly
       if (typeof result.chooseCandidateIndex === 'number' && result.chooseCandidateIndex >= 0) {
         candidateIndex = result.chooseCandidateIndex;
@@ -1942,8 +2341,9 @@ export class AIAgent {
             testId: chosenCandidate.attrs?.testId,
             id: chosenCandidate.attrs?.id,
             placeholder: chosenCandidate.attrs?.placeholder,
-            // CRITICAL: Include scope hint from candidate for disambiguation!
-            scopeHint: chosenCandidate.widgetTitle || chosenCandidate.scopePath?.[0],
+            // CRITICAL: For menu items, the candidate's widgetTitle is often wrong (e.g., "Row Height")
+            // Override with inherited scope hint if available, otherwise use candidate's widget title
+            scopeHint: inheritedScopeHint || chosenCandidate.widgetTitle || chosenCandidate.scopePath?.[0],
           };
         }
       } else if (typeof candidateIndex === 'number') {
@@ -1953,15 +2353,23 @@ export class AIAgent {
       // Build action with semantic target (not coordinates)
       // CRITICAL: Include fallback selectors from the hint for reliable disambiguation!
       const fallbackSelectorsFromHint = nextIncompleteHint?.recordedFallbackSelectors;
-      const scopeHintFromHint = nextIncompleteHint?.recordedScopeHint;
+      
+      // Use inherited scope hint if available (from previous step), otherwise use recorded scope hint
+      // This fixes cases where menu items have wrong scope (e.g., "Row Height" instead of widget name)
+      // SIMPLE RULE: If we computed an inherited scope hint earlier, use it; otherwise use recorded
+      const scopeHintFromHint = inheritedScopeHint || nextIncompleteHint?.recordedScopeHint;
       
       // Log scope hint usage for debugging
       if (scopeHintFromHint) {
-        console.log(`[AIAgent] 📌 Using RECORDED scope hint: "${scopeHintFromHint}"`);
+        console.log(`[AIAgent] 📌 Using scope hint: "${scopeHintFromHint}"`);
         if (resolvedTarget?.scopeHint && resolvedTarget.scopeHint !== scopeHintFromHint) {
-          console.warn(`[AIAgent] ⚠️ AI picked wrong widget "${resolvedTarget.scopeHint}" - overriding with recorded: "${scopeHintFromHint}"`);
+          console.warn(`[AIAgent] ⚠️ AI picked wrong widget "${resolvedTarget.scopeHint}" - overriding with scope hint: "${scopeHintFromHint}"`);
         }
       }
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai-agent.ts:2177',message:'FINAL_SCOPE_USED',data:{finalScope:scopeHintFromHint,inheritedScopeHint,recordedScope:nextIncompleteHint?.recordedScopeHint,candidateWidget:resolvedTarget?.scopeHint,candidateIndex,targetRole:resolvedTarget?.role,targetName:resolvedTarget?.name?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       
       const action: AgentAction = {
         type: result.action || 'fail',

@@ -39,6 +39,7 @@ import type { SuggestedCondition } from '../types/conditions';
 import { ElementFinder } from './recording/element-finder';
 import { StepPublisher } from './recording/step-publisher';
 import { StepEnricher } from './recording/step-enricher';
+import { MenuDetector, UNIVERSAL_MENU_SELECTORS } from './menu-detector';
 
 export class RecordingManager {
   // Feature flag for reliable replayer enhancements
@@ -801,7 +802,7 @@ export class RecordingManager {
           console.log('GhostWriter: List item/option detected - Role:', role, 'Class:', className.substring(0, 50), 'Text:', text);
           
           // Find parent container to log and validate
-          const container = target.closest('[role="listbox"], [role="menu"], [role="list"], ul, ol, select, [data-baseui="listbox"], [data-baseui="menu"]');
+          const container = MenuDetector.findParentMenu(target);
           if (container) {
             const containerInfo = {
               tag: container.tagName,
@@ -815,7 +816,7 @@ export class RecordingManager {
             
             // VALIDATION: Check if multiple dropdown containers are visible
             const allVisibleDropdowns = Array.from(
-              document.querySelectorAll('[role="listbox"], [role="menu"], [data-baseui="listbox"], [data-baseui="menu"]')
+              document.querySelectorAll(UNIVERSAL_MENU_SELECTORS.join(', '))
             ).filter(el => {
               const style = window.getComputedStyle(el as HTMLElement);
               return style.display !== 'none' && style.visibility !== 'hidden';
@@ -865,7 +866,7 @@ export class RecordingManager {
           
           // ENHANCEMENT: For dropdown options, capture the dropdown container details
           if (finalIsListItemOrOption && context) {
-            const dropdownContainer = target.closest('[role="listbox"], [role="menu"], [role="list"], select, [data-baseui="listbox"], [data-baseui="menu"]');
+            const dropdownContainer = MenuDetector.findParentMenu(target);
             if (dropdownContainer) {
               // Find the associated trigger (combobox) if available
               const containerId = dropdownContainer.id;

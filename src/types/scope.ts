@@ -122,6 +122,56 @@ export function describeScope(scope: Scope): string {
 }
 
 /**
+ * Find all widget titles visible on the page (for diagnostics)
+ * Returns array of widget title strings
+ */
+export function findAllWidgetTitles(doc: Document = document): string[] {
+  const widgetSelectors = [
+    'gs-report-widget-element',
+    '[class*="widget"]',
+    '[class*="card"]',
+    '[class*="panel"]',
+    '[id*="widget"]',
+    'article',
+  ];
+  
+  const titles: string[] = [];
+  
+  for (const selector of widgetSelectors) {
+    try {
+      const widgets = doc.querySelectorAll(selector);
+      for (const widget of Array.from(widgets)) {
+        // Skip if widget is not visible
+        const rect = widget.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        
+        let title = '';
+        
+        // Check shadow DOM first
+        if (widget.shadowRoot) {
+          const titleEl = widget.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
+          title = titleEl?.textContent?.trim() || '';
+        }
+        
+        // Check light DOM if not found in shadow
+        if (!title) {
+          const titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
+          title = titleEl?.textContent?.trim() || '';
+        }
+        
+        if (title && !titles.includes(title)) {
+          titles.push(title);
+        }
+      }
+    } catch (e) {
+      // Invalid selector
+    }
+  }
+  
+  return titles;
+}
+
+/**
  * Resolve a scope to its container element
  * Returns null if scope container cannot be found
  */
@@ -227,6 +277,10 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
       
       console.log(`[Scope] 🔍 Searching for widget: "${scope.title}" (stripped: "${searchTitleStripped}")`);
       
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scope.ts:278',message:'WIDGET_SEARCH_START',data:{searchTitle:scope.title,searchTitleStripped},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+      
       // Method 1: Search in common widget container types (generic patterns only!)
       const widgetSelectors = [
         // Web component patterns (check FIRST - most specific)
@@ -266,6 +320,15 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
             let titleEl: Element | null = null;
             let title = '';
             
+            // #region agent log
+            const tagName = widget.tagName?.toLowerCase() || '';
+            const hasShadowRoot = !!widget.shadowRoot;
+            const isInViewport = rect.top < window.innerHeight && rect.bottom > 0;
+            if (tagName.includes('widget') || tagName.includes('report') || tagName.startsWith('gs-')) {
+              fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scope.ts:320',message:'WIDGET_ELEMENT_CHECK',data:{tagName,hasShadowRoot,isInViewport,rectTop:Math.round(rect.top),rectHeight:Math.round(rect.height),selector},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B2'})}).catch(()=>{});
+            }
+            // #endregion
+            
             // PRIORITY 1: Check shadow DOM first (for web components)
             if (widget.shadowRoot) {
               titleEl = widget.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
@@ -280,6 +343,12 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
               titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
               title = titleEl?.textContent?.trim() || '';
             }
+            
+            // #region agent log
+            if ((tagName.includes('widget') || tagName.includes('report') || tagName.startsWith('gs-')) && title) {
+              fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scope.ts:345',message:'WIDGET_TITLE_FOUND',data:{tagName,title:title.substring(0,80),searchTitle:searchTitle.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B2'})}).catch(()=>{});
+            }
+            // #endregion
             
             if (!title) continue;
             
@@ -300,9 +369,18 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
             }
             
             // Strip trailing numbers for even more fuzzy matching
+            // CRITICAL: Also strip numbers from the END of the search title (e.g., "BRAND SALES...80" -> "BRAND SALES...")
+            const searchTitleStrippedEnd = searchTitle.replace(/\d+$/g, '').trim();
+            if (titleStripped && searchTitleStrippedEnd && titleStripped.length > 10 && 
+                (titleStripped.includes(searchTitleStrippedEnd) || searchTitleStrippedEnd.includes(titleStripped))) {
+              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - stripped trailing numbers)`);
+              return widget;
+            }
+            
+            // Also try matching with the original stripped search title
             if (titleStripped && searchTitleStripped && titleStripped.length > 10 && 
                 (titleStripped.includes(searchTitleStripped) || searchTitleStripped.includes(titleStripped))) {
-              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - stripped numbers)`);
+              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - both stripped)`);
               return widget;
             }
             
@@ -348,6 +426,9 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
       }
       
       console.log(`[Scope] ❌ Widget with title "${scope.title}" not found`);
+      // #region agent log
+      fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scope.ts:414',message:'WIDGET_NOT_FOUND',data:{searchTitle:scope.title,searchTitleStripped,widgetsChecked,uniqueTitlesCount:uniqueTitles.size,uniqueTitles:Array.from(uniqueTitles),partialMatches:Array.from(uniqueTitles).filter(t=>t.toLowerCase().includes('brand')||t.toLowerCase().includes('sales')||t.toLowerCase().includes('overview'))},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
       return null;
     }
     

@@ -14,7 +14,7 @@
 
 import { computeAccessibleName } from '../lib/accessible-name';
 import { ShadowDOMUtils } from './shadow-dom-utils';
-import { isRealModal, isNavigationContext, isSaaSAppContainer, detectModalWithFormHeuristic } from './modal-detector';
+import { isRealModal, isNavigationContext, isSaaSAppContainer, detectModalWithFormHeuristic, detectPersistentPanel } from './modal-detector';
 
 // ============================================================================
 // Types
@@ -80,6 +80,8 @@ export interface DOMMap {
   activeModal?: {
     title?: string;
     elements: DOMMapElement[];
+    /** If true, this is a persistent UI panel (always visible), not a blocking popup */
+    isPersistentPanel?: boolean;
   };
   /** Active dropdown/listbox (if any) - CRITICAL: must interact before other actions */
   activeDropdown?: {
@@ -150,16 +152,41 @@ export function generateDOMMap(): DOMMap {
       console.log('[DOMMap] ⚠️ Ignoring detected modal - it has 0 interactive elements and 0 form fields (likely false positive)');
       modal = null; // Treat as no modal
     } else {
+      // Check if this is actually a persistent panel (not a blocking modal)
+      const rect = modal.getBoundingClientRect();
+      const style = window.getComputedStyle(modal);
+      const isPersistentPanel = detectPersistentPanel(modal, rect, style);
+      
       map.activeModal = {
         title: getModalTitle(modal),
         elements: modalInteractiveElements,
+        isPersistentPanel: isPersistentPanel, // Let LLM know this is always visible, not blocking
       };
       
-      // When modal is active, ONLY return modal content
-      map.formFields = modalFormFields;
-      map.interactiveElements = modalInteractiveElements;
+      if (isPersistentPanel) {
+        console.log('[DOMMap] ⚠️ Detected "modal" is actually a persistent panel - LLM will be informed');
+      }
+      
+      // CRITICAL FIX: Show BOTH modal AND page content
+      // The old logic hid page elements when a modal was detected, which prevented
+      // the LLM from seeing target elements (like "More Options" buttons) that are
+      // actually accessible on the page.
+      // 
+      // Now we show both so the LLM can decide:
+      // - If modal is blocking → interact with modal first
+      // - If target element is visible/accessible → click it directly
+      
+      // Get page content first
+      map.regions = getPageRegions();
+      const pageInteractiveElements = getInteractiveElements(document.body);
+      const pageFormFields = getFormFields(document.body);
+      
+      // Combine modal + page elements (modal elements first for priority)
+      map.formFields = [...modalFormFields, ...pageFormFields];
+      map.interactiveElements = [...modalInteractiveElements, ...pageInteractiveElements];
       
       console.log('[DOMMap] 🔔 Active modal detected:', map.activeModal.title, 'with', modalInteractiveElements.length, 'interactive elements and', modalFormFields.length, 'form fields');
+      console.log('[DOMMap] 📄 Also showing', pageInteractiveElements.length, 'page elements (target may be accessible)');
     }
   }
   
@@ -266,28 +293,40 @@ export function domMapToText(map: DOMMap): string {
   
   // Active modal takes next precedence
   if (map.activeModal) {
-    lines.push(`=== ACTIVE MODAL: ${map.activeModal.title || 'Dialog'} ===`);
-    lines.push('⚠️ A modal/popup is open - you MUST interact with it first!');
-    lines.push('');
-    
-    // Show modal form fields first
-    const modalFormFields = map.formFields; // These are already from modal since modal was detected
-    if (modalFormFields.length > 0) {
-      lines.push('## Form Fields in Modal');
-      for (const field of modalFormFields.slice(0, 20)) {
-        lines.push(formatElement(field));
-      }
+    // CRITICAL: If this is a persistent panel, inform LLM it's NOT a blocking modal
+    if (map.activeModal.isPersistentPanel) {
+      lines.push(`=== PERSISTENT UI PANEL: ${map.activeModal.title || 'Panel'} ===`);
+      lines.push('⚠️ NOTE: This is a persistent UI panel (always visible on the page), NOT a blocking modal/popup.');
+      lines.push('✅ You can interact with page elements directly - this panel does not block interaction.');
+      lines.push('');
+    } else {
+      lines.push(`=== ACTIVE MODAL: ${map.activeModal.title || 'Dialog'} ===`);
+      
+      // CRITICAL FIX: Don't force modal interaction - let LLM decide
+      // The old prompt said "MUST interact with it first" which forced the LLM to click Close
+      // even when the target element (e.g., "More Options") was visible and accessible.
+      // 
+      // Now we show both modal AND page elements, so the LLM can:
+      // - Click the target directly if it's visible/accessible
+      // - Close the modal first if it's actually blocking
+      lines.push('ℹ️ A modal/popup is open. Target elements are shown below - click them directly if accessible, or close the modal first if it blocks your target.');
       lines.push('');
     }
     
-    // Show modal interactive elements
+    // Show modal interactive elements first (for priority)
     lines.push('## Modal Actions');
     for (const el of map.activeModal.elements) {
       lines.push(formatElement(el));
     }
     lines.push('');
     lines.push('💡 TIP: Look for buttons to close modal, confirm action, or navigate within modal');
-    return lines.join('\n');
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    lines.push('## Page Elements (shown below - may be accessible even with modal open)');
+    lines.push('');
+    // Continue to show page elements below - DON'T return early!
+    // This allows LLM to see both modal AND page elements, so it can click target directly if accessible
   }
   
   // Headings (page structure)
@@ -430,162 +469,108 @@ function findActiveModalWithStructuralDetection(): Element | null {
  * before doing any other action (like typing) which would close it
  */
 function findActiveDropdown(): { triggerName?: string; options: DOMMapElement[] } | null {
-  // SAFEGUARD: Skip dropdown detection on Google Sheets toolbar
-  // Google Sheets has visible listbox elements in toolbar that are NOT open dropdowns
+  // Use comprehensive selector list for synchronous menu finding
+  const menuSelectors = [
+    '[role="menu"]',
+    '[role="listbox"]',
+    '.cdk-overlay-pane',
+    '.mat-menu-panel',
+    '[class*="slds-dropdown"]',
+    '[class*="slds-listbox"]',
+    '.MuiMenu-paper',
+    '[data-radix-menu-content]',
+    '.ant-dropdown',
+    '.dropdown-menu',
+  ];
+  
+  let menu: Element | null = null;
+  for (const selector of menuSelectors) {
+    try {
+      const elements = document.querySelectorAll(selector);
+      for (const el of elements) {
+        if (isVisible(el)) {
+          // Check if has options
+          const hasOptions = el.querySelector('[role="menuitem"], [role="option"], li');
+          if (hasOptions) {
+            menu = el;
+            break;
+          }
+        }
+      }
+      if (menu) break;
+    } catch (e) {
+      continue;
+    }
+  }
+  
+  if (!menu) return null;
+  
+  // SAFEGUARD: Skip Google Sheets toolbar elements
   const isGoogleSheets = window.location.hostname.includes('docs.google.com') && 
                           window.location.href.includes('/spreadsheets');
   
-  // Look for visible listbox, menu, or options
-  // IMPORTANT: Only match elements that are truly popup/floating menus, not inline toolbar items
-  const listboxSelectors = [
-    // Only match expanded listboxes (not static toolbar items)
-    '[role="listbox"][aria-expanded="true"]',
-    '[role="menu"][aria-expanded="true"]',
-    // Popup/floating elements (high z-index or positioned)
-    '[data-popper-placement]', // Popper.js managed popups
-    // MUI/React patterns - these are typically real popups
-    '[class*="MuiMenu-list"]',
-    '[class*="MuiAutocomplete-listbox"]',
-    '[class*="MuiPopper-root"] [role="listbox"]',
-    // Ant Design
-    '[class*="ant-select-dropdown"]',
-    '[class*="ant-dropdown"]',
-    // Salesforce navigation menu patterns
-    '[class*="navMenu"]',
-    '[class*="NavigationMenu"]',
-    '[aria-label*="Navigation Menu"]',
-    'ul[role="menu"][class*="slds-listbox"]',
-    'ul[role="menu"][class*="slds-dropdown"]',
-    '[id*="navMenuList"]',
-    // Other common patterns
-    '.dropdown-content:not([hidden])',
-    '[class*="Dropdown-menu"]',
-    '[class*="dropdown-menu"]:not([hidden])',
-    '[class*="select-menu"]',
-  ];
-  
-  // On Google Sheets, only look for actual popup menus (not toolbar)
-  // Actual Google Sheets dropdown menus have specific patterns
-  const sheetsPopupSelectors = isGoogleSheets ? [
-    // Google Sheets actual popup menus
-    '[class*="goog-menu"][style*="display"]',
-    '[class*="picker-dialog"]',
-    '.docs-gm [role="menu"]',
-  ] : [];
-  
-  const selectorsToUse = isGoogleSheets ? sheetsPopupSelectors : listboxSelectors;
-  
-  for (const selector of selectorsToUse) {
-    if (!selector) continue;
+  if (isGoogleSheets) {
+    // Skip if element is inside the toolbar (not a popup)
+    const isInToolbar = menu.closest('[role="toolbar"]') || 
+                        menu.closest('.docs-titlebar') ||
+                        menu.closest('.docs-material-menu-button-caption') ||
+                        menu.closest('#docs-chrome');
+    if (isInToolbar) return null;
     
-    let candidates: NodeListOf<Element>;
-    try {
-      candidates = document.querySelectorAll(selector);
-    } catch (e) {
-      continue; // Skip invalid selectors
-    }
-    
-    for (const listbox of candidates) {
-      if (!isVisible(listbox)) continue;
-      
-      // SAFEGUARD: Skip Google Sheets toolbar elements
-      if (isGoogleSheets) {
-        // Skip if element is inside the toolbar (not a popup)
-        const isInToolbar = listbox.closest('[role="toolbar"]') || 
-                            listbox.closest('.docs-titlebar') ||
-                            listbox.closest('.docs-material-menu-button-caption') ||
-                            listbox.closest('#docs-chrome');
-        if (isInToolbar) continue;
-        
-        // Skip if it's one of the known toolbar dropdown triggers (not actual menus)
-        const ariaLabel = listbox.getAttribute('aria-label') || '';
-        if (ariaLabel.includes('Font list') || 
-            ariaLabel.includes('Font size list') ||
-            ariaLabel.includes('Zoom list')) {
-          continue;
-        }
-      }
-      
-      // Check if this is truly a floating/popup element (has high z-index or is in a portal)
-      const style = window.getComputedStyle(listbox);
-      const zIndex = parseInt(style.zIndex || '0', 10);
-      const position = style.position;
-      
-      // Truly open dropdowns are usually position:fixed/absolute with high z-index
-      // Skip static elements that are just part of the page layout
-      if (!isGoogleSheets && position === 'static' && zIndex < 100) {
-        // Check if it has aria-expanded="true" on its trigger
-        const triggerId = listbox.getAttribute('aria-controls') || listbox.getAttribute('id');
-        if (triggerId) {
-          const trigger = document.querySelector(`[aria-controls="${triggerId}"][aria-expanded="true"]`);
-          if (!trigger) continue; // No expanded trigger found, skip
-        } else {
-          continue; // No way to verify it's open, skip
-        }
-      }
-      
-      // Find options within the listbox
-      const optionElements = listbox.querySelectorAll(
-        '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], li'
-      );
-      
-      const visibleOptions: DOMMapElement[] = [];
-      for (const opt of optionElements) {
-        if (!isVisible(opt)) continue;
-        
-        const mapEl = elementToMapElement(opt);
-        // Only include if it has meaningful content
-        if (mapEl.name || mapEl.text) {
-          visibleOptions.push(mapEl);
-        }
-      }
-      
-      // If we found visible options, this is an active dropdown
-      if (visibleOptions.length > 0) {
-        // Try to find the trigger element (combobox/button that opened it)
-        let triggerName: string | undefined;
-        const ariaControls = listbox.getAttribute('id');
-        if (ariaControls) {
-          const trigger = document.querySelector(`[aria-controls="${ariaControls}"], [aria-owns="${ariaControls}"]`);
-          if (trigger) {
-            triggerName = computeAccessibleName(trigger) || undefined;
-          }
-        }
-        
-        return { triggerName, options: visibleOptions };
-      }
+    // Skip if it's one of the known toolbar dropdown triggers (not actual menus)
+    const ariaLabel = menu.getAttribute('aria-label') || '';
+    if (ariaLabel.includes('Font list') || 
+        ariaLabel.includes('Font size list') ||
+        ariaLabel.includes('Zoom list')) {
+      return null;
     }
   }
   
-  // Also check for aria-expanded comboboxes and their associated popups
-  const expandedComboboxes = document.querySelectorAll('[role="combobox"][aria-expanded="true"]');
-  for (const combobox of expandedComboboxes) {
-    const listboxId = combobox.getAttribute('aria-controls') || combobox.getAttribute('aria-owns');
-    if (listboxId) {
-      const listbox = document.getElementById(listboxId);
-      if (listbox && isVisible(listbox)) {
-        const optionElements = listbox.querySelectorAll('[role="option"], li');
-        const visibleOptions: DOMMapElement[] = [];
-        
-        for (const opt of optionElements) {
-          if (!isVisible(opt)) continue;
-          const mapEl = elementToMapElement(opt);
-          if (mapEl.name || mapEl.text) {
-            visibleOptions.push(mapEl);
-          }
-        }
-        
-        if (visibleOptions.length > 0) {
-          return {
-            triggerName: computeAccessibleName(combobox) || undefined,
-            options: visibleOptions,
-          };
-        }
-      }
+  // Check if this is truly a floating/popup element (has high z-index or is in a portal)
+  const style = window.getComputedStyle(menu as HTMLElement);
+  const zIndex = parseInt(style.zIndex || '0', 10);
+  const position = style.position;
+  
+  // Truly open dropdowns are usually position:fixed/absolute with high z-index
+  // Skip static elements that are just part of the page layout
+  if (!isGoogleSheets && position === 'static' && zIndex < 100) {
+    // Check if it has aria-expanded="true" on its trigger
+    const triggerId = menu.getAttribute('aria-controls') || menu.getAttribute('id');
+    if (triggerId) {
+      const trigger = document.querySelector(`[aria-controls="${triggerId}"][aria-expanded="true"]`);
+      if (!trigger) return null; // No expanded trigger found, skip
+    } else {
+      return null; // No way to verify it's open, skip
     }
   }
   
-  return null;
+  // Extract menu items using universal selectors
+  const menuItems = menu.querySelectorAll('[role="menuitem"], [role="option"], .mat-menu-item, .slds-listbox__option, .MuiMenuItem-root, .ant-dropdown-menu-item, li');
+  
+  const visibleOptions: DOMMapElement[] = [];
+  for (const opt of menuItems) {
+    if (!isVisible(opt)) continue;
+    
+    const mapEl = elementToMapElement(opt);
+    // Only include if it has meaningful content
+    if (mapEl.name || mapEl.text) {
+      visibleOptions.push(mapEl);
+    }
+  }
+  
+  if (visibleOptions.length === 0) return null;
+  
+  // Try to find the trigger element (combobox/button that opened it)
+  let triggerName: string | undefined;
+  const menuId = menu.getAttribute('id');
+  if (menuId) {
+    const trigger = document.querySelector(`[aria-controls="${menuId}"], [aria-owns="${menuId}"]`);
+    if (trigger) {
+      triggerName = computeAccessibleName(trigger) || undefined;
+    }
+  }
+  
+  return { triggerName, options: visibleOptions };
 }
 
 function getModalTitle(modal: Element): string | undefined {
@@ -1182,7 +1167,14 @@ function findWidgetTitle(element: Element): string | undefined {
 }
 
 function formatElement(el: DOMMapElement): string {
-  let line = `[${el.role}] "${el.name || el.text || '(unlabeled)'}"`;
+  // CRITICAL: Put widget title FIRST for prominence when LLM is disambiguating
+  let line = '';
+  
+  if (el.widgetTitle) {
+    line = `📍 IN WIDGET "${el.widgetTitle}" → `;
+  }
+  
+  line += `[${el.role}] "${el.name || el.text || '(unlabeled)'}"`;
   
   // Show testid first (most stable identifier)
   if (el.attrs?.testId) {
@@ -1196,10 +1188,6 @@ function formatElement(el: DOMMapElement): string {
   
   if (el.scopePath && el.scopePath.length > 0) {
     line += ` scope=[${el.scopePath.join(' > ')}]`;
-  }
-  
-  if (el.widgetTitle) {
-    line += ` widget="${el.widgetTitle}"`;
   }
   
   if (el.frameId !== 0) {

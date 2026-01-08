@@ -382,66 +382,21 @@ export async function waitForElementGone(
 
 /**
  * Wait for dropdown menu to appear
+ * Now uses unified MenuDetector for framework-agnostic detection
  */
 export async function waitForDropdownMenu(
   timeout: number = 2000
 ): Promise<Element | null> {
-  const menuSelectors = [
-    '[role="listbox"]',
-    '[role="menu"]',
-    '[data-radix-select-viewport]',
-    '[data-radix-select-content]',
-    '[data-radix-menu-content]',
-    '.MuiMenu-paper',
-    '.MuiPaper-root[role="listbox"]',
-    '.MuiPopover-paper',
-    '.ant-select-dropdown',
-    '.chakra-menu__menu-list',
-    '.dropdown-menu.show',
-    '.dropdown-menu',
-    '.select-menu',
-    '[class*="__menu"]',
-    '[class*="listbox"]',
-  ];
+  const { MenuDetector } = await import('../menu-detector');
+  const result = await MenuDetector.waitForMenu(timeout);
   
-  const startTime = Date.now();
-  
-  while (Date.now() - startTime < timeout) {
-    for (const selector of menuSelectors) {
-      const menu = document.querySelector(selector);
-      if (menu && isVisible(menu) && hasOptions(menu)) {
-        return menu;
-      }
-    }
-    await sleep(50);
+  if (result.menu) {
+    console.log(`[waitForDropdownMenu] ✅ Found menu via ${result.method} (${(result.confidence * 100).toFixed(0)}% confidence) in ${result.elapsedMs}ms`);
+  } else {
+    console.warn(`[waitForDropdownMenu] ⚠️ No menu found after ${result.elapsedMs}ms`);
   }
   
-  return null;
-}
-
-/**
- * Check if a menu element has options
- */
-function hasOptions(menu: Element): boolean {
-  const optionSelectors = [
-    '[role="option"]',
-    '[role="menuitem"]',
-    'li',
-    '[data-option]',
-    '[data-value]',
-    'option',
-    '.MuiMenuItem-root',
-    '.ant-select-item-option',
-    '.dropdown-item',
-  ];
-  
-  for (const selector of optionSelectors) {
-    if (menu.querySelector(selector)) {
-      return true;
-    }
-  }
-  
-  return false;
+  return result.menu;
 }
 
 // ============================================================================
