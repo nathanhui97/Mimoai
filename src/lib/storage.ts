@@ -87,6 +87,76 @@ export class WorkflowStorage {
       throw new Error(`Failed to delete workflow: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
+
+  /**
+   * Search workflows by query string
+   * Returns workflows ranked by relevance
+   */
+  static async searchWorkflows(query: string): Promise<SavedWorkflow[]> {
+    try {
+      const workflows = await this.loadWorkflows();
+      const q = query.toLowerCase().trim();
+      
+      if (!q) {
+        return workflows;
+      }
+      
+      return workflows
+        .map(w => ({
+          workflow: w,
+          score: this.calculateMatchScore(w, q)
+        }))
+        .filter(r => r.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map(r => r.workflow);
+    } catch (error) {
+      console.error('Error searching workflows:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Calculate relevance score for a workflow against a query
+   */
+  private static calculateMatchScore(w: SavedWorkflow, query: string): number {
+    let score = 0;
+    const nameLower = w.name.toLowerCase();
+    const descLower = w.description?.toLowerCase() || '';
+    const goalLower = w.analyzedIntent?.primaryGoal?.toLowerCase() || '';
+    
+    // Exact name match = 100
+    if (nameLower === query) {
+      score += 100;
+    }
+    // Name starts with query = 75
+    else if (nameLower.startsWith(query)) {
+      score += 75;
+    }
+    // Name contains query = 50
+    else if (nameLower.includes(query)) {
+      score += 50;
+    }
+    
+    // Description contains query = 30
+    if (descLower.includes(query)) {
+      score += 30;
+    }
+    
+    // Intent goal contains query = 20
+    if (goalLower.includes(query)) {
+      score += 20;
+    }
+    
+    // Boost for word boundary matches
+    const queryWords = query.split(/\s+/);
+    const nameWords = nameLower.split(/\s+/);
+    const matchingWords = queryWords.filter(qw => 
+      nameWords.some(nw => nw.includes(qw))
+    );
+    score += matchingWords.length * 10;
+    
+    return score;
+  }
 }
 
 

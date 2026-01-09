@@ -158,6 +158,13 @@ async function checkAndResumeAgent(trigger: 'page_load' | 'tab_visible'): Promis
         onProgress: (stepNumber, action, status) => {
           console.log(`[Content] Agent step ${stepNumber} - ${status}:`, action.type);
         },
+        onThinkingEvent: (event) => {
+          // Forward thinking events to sidepanel for chain of thought display
+          chrome.runtime.sendMessage({
+            type: 'AGENT_THINKING',
+            payload: event,
+          });
+        },
       });
       
       console.log(`[Content] 🚀 Starting agent resumption...`);
@@ -629,6 +636,13 @@ function handleFullMessage(
               stepTimeout: 30000,
               onProgress: (stepNumber, action, status) => {
                 console.log(`GhostWriter: Agent step ${stepNumber} - ${status}:`, action.type);
+              },
+              onThinkingEvent: (event) => {
+                // Forward thinking events to sidepanel for chain of thought display
+                chrome.runtime.sendMessage({
+                  type: 'AGENT_THINKING',
+                  payload: event,
+                });
               },
             });
             

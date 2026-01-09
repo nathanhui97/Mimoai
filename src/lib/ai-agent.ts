@@ -341,6 +341,8 @@ export type AgentProgressCallback = (
   status: 'thinking' | 'acting' | 'completed' | 'failed'
 ) => void;
 
+export type ThinkingEventCallback = (event: import('../types/messages').ThinkingEvent) => void;
+
 // ============================================================================
 // AI Agent Class
 // ============================================================================
@@ -351,6 +353,7 @@ export class AIAgent {
   // @ts-ignore - stepTimeout is stored for potential future use in API timeout
   private stepTimeout: number;
   private onProgress?: AgentProgressCallback;
+  private onThinkingEvent?: ThinkingEventCallback;
   
   // Extracted modules
   private readonly candidateFinder: CandidateFinder;
@@ -360,10 +363,12 @@ export class AIAgent {
     maxSteps?: number;
     stepTimeout?: number;
     onProgress?: AgentProgressCallback;
+    onThinkingEvent?: ThinkingEventCallback;
   } = {}) {
     this.maxSteps = options.maxSteps ?? 50;
     this.stepTimeout = options.stepTimeout ?? 30000; // Used for API timeout
     this.onProgress = options.onProgress;
+    this.onThinkingEvent = options.onThinkingEvent;
     
     // Initialize extracted modules
     this.candidateFinder = new CandidateFinder();
@@ -505,6 +510,18 @@ export class AIAgent {
           console.log(`[AIAgent] ✅ All hints completed (${completedCount}/${totalCount}) or reached end of workflow`);
           this.state.status = 'completed';
           
+          // Emit completion event
+          this.onThinkingEvent?.({
+            type: 'complete',
+            timestamp: Date.now(),
+            stepIndex: totalCount,
+            stepTotal: totalCount,
+            result: {
+              success: true,
+              duration: Date.now() - this.state.startTime,
+            },
+          });
+          
           // Verify workflow outcome if available
           if (this.state.analyzedIntent?.expectedOutcome) {
             const verification = await this.verifyWorkflowOutcome();
@@ -543,6 +560,21 @@ export class AIAgent {
         // 1. Observe
         const observation = await this.observe();
         console.log(`[AIAgent] Observed: ${observation.url}`);
+        
+        // Emit observation event
+        this.onThinkingEvent?.({
+          type: 'observe',
+          timestamp: Date.now(),
+          stepIndex: this.state.currentHintIndex,
+          stepTotal: this.state.hints.length,
+          observation: {
+            url: observation.url,
+            pageTitle: observation.title,
+            hasModal: observation.hasModal,
+            hasDropdown: observation.hasOpenDropdown,
+            elementsFound: observation.buttonCount + observation.linkCount + observation.inputCount,
+          },
+        });
         
         // 1.5 Check if current hint's expected outcome is already satisfied
         if (currentHint?.naturalLanguage?.expectedOutcome) {
@@ -1050,6 +1082,20 @@ export class AIAgent {
         const action = await this.think(observation);
         console.log(`[AIAgent] Action: ${action.type}`, action.params);
         console.log(`[AIAgent] Reasoning: ${action.reasoning}`);
+        
+        // Emit decision event
+        this.onThinkingEvent?.({
+          type: 'decide',
+          timestamp: Date.now(),
+          stepIndex: this.state.currentHintIndex,
+          stepTotal: this.state.hints.length,
+          decision: {
+            action: action.type,
+            targetDescription: action.params.target?.name || action.params.target?.text || action.params.description || '',
+            reasoning: action.reasoning,
+            confidence: action.confidence,
+          },
+        });
 
         // 3. Check if done
         if (action.type === 'done') {
@@ -1110,7 +1156,21 @@ export class AIAgent {
 
         // 4. Act (non-navigation actions)
         this.onProgress?.(this.state.currentHintIndex, action, 'acting');
+        const actionStartTime = Date.now();
         const result = await this.act(action);
+        
+        // Emit action result event
+        this.onThinkingEvent?.({
+          type: 'act',
+          timestamp: Date.now(),
+          stepIndex: this.state.currentHintIndex,
+          stepTotal: this.state.hints.length,
+          result: {
+            success: result.success,
+            error: result.error,
+            duration: Date.now() - actionStartTime,
+          },
+        });
 
         // 5. Record history
         const historyEntry: ActionHistoryEntry = {

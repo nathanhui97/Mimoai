@@ -8,9 +8,12 @@ import { VariableDetector } from '../lib/variable-detector';
 import { IntentAnalyzer } from '../lib/intent-analyzer';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
+import { SettingsPanel } from './SettingsPanel';
+import { ThinkingPanel } from './ThinkingPanel';
+import { TaskInput } from './TaskInput';
+import { TaskSuggestions } from './TaskSuggestions';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
-import type { ExtensionState } from '../types/state';
 import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import type { AgentAction } from '../lib/ai-agent';
@@ -21,49 +24,34 @@ import type {
   AIValidationCompletedMessage,
   StepEnhancedMessage,
   CorrectionSavedMessage,
-  ElementFindFailedMessage
+  ElementFindFailedMessage,
+  ThinkingEvent
 } from '../types/messages';
 import type { CorrectionEntry } from '../types/visual';
 
 function App() {
   const { 
     state, 
-    connectionStatus, 
-    error, 
-    lastPingTime,
     workflowSteps,
     savedWorkflows,
-    currentWorkflowName,
     isRecording,
-    pendingAIValidations,
-    enhancedSteps,
-    recordedTabs,
-    excludedTabIndices,
     setState,
     setConnectionStatus,
     setError,
     setLastPingTime,
     clearWorkflowSteps,
-    loadWorkflow,
     setSavedWorkflows,
     addSavedWorkflow,
-    removeSavedWorkflow,
     setCurrentWorkflowName,
     setIsRecording,
-    setWorkflowSteps,
-    // addRecordedTab, // Available for future use
-    // incrementTabStepCount, // Available for future use
-    toggleTabExclusion,
-    removeWorkflowStep,
   } = useExtensionStore();
 
-  const [isPinging, setIsPinging] = useState(false);
+  const [_isPinging, setIsPinging] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [workflowName, setWorkflowName] = useState('');
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
   const [showRefreshDialog, setShowRefreshDialog] = useState(false);
   const [pendingTabId, setPendingTabId] = useState<number | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
+  const [_isPaused, setIsPaused] = useState(false);
   const [tabSwitchToast, setTabSwitchToast] = useState<{ title: string; tabIndex: number; totalTabs: number } | null>(null);
   // Correction learning state
   const [showCorrections, setShowCorrections] = useState(false);
@@ -74,7 +62,6 @@ function App() {
   const [isDetectingVariables, setIsDetectingVariables] = useState(false);
   // Recording finalization state (flushing pending steps)
   const [isFinalizingRecording, setIsFinalizingRecording] = useState(false);
-  const [expandedVariables, setExpandedVariables] = useState<Set<string>>(new Set());
   const [currentWorkflowVariables, setCurrentWorkflowVariables] = useState<import('../lib/variable-detector').WorkflowVariables | null>(null);
   // Variable form modal state
   const [showVariableForm, setShowVariableForm] = useState(false);
@@ -85,10 +72,10 @@ function App() {
   const [isExecuting, setIsExecuting] = useState(false);
   // Screenshot modal state
   const [screenshotModalStep, setScreenshotModalStep] = useState<{ step: WorkflowStep; index: number } | null>(null);
-  // Optimization toggle state
-  // Editable AI instructions state
-  const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
-  const [editedInstruction, setEditedInstruction] = useState<string>('');
+  // UI simplification state
+  const [showAdvancedMenu, setShowAdvancedMenu] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [_workflowMenu, _setWorkflowMenu] = useState<string | null>(null);
   
   // AI Agent execution state
   const [isAgentRunning, setIsAgentRunning] = useState(false);
@@ -97,12 +84,20 @@ function App() {
     action: AgentAction | null;
     status: 'thinking' | 'acting' | 'completed' | 'failed';
   } | null>(null);
-  const [agentLog, setAgentLog] = useState<Array<{
+  const [_agentLog, setAgentLog] = useState<Array<{
     time: string;
     action: string;
     status: 'success' | 'failed' | 'info';
     reasoning?: string;
   }>>([]);
+  
+  // Chain of thought state
+  const [thinkingEvents, setThinkingEvents] = useState<ThinkingEvent[]>([]);
+  const [currentStep, setCurrentStep] = useState<{index: number; total: number}>({index: 0, total: 0});
+  
+  // Conversational interface state
+  const [taskQuery, setTaskQuery] = useState('');
+  const [suggestions, setSuggestions] = useState<SavedWorkflow[]>([]);
 
   // Ping content script on mount
   useEffect(() => {
@@ -207,6 +202,20 @@ function App() {
           setLearningFeedback(`⚠️ AI Agent: ${result.stepsCompleted}/${result.totalSteps} steps completed`);
         }
         setTimeout(() => setLearningFeedback(null), 5000);
+        
+        // Clear thinking events when execution completes
+        setTimeout(() => {
+          setThinkingEvents([]);
+          setCurrentStep({index: 0, total: 0});
+        }, 3000); // Keep visible for 3 seconds after completion
+      } else if (message.type === 'AGENT_THINKING' && message.payload) {
+        // AI Agent thinking event - update chain of thought
+        const event = message.payload as ThinkingEvent;
+        setThinkingEvents(prev => [...prev, event]);
+        setCurrentStep({
+          index: event.stepIndex,
+          total: event.stepTotal,
+        });
       } else if (message.type === 'RECORDED_STEP' && message.payload?.step) {
         // Use the store actions directly instead of from hook to avoid stale closures
         useExtensionStore.getState().addWorkflowStep(message.payload.step);
@@ -450,127 +459,6 @@ function App() {
     setState('IDLE');
   };
 
-  const handleAddTab = async () => {
-    try {
-      // 1. Update UI immediately (optimistic update)
-      setIsPaused(true);
-      setState('PAUSED');
-      
-      // 2. Send ADD_TAB message to service worker
-      // Service worker will handle pausing (without finalizing) and open new tab
-      const response = await runtimeBridge.sendMessage({
-        type: 'ADD_TAB',
-      });
-      
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to add tab');
-      }
-      
-      // Service worker will:
-      // - Pause recording in all tabs (without finalizing)
-      // - Store last recorded tab info
-      // - Open new tab
-    } catch (err) {
-      console.error('Add tab error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to add tab');
-      // Revert UI state if failed
-      setIsPaused(false);
-      setState('RECORDING'); // Revert to recording state
-    }
-  };
-
-  const handleResumeRecording = async () => {
-    try {
-      // Get current active tab
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id || !tab.url) {
-        throw new Error('No active tab found');
-      }
-      
-      // Check if it's a restricted page
-      if (tab.url.startsWith('chrome://') || 
-          tab.url.startsWith('chrome-extension://') || 
-          tab.url.startsWith('about:') ||
-          tab.url.startsWith('edge://')) {
-        throw new Error('Cannot record on this page type. Please navigate to a regular website.');
-      }
-      
-      // Service worker tracks lastRecordedTabUrl and lastRecordedTabIndex
-      // We don't need to pass fromUrl/fromTabIndex - service worker has it
-      // But we can pass it for clarity
-      
-      // Send RESUME_RECORDING message
-      // Service worker will use stored lastRecordedTabUrl and lastRecordedTabIndex
-      const response = await runtimeBridge.sendMessage({
-        type: 'RESUME_RECORDING',
-        payload: {
-          tabId: tab.id,
-          tabUrl: tab.url,
-          tabTitle: tab.title,
-          fromUrl: '', // Service worker will use stored value
-          // fromTabIndex and toTabIndex will be handled by service worker
-        },
-      });
-      
-      if (!response.success) {
-        throw new Error(response.error || 'Failed to resume recording');
-      }
-      
-      // Update UI state
-      setIsPaused(false);
-      setIsRecording(true);
-      setState('RECORDING');
-    } catch (err) {
-      console.error('Resume recording error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to resume recording');
-    }
-  };
-
-  // ============================================================================
-  // Editable AI Instructions Handlers
-  // ============================================================================
-  
-  /**
-   * Start editing a step's AI instruction
-   */
-  const handleStartEditInstruction = (index: number, currentInstruction: string) => {
-    setEditingStepIndex(index);
-    setEditedInstruction(currentInstruction);
-  };
-
-  /**
-   * Save edited instruction to the workflow step
-   */
-  const handleSaveInstruction = (index: number) => {
-    const updatedSteps = [...workflowSteps];
-    const step = updatedSteps[index];
-    
-    // Update the naturalLanguage.intent with user's edit
-    updatedSteps[index] = {
-      ...step,
-      naturalLanguage: {
-        intent: editedInstruction,
-        precondition: step.naturalLanguage?.precondition || 'Page must be loaded',
-        expectedOutcome: step.naturalLanguage?.expectedOutcome || 'Action completes successfully',
-        dependencies: step.naturalLanguage?.dependencies || [],
-        userEdited: true, // Flag that user modified this
-      },
-    };
-    
-    setWorkflowSteps(updatedSteps);
-    setEditingStepIndex(null);
-    setEditedInstruction('');
-    console.log(`[App] ✏️ Saved edited instruction for step ${index + 1}: "${editedInstruction}"`);
-  };
-
-  /**
-   * Cancel editing
-   */
-  const handleCancelEditInstruction = () => {
-    setEditingStepIndex(null);
-    setEditedInstruction('');
-  };
-
   const handleStopRecording = async () => {
     console.log('[App] handleStopRecording called, workflowSteps.length:', workflowSteps.length);
     try {
@@ -698,6 +586,14 @@ function App() {
         // Note: Step translations now happen during intent analysis (in handleSaveWorkflow)
         // This reduces API calls from N+1 to just 1
         console.log('[App] ✅ Recording stopped - translations will happen on save');
+        
+        // Auto-suggest a task name and show save dialog
+        setTimeout(() => {
+          const suggestedName = generateTaskName(currentSteps);
+          setWorkflowName(suggestedName);
+          setShowSaveDialog(true);
+          console.log('[App] 💡 Auto-generated task name:', suggestedName);
+        }, 500); // Small delay to let UI update
       } else {
         console.log('[App] ⚠️ No workflow steps to analyze for variables (workflowSteps.length =', workflowSteps.length, ')');
         // Still set empty variables so UI shows the section
@@ -814,6 +710,17 @@ function App() {
           workflowDescription = IntentAnalyzer.formatIntentAsSummary(intentAnalysis.intent);
           console.log('[SaveWorkflow] Generated description:', workflowDescription);
           
+          // Use AI primary goal as name if it's more concise than user's input
+          if (intentAnalysis.intent.primaryGoal && intentAnalysis.intent.primaryGoal.length < 60) {
+            const aiName = intentAnalysis.intent.primaryGoal;
+            const userName = workflowName.trim();
+            // If user kept the auto-generated name or it's generic, use AI name
+            if (userName.startsWith('Click') || userName.startsWith('Type') || aiName.length < userName.length) {
+              console.log('[SaveWorkflow] 💡 Using AI-generated name instead:', aiName);
+              tempWorkflow.name = aiName;
+            }
+          }
+          
           // Apply step translations if available
           if (intentAnalysis.intent.stepTranslations && intentAnalysis.intent.stepTranslations.length > 0) {
             console.log('[SaveWorkflow] ✨ Applying', intentAnalysis.intent.stepTranslations.length, 'step translations');
@@ -913,14 +820,6 @@ function App() {
     }
   };
 
-  const handleLoadWorkflow = (workflow: SavedWorkflow) => {
-    loadWorkflow(workflow);
-    setState('IDLE');
-    // Store variables for display
-    console.log('[LoadWorkflow] Loading workflow with variables:', workflow.variables);
-    setCurrentWorkflowVariables(workflow.variables || null);
-  };
-
   /**
    * Execute a workflow - shows variable form if workflow has variables
    */
@@ -1000,6 +899,10 @@ function App() {
     setState('EXECUTING');
     setAgentLog([]);
     setAgentProgress(null);
+    
+    // Clear previous thinking events
+    setThinkingEvents([]);
+    setCurrentStep({index: 0, total: workflow.steps.length});
     
     const addLog = (action: string, status: 'success' | 'failed' | 'info', reasoning?: string) => {
       setAgentLog(prev => [...prev, {
@@ -1181,22 +1084,6 @@ function App() {
     }
   };
 
-  const handleDeleteWorkflow = async (id: string) => {
-    try {
-      await WorkflowStorage.deleteWorkflow(id);
-      removeSavedWorkflow(id);
-      setShowDeleteConfirm(null);
-      
-      // Clear current workflow if it was deleted
-      if (currentWorkflowName && savedWorkflows.find(w => w.id === id)?.name === currentWorkflowName) {
-        clearWorkflowSteps();
-        setCurrentWorkflowName(null);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete workflow');
-    }
-  };
-
   const handleExportJSON = (steps: WorkflowStep[] = workflowSteps) => {
     const json = JSON.stringify(steps, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
@@ -1212,180 +1099,251 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const getStateColor = (currentState: ExtensionState) => {
-    switch (currentState) {
-      case 'IDLE':
-        return 'bg-gray-500';
-      case 'CONNECTING':
-        return 'bg-yellow-500';
-      case 'RECORDING':
-        return 'bg-red-500';
-      case 'PROCESSING_AI':
-        return 'bg-blue-500';
-      case 'EXECUTING':
-        return 'bg-green-500';
-      default:
-        return 'bg-gray-500';
+  // Conversational interface handlers
+  const handleSearch = async (query: string) => {
+    setTaskQuery(query);
+    if (query.trim()) {
+      const results = await WorkflowStorage.searchWorkflows(query);
+      setSuggestions(results);
+    } else {
+      setSuggestions([]);
     }
   };
 
-  const getConnectionStatusColor = () => {
-    switch (connectionStatus) {
-      case 'connected':
-        return 'text-green-600';
-      case 'connecting':
-        return 'text-yellow-600';
-      case 'error':
-        return 'text-red-600';
-      default:
-        return 'text-gray-600';
+  const handleTaskSubmit = async (_query: string) => {
+    // Run the best match if available
+    if (suggestions.length > 0) {
+      await handleExecuteWorkflow(suggestions[0]);
     }
   };
 
-  const formatDate = (timestamp: number) => {
-    return new Date(timestamp).toLocaleString();
+  const handleTaskSelect = async (workflow: SavedWorkflow) => {
+    setTaskQuery(''); // Clear search
+    setSuggestions([]);
+    await handleExecuteWorkflow(workflow);
+  };
+
+  const getHumanDescription = (step: WorkflowStep): string => {
+    // Use natural language if available
+    if (step.naturalLanguage?.intent) {
+      return step.naturalLanguage.intent;
+    }
+    
+    // Otherwise generate from step data
+    if (!isWorkflowStepPayload(step.payload)) {
+      return step.description || step.type;
+    }
+
+    switch(step.type) {
+      case 'CLICK':
+        return `Click "${step.payload.elementText || step.payload.label || 'element'}"`;
+      case 'INPUT':
+        const value = step.payload.value?.substring(0, 20);
+        const label = step.payload.label || 'field';
+        return `Type "${value}${value && value.length >= 20 ? '...' : ''}" in ${label}`;
+      case 'NAVIGATION':
+        try {
+          return `Go to ${new URL(step.payload.url).hostname}`;
+        } catch {
+          return `Navigate to page`;
+        }
+      case 'TAB_SWITCH':
+        return 'Switch to different tab';
+      case 'SCROLL':
+        return 'Scroll page';
+      case 'KEYBOARD':
+        return `Press ${step.payload.keyboardDetails?.key || 'key'}`;
+      default:
+        return step.description || step.type;
+    }
+  };
+
+  // Auto-generate task name from AI description or workflow steps
+  const generateTaskName = (steps: WorkflowStep[]): string => {
+    // Try to create a meaningful name from the first few steps
+    if (steps.length === 0) {
+      return `Task ${new Date().toLocaleString()}`;
+    }
+    
+    // Get first significant action (skip navigation)
+    const firstAction = steps.find(s => s.type === 'CLICK' || s.type === 'INPUT');
+    if (firstAction) {
+      const desc = getHumanDescription(firstAction);
+      // Take first 5 words
+      const words = desc.split(' ').slice(0, 5).join(' ');
+      return words.length > 3 ? words : desc;
+    }
+    
+    // Fallback to first step
+    return getHumanDescription(steps[0]);
   };
 
   return (
-    <div className="min-h-screen bg-background p-6">
-      <div className="max-w-2xl mx-auto">
-        <h1 className="text-3xl font-bold mb-6 text-foreground">mimoai</h1>
-        
-        {/* Connection Status */}
-        <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-2 text-card-foreground">Connection Status</h2>
-          <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${
-              connectionStatus === 'connected' ? 'bg-green-500' :
-              connectionStatus === 'connecting' ? 'bg-yellow-500' :
-              'bg-red-500'
-            }`} />
-            <span className={`font-medium ${getConnectionStatusColor()}`}>
-              {connectionStatus.toUpperCase()}
-            </span>
-            {isPinging && (
-              <span className="text-sm text-muted-foreground">(Pinging...)</span>
+    <div className="flex flex-col h-screen bg-background">
+      <div className="flex-1 overflow-y-auto p-6">
+        <div className="max-w-2xl mx-auto">
+          {/* Header - Minimal */}
+          <div className="flex items-center justify-between mb-6">
+            <h1 className="text-xl font-bold text-foreground">mimoai</h1>
+            <button
+              onClick={() => setShowSettings(true)}
+              className="p-2 text-muted-foreground hover:text-foreground transition-colors"
+              title="Settings"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
+                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Recording Indicator */}
+          {isRecording && (
+            <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-red-700 font-medium flex-1">Learning your task...</span>
+              <button
+                onClick={handleStopRecording}
+                className="text-sm text-red-600 hover:underline"
+                disabled={isFinalizingRecording}
+              >
+                {isFinalizingRecording ? 'Finishing...' : 'Done'}
+              </button>
+            </div>
+          )}
+          
+          {/* Greeting - Only show when not recording and no steps */}
+          {!isRecording && workflowSteps.length === 0 && !isAgentRunning && (
+            <div className="mb-6">
+              <h2 className="text-2xl font-semibold text-foreground mb-2">
+                How can I help you?
+              </h2>
+              <p className="text-sm text-muted-foreground mb-4">
+                Choose a task below or type what you'd like to do
+              </p>
+              
+              {/* Task Bubbles */}
+              {savedWorkflows.length > 0 && (
+                <div className="mb-4">
+                  <div className="flex flex-wrap gap-2 mb-2">
+                    {savedWorkflows.map((workflow) => (
+                      <button
+                        key={workflow.id}
+                        onClick={() => handleTaskSelect(workflow)}
+                        disabled={isExecuting}
+                        className="px-4 py-2 bg-muted border border-border rounded-full text-sm text-foreground hover:bg-primary/10 hover:border-primary transition-colors disabled:opacity-50"
+                      >
+                        {workflow.name}
+                      </button>
+                    ))}
+                  </div>
+                  
+                  {/* Teach New Task Button */}
+                  <button
+                    onClick={handleStartRecording}
+                    disabled={state === 'CONNECTING'}
+                    className="px-4 py-2 bg-background border border-dashed border-border rounded-full text-sm text-muted-foreground hover:text-foreground hover:border-primary transition-colors disabled:opacity-50"
+                  >
+                    + Teach me something new
+                  </button>
+                </div>
+              )}
+              
+              {/* No tasks state */}
+              {savedWorkflows.length === 0 && (
+                <div className="p-6 text-center text-sm text-muted-foreground border-2 border-dashed border-border rounded-lg mb-4">
+                  <p className="mb-3">You haven't taught me any tasks yet.</p>
+                  <button
+                    onClick={handleStartRecording}
+                    className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                  >
+                    Show me how to do something
+                  </button>
+                </div>
+              )}
+              
+              {/* Search Results - Show when typing */}
+              {taskQuery.trim() && suggestions.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-xs text-muted-foreground mb-2">Search results:</p>
+                  <TaskSuggestions
+                    query={taskQuery}
+                    suggestions={suggestions}
+                    onSelect={handleTaskSelect}
+                    onShowMeHow={handleStartRecording}
+                    isExecuting={isExecuting}
+                  />
+                </div>
+              )}
+              
+              {/* No matches state */}
+              {taskQuery.trim() && suggestions.length === 0 && (
+                <div className="mb-4 p-4 bg-muted rounded-lg border border-border text-center">
+                  <p className="text-foreground mb-2">I don't know how to do that yet.</p>
+                  <p className="text-sm text-muted-foreground mb-3">Would you like to teach me?</p>
+                  <button
+                    onClick={handleStartRecording}
+                    className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                  >
+                    Show me how
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+        {/* After recording: Show save workflow UI */}
+        {workflowSteps.length > 0 && !isRecording && (
+          <div className="mb-6">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowSaveDialog(true)}
+                className="flex-1 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                disabled={isDetectingVariables}
+              >
+                {isDetectingVariables ? 'Analyzing...' : 'Save as task'}
+              </button>
+              <button
+                onClick={() => setShowAdvancedMenu(!showAdvancedMenu)}
+                className="p-2 bg-muted border border-border rounded-md hover:bg-muted/80"
+                title="More options"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
+                </svg>
+              </button>
+            </div>
+            
+            {showAdvancedMenu && (
+              <div className="mt-2 p-2 bg-muted rounded-md border border-border space-y-1">
+                <button
+                  onClick={() => {
+                    handleExportJSON();
+                    setShowAdvancedMenu(false);
+                  }}
+                  className="w-full px-3 py-2 text-left text-sm hover:bg-background rounded"
+                >
+                  Export as JSON
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirm('Clear all recorded steps?')) {
+                      clearWorkflowSteps();
+                      setShowAdvancedMenu(false);
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-background rounded"
+                >
+                  Clear steps
+                </button>
+              </div>
             )}
-          </div>
-          {lastPingTime && (
-            <p className="text-sm text-muted-foreground mt-2">
-              Last ping: {new Date(lastPingTime).toLocaleTimeString()}
-            </p>
-          )}
-          {error && (
-            <p className="text-sm text-destructive mt-2">{error}</p>
-          )}
-        </div>
-
-        {/* Extension State */}
-        <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-2 text-card-foreground">Extension State</h2>
-          <div className="flex items-center gap-3">
-            <div className={`w-4 h-4 rounded-full ${getStateColor(state)} animate-pulse`} />
-            <span className="font-medium text-foreground">{state}</span>
-          </div>
-          {currentWorkflowName && (
-            <p className="text-sm text-muted-foreground mt-2">
-              Current workflow: {currentWorkflowName}
-            </p>
-          )}
-          {pendingAIValidations.size > 0 && (
-            <div className="mt-2 flex items-center gap-2 text-sm text-yellow-600">
-              <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
-              <span>AI validating {pendingAIValidations.size} step{pendingAIValidations.size > 1 ? 's' : ''}...</span>
-            </div>
-          )}
-          {enhancedSteps.size > 0 && pendingAIValidations.size === 0 && (
-            <div className="mt-2 flex items-center gap-2 text-sm text-blue-600">
-              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-              </svg>
-              <span>{enhancedSteps.size} step{enhancedSteps.size > 1 ? 's' : ''} enhanced with AI</span>
-            </div>
-          )}
-          {currentWorkflowVariables && currentWorkflowVariables.variables.length > 0 && (
-            <div className="mt-2 flex items-center gap-2 text-sm text-purple-600">
-              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-              </svg>
-              <span>{currentWorkflowVariables.variables.length} variable{currentWorkflowVariables.variables.length !== 1 ? 's' : ''} detected by AI</span>
-            </div>
-          )}
-        </div>
-
-        {/* Paused State Indicator */}
-        {isPaused && (
-          <div className="mb-4 p-4 bg-yellow-100 dark:bg-yellow-900 rounded-lg border border-yellow-300 dark:border-yellow-700">
-            <p className="text-sm text-yellow-800 dark:text-yellow-200">
-              Recording paused. Navigate to your target site, then click "Resume Recording".
-            </p>
           </div>
         )}
 
-        {/* Actions */}
-        <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-4 text-card-foreground">Actions</h2>
-          <div className="space-y-2">
-            <button
-              onClick={handleStartRecording}
-              className="w-full px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={state === 'RECORDING' || state === 'CONNECTING' || isPaused}
-            >
-              Start Recording
-            </button>
-            {isRecording && !isPaused && (
-              <button
-                onClick={handleAddTab}
-                className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Add Tab
-              </button>
-            )}
-            {isPaused && (
-              <button
-                onClick={handleResumeRecording}
-                className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Resume Recording
-              </button>
-            )}
-            <button
-              onClick={handleStopRecording}
-              className="w-full px-4 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={(state !== 'RECORDING' && !isPaused) || isFinalizingRecording}
-            >
-              {isFinalizingRecording ? '⏳ Finishing...' : 'Stop Recording'}
-            </button>
-            <button
-              onClick={() => setShowSaveDialog(true)}
-              className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={workflowSteps.length === 0 || isRecording || isDetectingVariables}
-            >
-              {isDetectingVariables ? 'Analyzing Variables...' : 'Save Workflow'}
-            </button>
-            <button
-              onClick={() => handleExportJSON()}
-              className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={workflowSteps.length === 0 || isRecording || isDetectingVariables}
-            >
-              Export JSON
-            </button>
-            <button
-              onClick={clearWorkflowSteps}
-              className="w-full px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={workflowSteps.length === 0 || isRecording}
-            >
-              Clear Steps
-            </button>
-          </div>
-        </div>
-
-        {/* Tab Switch Toast Notification */}
-        {tabSwitchToast && (
+        {/* Tab Switch Toast Notification - Only during recording */}
+        {tabSwitchToast && isRecording && (
           <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900 rounded-lg border border-blue-200 dark:border-blue-700 animate-fade-in">
             <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-200">
               <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
@@ -1397,784 +1355,64 @@ function App() {
           </div>
         )}
 
-        {/* Recorded Steps */}
+        {/* Recorded Steps - Show during/after recording */}
         {workflowSteps.length > 0 && (
           <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-            <h2 className="text-lg font-semibold mb-4 text-card-foreground">
-              Recorded Steps ({workflowSteps.length})
-            </h2>
+            <h3 className="font-medium mb-3 text-card-foreground">
+              I learned {workflowSteps.length} action{workflowSteps.length !== 1 ? 's' : ''}
+            </h3>
             
-            {/* Tab Filter Bar */}
-            {recordedTabs.size > 1 && (
-              <div className="mb-3 pb-3 border-b border-border">
-                <div className="text-xs text-muted-foreground mb-2">Filter by tab:</div>
-                <div className="flex flex-wrap gap-2">
-                  {Array.from(recordedTabs.entries()).map(([tabIndex, info]) => {
-                    const isExcluded = excludedTabIndices.has(tabIndex);
-                    return (
-                      <button
-                        key={tabIndex}
-                        onClick={() => toggleTabExclusion(tabIndex)}
-                        className={`px-2 py-1 text-xs rounded transition-colors ${
-                          isExcluded 
-                            ? 'bg-gray-200 text-gray-500 line-through hover:bg-gray-300' 
-                            : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                        }`}
-                        title={isExcluded ? 'Click to include' : 'Click to exclude'}
-                      >
-                        Tab {tabIndex + 1}: {info.title.length > 20 ? info.title.substring(0, 20) + '...' : info.title} ({info.stepCount})
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            
-            <div className="space-y-2 max-h-64 overflow-y-auto">
-              {workflowSteps.filter((step) => {
-                // Filter out steps from excluded tabs
-                if (isWorkflowStepPayload(step.payload) && step.payload.tabIndex !== undefined) {
-                  return !excludedTabIndices.has(step.payload.tabIndex);
-                }
-                return true; // Include steps without tab index
-              }).map((step, index) => {
-                const stepId = step.payload.timestamp.toString();
-                const isPending = pendingAIValidations.has(stepId);
-                const isEnhanced = enhancedSteps.has(stepId);
-                const aiFallbackCount = isWorkflowStepPayload(step.payload) ? step.payload.fallbackSelectors?.filter((s: string) => 
-                  !s.includes('nth-of-type') && !s.includes('ng-star-inserted')
-                ).length || 0 : 0;
-                
-                // Check if this step is a detected variable
-                const variableDef = currentWorkflowVariables?.variables.find(
-                  v => String(v.stepId) === stepId
-                );
-                const isVariable = !!variableDef;
-                
-                // Check if this step has a visual snapshot
-                const hasScreenshot = isWorkflowStepPayload(step.payload) && 
-                  (step.payload.visualSnapshot?.viewport || step.payload.visualSnapshot?.elementSnippet);
-                
-                return (
+            <div className="space-y-1 max-h-64 overflow-y-auto">
+              {workflowSteps.map((step, index) => (
                   <div 
                     key={index} 
-                    className={`p-3 bg-muted rounded-md text-sm border-l-4 ${
-                      isVariable ? 'border-purple-500' :
-                      isEnhanced ? 'border-blue-500' : 
-                      isPending ? 'border-yellow-500 animate-pulse' : 
-                      'border-transparent'
-                    }`}
+                    className="py-2 border-b border-border last:border-0 text-sm flex items-start gap-2"
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1">
-                        <div className="font-medium text-foreground flex items-center gap-2">
-                          {index + 1}. {step.type}
-                          {/* Tab Badge */}
-                          {isWorkflowStepPayload(step.payload) && step.payload.tabIndex !== undefined && (
-                            <span 
-                              className="px-1.5 py-0.5 text-xs bg-blue-100 text-blue-700 rounded"
-                              title={`Tab ${step.payload.tabIndex + 1}`}
-                            >
-                              Tab {step.payload.tabIndex + 1}
-                            </span>
-                          )}
-                          {isVariable && (
-                            <span 
-                              className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded-full font-medium"
-                              title={`Variable: ${variableDef.fieldName} (${variableDef.variableName}) - Confidence: ${Math.round(variableDef.confidence * 100)}%`}
-                            >
-                              ✨ {variableDef.variableName}
-                            </span>
-                          )}
-                          {!isVariable && step.type === 'INPUT' && isWorkflowStepPayload(step.payload) && step.payload.value && !currentWorkflowVariables && (
-                            <span 
-                              className="px-1.5 py-0.5 text-xs bg-gray-100 text-gray-500 rounded"
-                              title="May be detected as a variable when workflow is saved"
-                            >
-                              ?var
-                            </span>
-                          )}
-                        </div>
-                        {step.description && (
-                          <div className="text-sm text-blue-600 mt-1 font-medium">
-                            {step.description}
-                          </div>
-                        )}
-                        
-                        {/* Editable AI Instructions */}
-                        {step.naturalLanguage?.intent && (
-                          <div className="mt-2">
-                            {editingStepIndex === index ? (
-                              // Edit Mode
-                              <div className="bg-amber-50 border border-amber-200 rounded-md p-2">
-                                <div className="flex items-center gap-1 text-amber-700 text-xs mb-1 font-medium">
-                                  <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                    <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                                  </svg>
-                                  <span>Edit AI Instructions:</span>
-                                </div>
-                                <textarea
-                                  value={editedInstruction}
-                                  onChange={(e) => setEditedInstruction(e.target.value)}
-                                  className="w-full text-sm p-2 border border-amber-300 rounded bg-white focus:outline-none focus:ring-2 focus:ring-amber-400 resize-none"
-                                  rows={2}
-                                  placeholder="Describe what this step should do..."
-                                  autoFocus
-                                />
-                                <div className="flex gap-2 mt-2">
-                                  <button
-                                    onClick={() => handleSaveInstruction(index)}
-                                    className="px-3 py-1 text-xs bg-amber-600 text-white rounded hover:bg-amber-700 transition-colors flex items-center gap-1"
-                                  >
-                                    <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                    </svg>
-                                    Save
-                                  </button>
-                                  <button
-                                    onClick={handleCancelEditInstruction}
-                                    className="px-3 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300 transition-colors"
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              // View Mode
-                              <div 
-                                className={`flex items-start gap-2 p-2 rounded-md cursor-pointer transition-colors ${
-                                  step.naturalLanguage.userEdited 
-                                    ? 'bg-amber-50 border border-amber-200 hover:bg-amber-100' 
-                                    : 'bg-emerald-50 border border-emerald-200 hover:bg-emerald-100'
-                                }`}
-                                onClick={() => handleStartEditInstruction(index, step.naturalLanguage?.intent || '')}
-                                title="Click to edit AI instructions"
-                              >
-                                <div className="flex-shrink-0 mt-0.5">
-                                  <span className="text-sm">
-                                    {step.naturalLanguage.userEdited ? '✏️' : '💡'}
-                                  </span>
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <div className={`text-sm ${
-                                    step.naturalLanguage.userEdited ? 'text-amber-800' : 'text-emerald-800'
-                                  }`}>
-                                    {step.naturalLanguage.intent}
-                                  </div>
-                                  {step.naturalLanguage.userEdited && (
-                                    <div className="text-xs text-amber-600 mt-0.5 flex items-center gap-1">
-                                      <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                        <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z" />
-                                      </svg>
-                                      User edited
-                                    </div>
-                                  )}
-                                </div>
-                                <button
-                                  className="flex-shrink-0 p-1 text-gray-400 hover:text-gray-600 rounded transition-colors"
-                                  title="Edit instructions"
-                                >
-                                  <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                                  </svg>
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {/* Remove Step Button */}
-                        <button
-                          onClick={() => removeWorkflowStep(index)}
-                          className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
-                          title="Remove this step"
-                        >
-                          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                        {/* Screenshot Button */}
-                        {hasScreenshot && (
-                          <button
-                            onClick={() => setScreenshotModalStep({ step, index })}
-                            className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                            title="View screenshot"
-                          >
-                            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
-                            </svg>
-                          </button>
-                        )}
-                        {isPending && (
-                          <div className="flex items-center gap-1 text-yellow-600 text-xs">
-                            <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            <span>AI analyzing...</span>
-                          </div>
-                        )}
-                        {isEnhanced && !isPending && (
-                          <div className="flex items-center gap-1 text-blue-600 text-xs">
-                            <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                              <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                            </svg>
-                            <span>AI enhanced</span>
-                          </div>
-                        )}
-                        {/* Execution Strategy Indicator */}
-                        {isWorkflowStepPayload(step.payload) && step.payload.elementAnalysis && (
-                          <div className={`flex items-center gap-1 text-xs ${
-                            step.payload.elementAnalysis.executionStrategy === 'SIMPLE' ? 'text-green-600' :
-                            step.payload.elementAnalysis.executionStrategy === 'AI_RECOMMENDED' ? 'text-yellow-600' :
-                            'text-purple-600'
-                          }`}>
-                            {step.payload.elementAnalysis.executionStrategy === 'SIMPLE' && (
-                              <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z" clipRule="evenodd" />
-                              </svg>
-                            )}
-                            {step.payload.elementAnalysis.executionStrategy === 'AI_RECOMMENDED' && (
-                              <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                              </svg>
-                            )}
-                            {step.payload.elementAnalysis.executionStrategy === 'AI_REQUIRED' && (
-                              <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                <path d="M10 3.5a1.5 1.5 0 013 0V4a1 1 0 001 1h3a1 1 0 011 1v3a1 1 0 01-1 1h-.5a1.5 1.5 0 000 3h.5a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-.5a1.5 1.5 0 00-3 0v.5a1 1 0 01-1 1H6a1 1 0 01-1-1v-3a1 1 0 00-1-1h-.5a1.5 1.5 0 010-3H4a1 1 0 001-1V6a1 1 0 011-1h3a1 1 0 001-1v-.5z" />
-                              </svg>
-                            )}
-                            <span title={`Confidence: ${step.payload.elementAnalysis.confidence}/100`}>
-                              {step.payload.elementAnalysis.executionStrategy === 'SIMPLE' ? '⚡ Fast' :
-                               step.payload.elementAnalysis.executionStrategy === 'AI_RECOMMENDED' ? '🔀 Hybrid' :
-                               '🤖 AI'}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    {/* Simplified display for spreadsheet steps */}
-                    {(() => {
-                      if (!isWorkflowStepPayload(step.payload)) return null;
-                      
-                      const payload = step.payload;
-                      const isSpreadsheetStep = payload.spreadsheetContext?.recordedIntent?.cellRef || 
-                                               payload.context?.gridCoordinates?.cellReference;
-                      
-                      if (isSpreadsheetStep) {
-                        // Simplified view for spreadsheet INPUT steps - only show variable info
-                        return (
-                          <>
-                            {isVariable && variableDef && (
-                              <div className="text-purple-600 text-sm mt-1">
-                                ✨ Variable: {variableDef.fieldName} (click to rename)
-                              </div>
-                            )}
-                          </>
-                        );
-                      }
-                      
-                      // Full display for non-spreadsheet steps
-                      return (
-                        <>
-                          {payload.label && (
-                            <div className="text-muted-foreground">Label: {payload.label}</div>
-                          )}
-                          {payload.value && (
-                            <div className="text-muted-foreground">
-                              Value: {payload.value}
-                              {isVariable && variableDef && (
-                                <span className="ml-2 text-xs text-purple-600">
-                                  (Variable: {variableDef.fieldName})
-                                </span>
-                              )}
-                            </div>
-                          )}
-                          <div className="text-muted-foreground text-xs mt-1">
-                            Selector: {payload.selector}
-                          </div>
-                          {isVariable && variableDef && (
-                            <div className="text-purple-600 text-xs mt-1 flex items-center gap-1">
-                              <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                                <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-                              </svg>
-                              <span>Detected as variable ({Math.round(variableDef.confidence * 100)}% confidence)</span>
-                            </div>
-                          )}
-                          {isEnhanced && aiFallbackCount > 0 && (
-                            <div className="text-blue-600 text-xs mt-1">
-                              ✨ {aiFallbackCount} AI-enhanced fallback selector{aiFallbackCount > 1 ? 's' : ''} added
-                            </div>
-                          )}
-                        </>
-                      );
-                    })()}
+                    <span className="text-muted-foreground flex-shrink-0">{index + 1}.</span>
+                    <span className="flex-1 text-foreground">{getHumanDescription(step)}</span>
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Detected Variables */}
-        {workflowSteps.length > 0 && (
-          <div className="mb-6 p-4 bg-card rounded-lg border border-border border-purple-200">
-            <h2 className="text-lg font-semibold mb-4 text-card-foreground flex items-center gap-2">
-              <svg className="h-5 w-5 text-purple-600" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z" />
-                <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd" />
-              </svg>
-              Detected Variables ({currentWorkflowVariables?.variables?.length || 0})
-              {/* Debug: {currentWorkflowVariables ? 'has vars' : 'no vars'} */}
-            </h2>
-            {currentWorkflowVariables && currentWorkflowVariables.variables && currentWorkflowVariables.variables.length > 0 ? (
-              <div className="space-y-2">
-                {currentWorkflowVariables.variables.map((variable) => {
-                  const isExpanded = expandedVariables.has(variable.variableName);
-                  return (
-                    <div 
-                      key={variable.variableName}
-                      className="p-3 bg-purple-50 rounded-md border border-purple-200 hover:border-purple-300 transition-colors cursor-pointer"
-                      onClick={() => {
-                        const newExpanded = new Set(expandedVariables);
-                        if (isExpanded) {
-                          newExpanded.delete(variable.variableName);
-                        } else {
-                          newExpanded.add(variable.variableName);
-                        }
-                        setExpandedVariables(newExpanded);
-                      }}
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-medium text-foreground">
-                              {variable.fieldName}
-                            </span>
-                            <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded font-mono">
-                              {variable.variableName}
-                            </span>
-                            {variable.isDropdown && (
-                              <span className="px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">
-                                📋 Dropdown
-                              </span>
-                            )}
-                          </div>
-                          <div className="mt-1.5 flex items-center gap-2 text-sm text-muted-foreground">
-                            <span>Default:</span>
-                            <span className="font-mono bg-white px-2 py-0.5 rounded border text-foreground">
-                              {variable.defaultValue || '(empty)'}
-                            </span>
-                          </div>
-                          {variable.isDropdown && variable.options && variable.options.length > 0 && !isExpanded && (
-                            <div className="mt-2">
-                              <div className="flex flex-wrap gap-1">
-                                {variable.options.slice(0, 5).map((option, idx) => (
-                                  <span
-                                    key={idx}
-                                    className={`px-2 py-0.5 text-xs rounded border ${
-                                      option === variable.defaultValue
-                                        ? 'bg-purple-200 border-purple-400 font-medium text-purple-800'
-                                        : 'bg-white border-gray-300 text-gray-700'
-                                    }`}
-                                  >
-                                    {option}
-                                  </span>
-                                ))}
-                                {variable.options.length > 5 && (
-                                  <span className="px-2 py-0.5 text-xs text-muted-foreground">
-                                    +{variable.options.length - 5} more
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                        <button
-                          className="ml-2 p-1 text-muted-foreground hover:text-foreground transition-colors"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const newExpanded = new Set(expandedVariables);
-                            if (isExpanded) {
-                              newExpanded.delete(variable.variableName);
-                            } else {
-                              newExpanded.add(variable.variableName);
-                            }
-                            setExpandedVariables(newExpanded);
-                          }}
-                        >
-                          <svg 
-                            className={`h-4 w-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                            fill="none" 
-                            stroke="currentColor" 
-                            viewBox="0 0 24 24"
-                          >
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                          </svg>
-                        </button>
-                      </div>
-                      
-                      {isExpanded && (
-                        <div className="mt-3 pt-3 border-t border-purple-200 space-y-2">
-                          {variable.isDropdown && variable.options && variable.options.length > 0 && (
-                            <div>
-                              <div className="text-xs font-medium text-muted-foreground mb-1">
-                                All Options ({variable.options.length}):
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {variable.options.map((option, idx) => (
-                                  <span
-                                    key={idx}
-                                    className={`px-2 py-0.5 text-xs rounded border ${
-                                      option === variable.defaultValue
-                                        ? 'bg-purple-200 border-purple-400 font-medium text-purple-800'
-                                        : 'bg-white border-gray-300 text-gray-700'
-                                    }`}
-                                  >
-                                    {option}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                          {variable.inputType && (
-                            <div className="text-xs text-muted-foreground">
-                              Input Type: <span className="font-mono">{variable.inputType}</span>
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs text-muted-foreground">
-                              Confidence: {Math.round(variable.confidence * 100)}%
-                            </span>
-                            <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden max-w-[100px]">
-                              <div 
-                                className="h-full bg-purple-500 rounded-full"
-                                style={{ width: `${variable.confidence * 100}%` }}
-                              />
-                            </div>
-                          </div>
-                          {variable.reasoning && (
-                            <div className="text-xs text-muted-foreground italic border-l-2 border-purple-300 pl-2">
-                              {variable.reasoning}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="text-sm text-muted-foreground py-4 text-center border-2 border-dashed border-purple-200 rounded-md bg-purple-50">
-                {isDetectingVariables ? (
-                  <div className="flex items-center justify-center gap-2">
-                    <svg className="animate-spin h-4 w-4 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    <span>AI is analyzing workflow steps to detect variables...</span>
-                  </div>
-                ) : currentWorkflowVariables ? (
-                  <div>
-                    <p className="font-medium mb-1">No variables detected</p>
-                    <p className="text-xs">
-                      {currentWorkflowVariables.analysisCount > 0 
-                        ? `AI analyzed ${currentWorkflowVariables.analysisCount} step${currentWorkflowVariables.analysisCount !== 1 ? 's' : ''} but didn't find any parameterizable variables.`
-                        : 'No steps were analyzed. Make sure INPUT steps have values and snapshots.'}
-                    </p>
-                    <p className="text-xs mt-2 text-purple-600">
-                      💡 Check the browser console (F12 → Console) for detailed detection logs
-                    </p>
-                  </div>
-                ) : (
-                  <div>
-                    <p className="font-medium mb-1">Variables will be detected when recording stops</p>
-                    <p className="text-xs">After you stop recording, AI will automatically analyze which values should be variables.</p>
-                    <p className="text-xs mt-2 text-purple-600">💡 Variables are typically: email addresses, names, amounts, dates, and dropdown selections</p>
-                  </div>
-                )}
-              </div>
-            )}
-            {currentWorkflowVariables && currentWorkflowVariables.variables && currentWorkflowVariables.variables.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-purple-200 text-xs text-muted-foreground flex items-center gap-1">
-                <svg className="h-3 w-3" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
-                </svg>
-                <span>Click any variable to see details. These can be customized when executing the workflow.</span>
-              </div>
-            )}
-          </div>
-        )}
-
-
-        {/* AI Agent Log */}
-        {agentLog.length > 0 && (
-          <div className="mb-6 p-4 bg-card rounded-lg border border-purple-200">
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-lg font-semibold text-card-foreground flex items-center gap-2">
-                <svg className="h-5 w-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-                AI Agent Log
-                {isAgentRunning && (
-                  <span className="flex items-center gap-1 text-sm text-purple-600">
-                    <span className="animate-pulse">●</span> Running
-                  </span>
-                )}
-              </h2>
-              <button
-                onClick={() => setAgentLog([])}
-                className="text-xs text-muted-foreground hover:text-foreground"
-              >
-                Clear
-              </button>
-            </div>
-            <div className="space-y-1 max-h-48 overflow-y-auto text-sm">
-              {agentLog.map((entry, i) => (
-                <div key={i} className={`flex items-start gap-2 p-1.5 rounded ${
-                  entry.status === 'success' ? 'bg-green-50' :
-                  entry.status === 'failed' ? 'bg-red-50' : 'bg-gray-50'
-                }`}>
-                  <span className="text-xs text-muted-foreground whitespace-nowrap">{entry.time}</span>
-                  <span className={`${
-                    entry.status === 'success' ? 'text-green-700' :
-                    entry.status === 'failed' ? 'text-red-700' : 'text-gray-700'
-                  }`}>
-                    {entry.action}
-                  </span>
-                  {entry.reasoning && (
-                    <span className="text-xs text-muted-foreground truncate" title={entry.reasoning}>
-                      - {entry.reasoning}
-                    </span>
-                  )}
-                </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Saved Workflows */}
-        <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-          <h2 className="text-lg font-semibold mb-4 text-card-foreground">
-            Saved Workflows ({savedWorkflows.length})
-          </h2>
-          {savedWorkflows.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No saved workflows yet</p>
-          ) : (
-            <div className="space-y-3">
-              {savedWorkflows.map((workflow) => (
-                <div key={workflow.id} className="p-3 bg-muted rounded-md">
-                  <div className="flex items-start justify-between mb-2">
-                    <div>
-                      <div className="font-medium text-foreground flex items-center gap-2 flex-wrap">
-                        {workflow.name}
-                        {workflow.variables && workflow.variables.variables.length > 0 && (
-                          <span 
-                            className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded-full"
-                            title={`${workflow.variables.variables.length} variable${workflow.variables.variables.length !== 1 ? 's' : ''} detected`}
-                          >
-                            {workflow.variables.variables.length} var{workflow.variables.variables.length !== 1 ? 's' : ''}
-                          </span>
-                        )}
-                        {workflow.optimizationMetadata && workflow.optimizationMetadata.stepsRemoved > 0 && (
-                          <span 
-                            className="px-2 py-0.5 text-xs bg-green-100 text-green-700 rounded-full"
-                            title={`${workflow.optimizationMetadata.stepsRemoved} navigation step${workflow.optimizationMetadata.stepsRemoved !== 1 ? 's' : ''} optimized`}
-                          >
-                            -{workflow.optimizationMetadata.stepsRemoved} nav
-                          </span>
-                        )}
-                      </div>
-                      {workflow.description && (
-                        <div className="text-sm text-muted-foreground mt-1 italic">
-                          {workflow.description}
-                        </div>
-                      )}
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {formatDate(workflow.updatedAt)} • {workflow.steps.length} steps
-                      </div>
-                    </div>
-                  </div>
-                  
-                  <div className="flex gap-2 mt-2">
-                    <button
-                      onClick={() => handleLoadWorkflow(workflow)}
-                      className="px-3 py-1 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
-                      disabled={isRecording || isExecuting}
-                    >
-                      Load
-                    </button>
-                    <button
-                      onClick={() => handleExecuteWorkflow(workflow)}
-                      className="px-3 py-1 bg-purple-600 text-white text-sm rounded hover:bg-purple-700 disabled:opacity-50"
-                      disabled={isRecording || isExecuting}
-                    >
-                      {isExecuting ? 'Running...' : 'Execute'}
-                    </button>
-                    <button
-                      onClick={() => handleExportJSON(workflow.steps)}
-                      className="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700"
-                    >
-                      Export
-                    </button>
-                    <button
-                      onClick={() => setShowDeleteConfirm(workflow.id)}
-                      className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
-                      disabled={isRecording || isExecuting}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                  {showDeleteConfirm === workflow.id && (
-                    <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded">
-                      <p className="text-sm text-red-800 mb-2">Are you sure you want to delete this workflow?</p>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleDeleteWorkflow(workflow.id)}
-                          className="px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700"
-                        >
-                          Confirm Delete
-                        </button>
-                        <button
-                          onClick={() => setShowDeleteConfirm(null)}
-                          className="px-3 py-1 bg-gray-600 text-white text-sm rounded hover:bg-gray-700"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        {/* AI Agent Chain of Thought */}
+        {(isAgentRunning || thinkingEvents.length > 0) && (
+          <ThinkingPanel
+            events={thinkingEvents}
+            currentStep={currentStep}
+            hints={pendingExecution.workflow?.steps || []}
+            isRunning={isAgentRunning}
+            workflowName={pendingExecution.workflow?.name}
+          />
+        )}
 
-        {/* Learning & Corrections */}
-        <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-lg font-semibold text-card-foreground">
-              Learning Memory
-            </h2>
-            <button
-              onClick={async () => {
-                const corrections = await CorrectionMemory.getAllCorrections();
-                setStoredCorrections(corrections);
-                setShowCorrections(!showCorrections);
-              }}
-              className="px-3 py-1 text-sm bg-purple-600 text-white rounded hover:bg-purple-700"
-            >
-              {showCorrections ? 'Hide' : 'Show'} ({storedCorrections.length})
-            </button>
+        {/* Learning Feedback */}
+        {learningFeedback && (
+          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded text-sm text-green-700">
+            <div className="flex items-center gap-2">
+              {isDetectingVariables && (
+                <svg className="animate-spin h-4 w-4 text-green-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              )}
+              {learningFeedback}
+            </div>
           </div>
-          
-          {learningFeedback && (
-            <div className="mb-3 p-2 bg-green-50 border border-green-200 rounded text-sm text-green-700">
-              <div className="flex items-center gap-2">
-                {isDetectingVariables && (
-                  <svg className="animate-spin h-4 w-4 text-green-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                )}
-                {learningFeedback}
-              </div>
-            </div>
-          )}
-          
-          {correctionModeStep && (
-            <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded">
-              <p className="text-sm text-yellow-800 font-medium mb-2">
-                🔧 Correction Mode Active
-              </p>
-              <p className="text-xs text-yellow-700 mb-2">
-                Click on the correct element in the page. The extension will learn from your correction.
-              </p>
-              <button
-                onClick={() => {
-                  setCorrectionModeStep(null);
-                  // Send message to cancel correction mode
-                  chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-                    if (tab?.id) {
-                      chrome.tabs.sendMessage(tab.id, { type: 'CANCEL_CORRECTION' });
-                    }
-                  });
-                }}
-                className="px-3 py-1 text-sm bg-gray-600 text-white rounded hover:bg-gray-700"
-              >
-                Cancel Correction
-              </button>
-            </div>
-          )}
-          
-          {showCorrections && (
-            <div className="space-y-2 max-h-48 overflow-y-auto">
-              {storedCorrections.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No corrections yet. The extension will learn from your corrections when element finding fails.
-                </p>
-              ) : (
-                storedCorrections.map((correction) => (
-                  <div key={correction.id} className="p-2 bg-muted rounded text-sm">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="font-medium text-foreground">
-                          {correction.originalDescription || 'Element correction'}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-1">
-                          Page: {correction.pageType?.type || 'unknown'}
-                        </div>
-                        <div className="text-xs text-green-600 mt-1">
-                          ✓ {correction.successCount} successful • ✗ {correction.failureCount} failed
-                        </div>
-                      </div>
-                      <button
-                        onClick={async () => {
-                          await CorrectionMemory.deleteCorrection(correction.id);
-                          const updated = await CorrectionMemory.getAllCorrections();
-                          setStoredCorrections(updated);
-                        }}
-                        className="p-1 text-red-500 hover:text-red-700"
-                        title="Delete correction"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-              {storedCorrections.length > 0 && (
-                <button
-                  onClick={async () => {
-                    if (confirm('Clear all learned corrections?')) {
-                      await CorrectionMemory.clearAll();
-                      setStoredCorrections([]);
-                    }
-                  }}
-                  className="w-full px-3 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700"
-                >
-                  Clear All Corrections
-                </button>
-              )}
-            </div>
-          )}
-        </div>
+        )}
 
         {/* Save Dialog */}
         {showSaveDialog && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-card p-6 rounded-lg border border-border max-w-md w-full mx-4">
-              <h2 className="text-xl font-semibold mb-4 text-card-foreground">Save Workflow</h2>
+              <h2 className="text-xl font-semibold mb-2 text-card-foreground">Got it!</h2>
+              <p className="text-sm text-muted-foreground mb-4">What should I call this task?</p>
               <input
                 type="text"
                 value={workflowName}
                 onChange={(e) => setWorkflowName(e.target.value)}
-                placeholder={`Workflow ${new Date().toLocaleString()}`}
+                placeholder={`Task ${new Date().toLocaleString()}`}
                 className="w-full px-3 py-2 border border-border rounded-md mb-4 bg-background text-foreground"
                 autoFocus
                 onKeyDown={(e) => {
@@ -2262,7 +1500,40 @@ function App() {
             onClose={() => setScreenshotModalStep(null)}
           />
         )}
+
+        {/* Settings Panel */}
+        {showSettings && (
+          <SettingsPanel
+            workflowSteps={workflowSteps}
+            storedCorrections={storedCorrections}
+            setStoredCorrections={setStoredCorrections}
+            showCorrections={showCorrections}
+            setShowCorrections={setShowCorrections}
+            correctionModeStep={correctionModeStep}
+            setCorrectionModeStep={setCorrectionModeStep}
+            handleExportJSON={handleExportJSON}
+            clearWorkflowSteps={clearWorkflowSteps}
+            onClose={() => setShowSettings(false)}
+          />
+        )}
+        </div>
       </div>
+
+      {/* Input Bar - Fixed at Bottom (Chat-like) */}
+      {!isRecording && workflowSteps.length === 0 && !isAgentRunning && (
+        <div className="border-t border-border bg-background p-4">
+          <div className="max-w-2xl mx-auto">
+            <TaskInput
+              onSearch={handleSearch}
+              onSubmit={handleTaskSubmit}
+              onShowMeHow={handleStartRecording}
+              isRecording={isRecording}
+              disabled={state === 'CONNECTING'}
+              placeholder="Message mimoai"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

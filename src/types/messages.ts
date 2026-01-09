@@ -21,6 +21,7 @@ export type MessageType =
   | 'EXECUTE_WORKFLOW_AGENT' // AI Agent execution mode (observe-act loop)
   // AI Agent progress messages
   | 'AGENT_PROGRESS'
+  | 'AGENT_THINKING'
   | 'AGENT_EXECUTION_COMPLETED'
   // Execution progress and control messages
   | 'VERIFIED_EXECUTION_CANCEL'
@@ -397,5 +398,48 @@ export interface ExecuteInFrameMessage extends ExtensionMessage {
     action: any; // AgentAction type
     targetFrameId: number;
   };
+}
+
+/**
+ * ThinkingEvent - represents AI agent's chain of thought during execution
+ */
+export interface ThinkingEvent {
+  type: 'observe' | 'decide' | 'act' | 'recover' | 'complete';
+  timestamp: number;
+  stepIndex: number;
+  stepTotal: number;
+  
+  // For 'observe' phase
+  observation?: {
+    url: string;
+    pageTitle: string;
+    hasModal: boolean;
+    hasDropdown: boolean;
+    elementsFound: number;
+  };
+  
+  // For 'decide' phase
+  decision?: {
+    action: string;
+    targetDescription: string;
+    reasoning: string;
+    confidence: number;
+    candidates?: Array<{ role: string; name: string; score: number }>;
+  };
+  
+  // For 'act' phase
+  result?: {
+    success: boolean;
+    error?: string;
+    duration: number;
+  };
+}
+
+/**
+ * AGENT_THINKING message - sent from agent to show chain of thought during execution
+ */
+export interface AgentThinkingMessage extends ExtensionMessage {
+  type: 'AGENT_THINKING';
+  payload: ThinkingEvent;
 }
 
