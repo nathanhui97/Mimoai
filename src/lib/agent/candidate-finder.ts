@@ -90,6 +90,33 @@ export class CandidateFinder {
             return true;
           }
         }
+        
+        // CRITICAL: If element's aria-label or text matches the TARGET (not scope),
+        // include it even if scope doesn't match perfectly
+        // This handles NEAREST_SECTION scopes where scopePath might not be set correctly
+        if (hint.targetText) {
+          const targetLower = hint.targetText.toLowerCase();
+          const elName = el.name?.toLowerCase() || '';
+          const elText = el.text?.toLowerCase() || '';
+          
+          // If element's name or text matches target text, include it
+          if ((elName && elName.includes(targetLower)) || (elText && elText.includes(targetLower))) {
+            console.log(`[CandidateFinder] ✅ Including element (name/text matches target): "${el.name || el.text}"`);
+            return true;
+          }
+        }
+        
+        // Also check aria-label match
+        if (hint.recordedAriaLabel && el.name) {
+          const recordedLower = hint.recordedAriaLabel.toLowerCase();
+          const elNameLower = el.name.toLowerCase();
+          
+          if (elNameLower.includes(recordedLower) || recordedLower.includes(elNameLower)) {
+            console.log(`[CandidateFinder] ✅ Including element (aria-label matches): "${el.name}"`);
+            return true;
+          }
+        }
+        
         return false;
       });
       
@@ -186,6 +213,13 @@ export class CandidateFinder {
   computeCandidateScore(el: DOMMapElement, hint: AgentHint, expectedRole: string | null, dropdownIsOpen: boolean = false): number {
     let score = 0;
     
+    // DEBUG: Log scoring details for first few elements
+    const isFirstFew = score === 0; // Will be true for first element
+    if (isFirstFew && hint.targetText === "Show Navigation Menu") {
+      console.log(`[CandidateFinder] 🔍 Scoring element: role="${el.role}", name="${el.name}", text="${el.text}"`);
+      console.log(`[CandidateFinder] 🔍 Hint has: targetText="${hint.targetText}", recordedAriaLabel="${hint.recordedAriaLabel}"`);
+    }
+    
     // ============================================================
     // DROPDOWN CONTEXT: If dropdown is open, massively boost options
     // ============================================================
@@ -235,6 +269,11 @@ export class CandidateFinder {
       const recordedAriaLabel = hint.recordedAriaLabel.toLowerCase().trim();
       const elAriaLabel = el.name?.toLowerCase().trim(); // name comes from computeAccessibleName which uses aria-label
       
+      // DEBUG logging
+      if (hint.targetText === "Show Navigation Menu") {
+        console.log(`[CandidateFinder] 🔍 ARIA check: recorded="${recordedAriaLabel}", element="${elAriaLabel}", match=${elAriaLabel === recordedAriaLabel}`);
+      }
+      
       if (elAriaLabel === recordedAriaLabel) {
         score += 100; // Exact aria-label match - highest priority!
         console.log(`[CandidateFinder] 🎯 Exact aria-label match: "${hint.recordedAriaLabel}" (+100 points)`);
@@ -243,6 +282,8 @@ export class CandidateFinder {
       } else if (recordedAriaLabel.includes(elAriaLabel || '')) {
         score += 30; // Reverse partial match
       }
+    } else if (hint.targetText === "Show Navigation Menu") {
+      console.warn(`[CandidateFinder] ⚠️ No recordedAriaLabel in hint! This is why scoring is low.`);
     }
     
     // ============================================================

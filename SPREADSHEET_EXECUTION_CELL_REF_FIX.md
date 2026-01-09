@@ -267,3 +267,5 @@ The intelligent append feature (B2 → B3) is **correct and intentional**. The b
 ## Author
 AI Assistant (with user nathhui)
 
+
+

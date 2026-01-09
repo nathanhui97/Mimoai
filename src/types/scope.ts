@@ -5,6 +5,9 @@
  * This is essential for dashboards and complex UIs with multiple similar widgets.
  */
 
+import { ShadowDOMUtils } from '../content/shadow-dom-utils';
+import { VisibilityChecker } from '../content/visibility-checker';
+
 /**
  * Scope defines where to search for elements
  * Resolution always starts by finding the scope container first
@@ -306,93 +309,87 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
       let widgetsChecked = 0;
       const uniqueTitles = new Set<string>();
       
-      for (const selector of widgetSelectors) {
-        try {
-          const widgets = doc.querySelectorAll(selector);
-          for (const widget of Array.from(widgets)) {
-            widgetsChecked++;
-            
-            // Skip if widget is not visible
-            const rect = widget.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) continue;
-            
-            // ENHANCED: Check title in both light DOM and shadow DOM
-            let titleEl: Element | null = null;
-            let title = '';
-            
-            // #region agent log
-            const tagName = widget.tagName?.toLowerCase() || '';
-            const hasShadowRoot = !!widget.shadowRoot;
-            const isInViewport = rect.top < window.innerHeight && rect.bottom > 0;
-            if (tagName.includes('widget') || tagName.includes('report') || tagName.startsWith('gs-')) {
-              fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scope.ts:320',message:'WIDGET_ELEMENT_CHECK',data:{tagName,hasShadowRoot,isInViewport,rectTop:Math.round(rect.top),rectHeight:Math.round(rect.height),selector},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B2'})}).catch(()=>{});
-            }
-            // #endregion
-            
-            // PRIORITY 1: Check shadow DOM first (for web components)
-            if (widget.shadowRoot) {
-              titleEl = widget.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
-              title = titleEl?.textContent?.trim() || '';
-              if (title) {
-                console.log('[Scope] 🌑 Found title in shadow root:', title.substring(0, 50));
+      // Use deep Shadow DOM traversal to find ALL widgets (including nested in Shadow DOMs)
+      const allWidgets: Array<{element: Element, title: string}> = [];
+      
+      ShadowDOMUtils.traverseShadowDOM(doc, (el) => {
+        // Check if element matches any widget selector
+        for (const selector of widgetSelectors) {
+          try {
+            if (el.matches(selector)) {
+              widgetsChecked++;
+              
+              // Skip if widget is not visible
+              if (!VisibilityChecker.isVisible(el)) continue;
+              
+              // Check title in both light DOM and shadow DOM
+              let title = '';
+              
+              // Check shadow DOM first (for web components)
+              if (el.shadowRoot) {
+                const titleEl = el.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
+                title = titleEl?.textContent?.trim() || '';
+                if (title) {
+                  console.log('[Scope] 🌑 Found title in shadow root:', title.substring(0, 50));
+                }
               }
+              
+              // Check light DOM if not found in shadow
+              if (!title) {
+                const titleEl = el.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
+                title = titleEl?.textContent?.trim() || '';
+              }
+              
+              if (!title) continue;
+              
+              // Track unique titles for debugging
+              const titleShort = title.substring(0, 60);
+              if (!uniqueTitles.has(titleShort)) {
+                uniqueTitles.add(titleShort);
+                console.log(`[Scope] 🔍 Unique widget ${uniqueTitles.size}: "${titleShort}"`);
+              }
+              
+              // Store widget with title for later matching
+              allWidgets.push({element: el, title});
+              break; // Found matching selector, no need to check other selectors for this element
             }
-            
-            // PRIORITY 2: Check light DOM if not found in shadow
-            if (!title) {
-              titleEl = widget.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [class*="heading"]');
-              title = titleEl?.textContent?.trim() || '';
-            }
-            
-            // #region agent log
-            if ((tagName.includes('widget') || tagName.includes('report') || tagName.startsWith('gs-')) && title) {
-              fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'scope.ts:345',message:'WIDGET_TITLE_FOUND',data:{tagName,title:title.substring(0,80),searchTitle:searchTitle.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B2'})}).catch(()=>{});
-            }
-            // #endregion
-            
-            if (!title) continue;
-            
-            // Track unique titles for debugging
-            const titleShort = title.substring(0, 60);
-            if (!uniqueTitles.has(titleShort)) {
-              uniqueTitles.add(titleShort);
-              console.log(`[Scope] 🔍 Unique widget ${uniqueTitles.size}: "${titleShort}"`);
-            }
-            
-            const titleLower = title.toLowerCase();
-            const titleStripped = titleLower.replace(/\d+$/g, '').trim();
-            
-            // BIDIRECTIONAL fuzzy matching: handles dynamic numbers like "STORE107" vs "STORE"
-            if (titleLower.includes(searchTitle) || searchTitle.includes(titleLower)) {
-              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (exact match)`);
-              return widget;
-            }
-            
-            // Strip trailing numbers for even more fuzzy matching
-            // CRITICAL: Also strip numbers from the END of the search title (e.g., "BRAND SALES...80" -> "BRAND SALES...")
-            const searchTitleStrippedEnd = searchTitle.replace(/\d+$/g, '').trim();
-            if (titleStripped && searchTitleStrippedEnd && titleStripped.length > 10 && 
-                (titleStripped.includes(searchTitleStrippedEnd) || searchTitleStrippedEnd.includes(titleStripped))) {
-              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - stripped trailing numbers)`);
-              return widget;
-            }
-            
-            // Also try matching with the original stripped search title
-            if (titleStripped && searchTitleStripped && titleStripped.length > 10 && 
-                (titleStripped.includes(searchTitleStripped) || searchTitleStripped.includes(titleStripped))) {
-              console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - both stripped)`);
-              return widget;
-            }
-            
-            // Also check aria-label on the widget itself
-            const ariaLabel = widget.getAttribute('aria-label')?.toLowerCase() || '';
-            if (ariaLabel && (ariaLabel.includes(searchTitle) || searchTitle.includes(ariaLabel))) {
-              console.log(`[Scope] ✅ Found widget via aria-label`);
-              return widget;
-            }
+          } catch (e) {
+            // Invalid selector or element, continue
           }
-        } catch (e) {
-          // Invalid selector, continue
+        }
+      });
+      
+      // Now match collected widgets against search title
+      for (const {element, title} of allWidgets) {
+        const titleLower = title.toLowerCase();
+        const titleStripped = titleLower.replace(/\d+$/g, '').trim();
+        
+        // BIDIRECTIONAL fuzzy matching: handles dynamic numbers like "STORE107" vs "STORE"
+        if (titleLower.includes(searchTitle) || searchTitle.includes(titleLower)) {
+          console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (exact match)`);
+          return element;
+        }
+        
+        // Strip trailing numbers for even more fuzzy matching
+        const searchTitleStrippedEnd = searchTitle.replace(/\d+$/g, '').trim();
+        if (titleStripped && searchTitleStrippedEnd && titleStripped.length > 10 && 
+            (titleStripped.includes(searchTitleStrippedEnd) || searchTitleStrippedEnd.includes(titleStripped))) {
+          console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - stripped trailing numbers)`);
+          return element;
+        }
+        
+        // Also try matching with the original stripped search title
+        if (titleStripped && searchTitleStripped && titleStripped.length > 10 && 
+            (titleStripped.includes(searchTitleStripped) || searchTitleStripped.includes(titleStripped))) {
+          console.log(`[Scope] ✅ Found widget "${title.substring(0, 60)}" (fuzzy match - both stripped)`);
+          return element;
+        }
+        
+        // Also check aria-label on the widget itself
+        const ariaLabel = element.getAttribute('aria-label')?.toLowerCase() || '';
+        if (ariaLabel && (ariaLabel.includes(searchTitle) || searchTitle.includes(ariaLabel))) {
+          console.log(`[Scope] ✅ Found widget via aria-label`);
+          return element;
         }
       }
       
@@ -452,17 +449,10 @@ export function resolveScopeContainer(scope: Scope, doc: Document = document): E
 
 /**
  * Helper to check if element is visible
+ * Uses shared VisibilityChecker utility
  */
 function isElementVisible(element: Element): boolean {
-  const rect = element.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return false;
-  
-  const style = window.getComputedStyle(element);
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-    return false;
-  }
-  
-  return true;
+  return VisibilityChecker.isVisible(element);
 }
 
 

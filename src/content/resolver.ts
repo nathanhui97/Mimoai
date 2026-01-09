@@ -58,11 +58,11 @@ export class Resolver {
   /**
    * Main resolution: find best candidate or report status
    */
-  static resolve(
+  static async resolve(
     bundle: LocatorBundle,
     intent: Intent,
     doc: Document = document
-  ): ResolveResult {
+  ): Promise<ResolveResult> {
     const startTime = Date.now();
     
     // 🎯 CRITICAL: For menu items, skip scope and search document-wide
@@ -93,7 +93,7 @@ export class Resolver {
     }
     
     // Find all candidates
-    const candidatesMap = CandidateFinder.findCandidates(bundle, doc);
+    const candidatesMap = await CandidateFinder.findCandidates(bundle, doc);
     
     // Build metrics
     const candidatesPerStrategy: Record<string, number> = {};

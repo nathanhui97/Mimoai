@@ -1,148 +1,43 @@
 /**
  * MenuDetector - Universal menu detection for all frameworks
  * 
- * Uses behavioral detection (observe what appeared) + universal selectors
+ * Uses PATTERN-BASED detection (behavioral + ARIA) instead of hardcoded selectors
  * to find menus regardless of framework (Angular CDK, Salesforce Lightning,
  * MUI, Radix, Ant Design, etc.)
  * 
- * This replaces scattered framework-specific selectors across 21+ files.
+ * This approach is maintenance-free and works universally.
  */
 
+import { ShadowDOMUtils } from './shadow-dom-utils';
+import { VisibilityChecker } from './visibility-checker';
+
 // ============================================================================
-// Universal Selectors
+// Core Selectors (ARIA only - framework-agnostic)
 // ============================================================================
 
 /**
- * Universal menu selectors that cover 99% of frameworks
- * Ordered by priority: ARIA roles first, then framework-specific
+ * Core menu selectors - ARIA roles only
+ * Framework-specific selectors replaced with pattern-based detection
  */
-export const UNIVERSAL_MENU_SELECTORS = [
-  // ARIA roles (highest priority - works across all accessible frameworks)
+const CORE_MENU_SELECTORS = [
   '[role="menu"]',
   '[role="listbox"]',
   '[role="menubar"]',
-  
-  // Angular CDK/Material (Gainsight uses this)
-  '.cdk-overlay-pane',
-  '.cdk-overlay-connected-position-bounding-box',
-  '.cdk-overlay-container',
-  '.mat-menu-panel',
-  '.mat-menu-content',
-  '.mat-mdc-menu-panel',
-  '.mat-mdc-menu-content',
-  
-  // Gainsight-specific (Angular CDK + Ant Design hybrid)
-  '.gs-popover-menu__list',
-  'ul.gs-popover-menu__list',
-  '[class*="gs-popover-menu"]',
-  '[class*="ant-menu"][role="menu"]',
-  
-  // Salesforce Lightning (SLDS)
-  '[class*="slds-dropdown"]',
-  '[class*="slds-listbox"]',
-  '[class*="slds-combobox"]',
-  'ul[role="menu"][class*="slds"]',
-  
-  // Material UI (React)
-  '.MuiMenu-paper',
-  '.MuiMenu-list',
-  '.MuiPaper-root[role="listbox"]',
-  '.MuiPopover-paper',
-  '.MuiAutocomplete-popper',
-  
-  // Radix UI
-  '[data-radix-select-viewport]',
-  '[data-radix-select-content]',
-  '[data-radix-menu-content]',
-  '[data-radix-dropdown-menu-content]',
-  
-  // Ant Design
-  '.ant-dropdown',
-  '.ant-dropdown-menu',
-  '.ant-select-dropdown',
-  '.ant-cascader-menus',
-  '.ant-picker-dropdown',
-  
-  // Chakra UI
-  '.chakra-menu__menu-list',
-  '.chakra-select__menu',
-  
-  // Headless UI
-  '[data-headlessui-state]',
-  
-  // React Select
-  '.react-select__menu',
-  '[class*="__menu"]',
-  
-  // Bootstrap
-  '.dropdown-menu',
-  '.dropdown-menu.show',
-  
-  // Gainsight-specific
-  '[class*="gs-menu"]',
-  '[class*="gs-dropdown"]',
-  
-  // Generic catch-all patterns
-  '[class*="dropdown"][class*="menu"]',
-  '[class*="popup"][class*="menu"]',
-  '[class*="select"][class*="menu"]',
-  '[class*="context-menu"]',
-  '[class*="options-list"]',
-  '[class*="menu-list"]',
 ];
 
 /**
- * Universal menu item selectors
+ * Core menu item selectors - ARIA roles + universal patterns
  */
-export const MENU_ITEM_SELECTORS = [
-  // ARIA roles
+const CORE_MENU_ITEM_SELECTORS = [
   '[role="menuitem"]',
   '[role="option"]',
   '[role="menuitemradio"]',
   '[role="menuitemcheckbox"]',
-  
-  // Angular Material
-  '.mat-menu-item',
-  '.mat-mdc-menu-item',
-  'button[mat-menu-item]',
-  
-  // Salesforce Lightning
-  '.slds-listbox__option',
-  '[role="presentation"] > .slds-listbox__option',
-  
-  // Material UI
-  '.MuiMenuItem-root',
-  '.MuiAutocomplete-option',
-  
-  // Radix UI
-  '[data-radix-select-item]',
-  
-  // Ant Design
-  '.ant-dropdown-menu-item',
-  '.ant-select-item-option',
-  '.ant-menu-item',
-  'li.ant-menu-item',
-  
-  // Gainsight-specific menu items
-  '.gs-popover-menu__item',
-  'li.gs-popover-menu__item',
-  
-  // Chakra UI
-  '.chakra-menu__menuitem',
-  
-  // React Select
-  '.react-select__option',
-  '[class*="__option"]',
-  
-  // Bootstrap
-  '.dropdown-item',
-  
-  // Generic
-  'li[tabindex]',
-  'li[role="option"]',
-  '[data-option]',
-  '[data-value]',
 ];
+
+// Keep legacy exports for backward compatibility (will be deprecated)
+export const UNIVERSAL_MENU_SELECTORS = CORE_MENU_SELECTORS;
+export const MENU_ITEM_SELECTORS = CORE_MENU_ITEM_SELECTORS;
 
 // ============================================================================
 // Types
@@ -177,6 +72,65 @@ export interface MenuAnalysis {
 // ============================================================================
 
 export class MenuDetector {
+  // Track menu open timing for disambiguation when multiple menus exist
+  private static lastMenuOpenTime: Map<Element, number> = new Map();
+  
+  /**
+   * PATTERN-BASED: Check if element is likely a menu
+   * Uses behavioral patterns instead of hardcoded selectors
+   */
+  static isLikelyMenu(element: Element): boolean {
+    // 1. ARIA role (highest confidence - universal)
+    const role = element.getAttribute('role');
+    if (role === 'menu' || role === 'listbox' || role === 'menubar') {
+      return true;
+    }
+    
+    // 2. Popup positioning pattern (universal across frameworks)
+    if (!(element instanceof HTMLElement)) return false;
+    
+    const style = window.getComputedStyle(element);
+    const isPopup = style.position === 'fixed' || style.position === 'absolute';
+    const hasHighZIndex = parseInt(style.zIndex) > 1000 || style.zIndex === 'auto';
+    
+    // 3. Contains menu items (universal pattern)
+    const items = this.findMenuItems(element);
+    
+    // Must be positioned as popup with high z-index AND contain items
+    return isPopup && hasHighZIndex && items.length >= 2;
+  }
+  
+  /**
+   * PATTERN-BASED: Find menu items using universal patterns
+   * Replaces hardcoded framework-specific selectors
+   */
+  static findMenuItems(menu: Element): Element[] {
+    const items: Element[] = [];
+    
+    // Pattern 1: ARIA roles (universal)
+    const ariaItems = ShadowDOMUtils.queryDeep(
+      '[role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]',
+      menu
+    );
+    items.push(...ariaItems);
+    
+    // Pattern 2: Direct li children in a ul (common pattern)
+    if (menu.tagName === 'UL') {
+      const liChildren = Array.from(menu.children).filter(c => c.tagName === 'LI');
+      items.push(...liChildren);
+    }
+    
+    // Pattern 3: Clickable children with similar structure (universal pattern)
+    const clickableChildren = ShadowDOMUtils.queryDeep(
+      'button, a, [tabindex]:not([tabindex="-1"]), [onclick]',
+      menu
+    ).filter(el => VisibilityChecker.isVisible(el));
+    items.push(...clickableChildren);
+    
+    // Deduplicate
+    return [...new Set(items)];
+  }
+  
   /**
    * Wait for a menu to appear after clicking a trigger
    * Uses DOM observation first, then falls back to selectors
@@ -357,84 +311,52 @@ export class MenuDetector {
 
   /**
    * Search entire document INCLUDING shadow DOMs for elements matching a selector
+   * Uses shared ShadowDOMUtils utility
    */
   private static querySelectorAllDeep(selector: string): Element[] {
-    const results: Element[] = [];
-    
-    // First, search regular DOM
-    try {
-      results.push(...Array.from(document.querySelectorAll(selector)));
-    } catch (e) {
-      // Invalid selector
-    }
-    
-    // Then search inside all shadow DOMs
-    const searchShadowRoots = (root: Element | Document) => {
-      const allElements = root.querySelectorAll('*');
-      for (const el of allElements) {
-        if (el.shadowRoot) {
-          try {
-            const shadowResults = el.shadowRoot.querySelectorAll(selector);
-            results.push(...Array.from(shadowResults));
-          } catch (e) {
-            // Invalid selector for this shadow root
-          }
-          // Recursively search nested shadow DOMs
-          searchShadowRoots(el.shadowRoot as unknown as Document);
-        }
-      }
-    };
-    
-    searchShadowRoots(document);
-    return results;
+    return ShadowDOMUtils.queryDeep(selector);
   }
 
   /**
    * Find a menu within a given element (used by DOM observer)
+   * Uses pattern-based detection instead of hardcoded selectors
    */
   private static findMenuInElement(element: Element): Element | null {
-    // Check the element itself
-    if (this.hasMenuCharacteristics(element) && this.isVisible(element)) {
+    // Check the element itself using pattern-based detection
+    if (this.isLikelyMenu(element) && VisibilityChecker.isVisible(element)) {
+      // Track when this menu appeared
+      this.lastMenuOpenTime.set(element, Date.now());
       return element;
     }
     
     // CRITICAL: For Angular CDK overlays, the menu is nested inside
     // Check if this is an overlay container, then find menu inside
-    // The overlay container might be invisible, but the menu inside might be visible!
     if (element.classList.contains('cdk-overlay-pane') || 
         element.classList.contains('cdk-overlay-connected-position-bounding-box') ||
         element.classList.contains('cdk-overlay-container')) {
-      // Look for the actual menu list inside the overlay (even if overlay is invisible)
-      let menuList = element.querySelector('[role="menu"], [role="listbox"], .gs-popover-menu__list, .ant-menu, ul[role="menu"]');
+      // Use pattern-based detection to find menu inside overlay
+      const menuList = ShadowDOMUtils.queryDeepFirst('[role="menu"], [role="listbox"]', element);
       
-      // If standard selectors fail, search for any element with menu items inside
-      if (!menuList) {
-        const allChildren = Array.from(element.querySelectorAll('*'));
-        for (const child of allChildren) {
-          const items = child.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-          if (items.length > 0 && this.isVisible(child)) {
-            menuList = child;
-            break;
-          }
-        }
-      }
-      
-      if (menuList && this.hasMenuCharacteristics(menuList) && this.isVisible(menuList)) {
-        console.log('[MenuDetector] Found visible menu list inside CDK overlay (overlay itself might be invisible)');
+      if (menuList && this.isLikelyMenu(menuList) && VisibilityChecker.isVisible(menuList)) {
+        console.log('[MenuDetector] Found visible menu list inside CDK overlay');
+        this.lastMenuOpenTime.set(menuList, Date.now());
         return menuList;
       }
-      // If no menu list found, check if overlay itself has menu items (only if overlay is visible)
-      if (this.isVisible(element) && this.hasOptions(element)) {
-        console.log('[MenuDetector] CDK overlay contains menu items directly');
+      
+      // Check if overlay itself is a menu (using pattern detection)
+      if (this.isLikelyMenu(element)) {
+        console.log('[MenuDetector] CDK overlay is itself a menu');
+        this.lastMenuOpenTime.set(element, Date.now());
         return element;
       }
     }
     
-    // Check children using universal selectors
-    for (const selector of UNIVERSAL_MENU_SELECTORS) {
+    // Search children using core ARIA selectors
+    for (const selector of CORE_MENU_SELECTORS) {
       try {
         const found = element.querySelector(selector);
-        if (found && this.hasMenuCharacteristics(found) && this.isVisible(found)) {
+        if (found && this.isLikelyMenu(found) && VisibilityChecker.isVisible(found)) {
+          this.lastMenuOpenTime.set(found, Date.now());
           return found;
         }
       } catch (e) {
@@ -446,352 +368,123 @@ export class MenuDetector {
   }
 
   /**
-   * Check if an element has menu characteristics
-   */
-  private static hasMenuCharacteristics(element: Element): boolean {
-    const analysis = this.analyzeElement(element);
-    
-    // Has ARIA role = high confidence
-    if (analysis.hasAriaRole) {
-      return true;
-    }
-    
-    // Contains multiple menu items = likely a menu
-    if (analysis.itemCount >= 2) {
-      return true;
-    }
-    
-    // CRITICAL: CDK overlay containers that contain menus
-    if ((element.classList.contains('cdk-overlay-pane') || 
-         element.classList.contains('cdk-overlay-connected-position-bounding-box')) &&
-        this.hasOptions(element)) {
-      return true; // Overlay contains menu items
-    }
-    
-    // Matches a universal selector
-    for (const selector of UNIVERSAL_MENU_SELECTORS) {
-      try {
-        if (element.matches(selector)) {
-          return true;
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-    
-    // Is positioned as popup with at least 1 item = likely a menu
-    if (analysis.isPopup && analysis.zIndex > 1000 && analysis.itemCount >= 1) {
-      return true;
-    }
-    
-    // Gainsight-specific: ant-menu with role="menu"
-    if (element.classList.contains('ant-menu') && element.getAttribute('role') === 'menu') {
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Analyze element characteristics
-   */
-  private static analyzeElement(element: Element): MenuAnalysis {
-    const role = element.getAttribute('role');
-    const hasAriaRole = role === 'menu' || role === 'listbox' || role === 'menubar';
-    
-    const items = element.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-    const itemCount = items.length;
-    
-    const style = window.getComputedStyle(element as HTMLElement);
-    const zIndex = parseInt(style.zIndex) || 0;
-    const position = style.position;
-    const isPopup = position === 'fixed' || position === 'absolute';
-    const isVisible = this.isVisible(element);
-    
-    return {
-      hasAriaRole,
-      itemCount,
-      isPopup,
-      zIndex,
-      isVisible,
-    };
-  }
-
-  /**
    * Check if element is visible
+   * Uses shared VisibilityChecker utility
    */
   private static isVisible(element: Element): boolean {
-    if (!(element instanceof HTMLElement)) return false;
-    
-    const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      return false;
-    }
-    
-    // CRITICAL: CDK overlay containers are just wrappers - they may have width=0 or opacity animations
-    // For overlays, only check that they're not display:none
-    const isCdkOverlay = element.classList.contains('cdk-overlay-pane') || 
-                         element.classList.contains('cdk-overlay-container') ||
-                         element.classList.contains('cdk-overlay-connected-position-bounding-box');
-    
-    if (isCdkOverlay) {
-      // For CDK overlays, just check display and visibility (not size/opacity)
-      return true;
-    }
-    
-    // For non-overlay elements, do full checks
-    if (style.opacity === '0') {
-      return false;
-    }
-    
-    if (rect.width === 0 || rect.height === 0) {
-      return false;
-    }
-    
-    return true;
+    return VisibilityChecker.isVisible(element);
   }
 
   /**
    * Check if menu element has options/items
-   * Also handles Angular CDK overlay containers that wrap menus
-   * Searches both regular DOM and Shadow DOMs
+   * Uses pattern-based detection with shared Shadow DOM utilities
    */
   private static hasOptions(element: Element): boolean {
-    // Check if element itself is a menu item
-    for (const selector of MENU_ITEM_SELECTORS) {
-      try {
-        if (element.matches(selector)) {
-          return true; // Element itself is a menu item
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-    
-    // Check for menu items inside (regular DOM)
-    const items = element.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-    if (items.length > 0) {
-      return true;
-    }
-    
-    // Check in Shadow DOM
-    if (element.shadowRoot) {
-      const shadowItems = element.shadowRoot.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-      if (shadowItems.length > 0) {
-        return true;
-      }
-    }
-    
-    // Check in child elements' Shadow DOMs
-    const allChildren = element.querySelectorAll('*');
-    for (const child of allChildren) {
-      if (child.shadowRoot) {
-        const childShadowItems = child.shadowRoot.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-        if (childShadowItems.length > 0) {
-          return true;
-        }
-      }
-    }
-    
-    // CRITICAL: For Angular CDK overlays, the menu might be nested
-    // Check if this is a cdk-overlay-pane that contains a menu
-    if (element.classList.contains('cdk-overlay-pane') || 
-        element.classList.contains('cdk-overlay-connected-position-bounding-box')) {
-      // Look for menu inside the overlay
-      const menuInside = element.querySelector('[role="menu"], [role="listbox"], .gs-popover-menu__list, .ant-menu, ul[role="menu"]');
-      if (menuInside) {
-        const menuItems = menuInside.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-        if (menuItems.length > 0) {
-          return true;
-        }
-        
-        // Also check in menu's Shadow DOM
-        if (menuInside.shadowRoot) {
-          const shadowMenuItems = menuInside.shadowRoot.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-          if (shadowMenuItems.length > 0) {
-            return true;
-          }
-        }
-      }
-    }
-    
-    return false;
+    // Use findMenuItems which already uses pattern-based detection
+    const items = this.findMenuItems(element);
+    return items.length > 0;
   }
 
   /**
    * Find a currently visible menu (no waiting)
+   * Uses pattern-based detection and handles multiple menus
    */
   static findVisibleMenu(): Element | null {
-    console.log('[MenuDetector] Searching for visible menu...');
+    console.log('[MenuDetector] Searching for visible menu using pattern-based detection...');
     
-    // First, try direct menu selectors (but skip CDK containers - we handle those specially)
-    const cdkSelectors = ['.cdk-overlay-pane', '.cdk-overlay-connected-position-bounding-box', '.cdk-overlay-container'];
-    for (const selector of UNIVERSAL_MENU_SELECTORS) {
-      // Skip CDK overlay containers - they need special handling
-      if (cdkSelectors.includes(selector)) {
-        continue;
-      }
-      
+    const candidateMenus: Array<{menu: Element, openTime: number, itemCount: number}> = [];
+    
+    // Phase 1: Search using core ARIA selectors
+    for (const selector of CORE_MENU_SELECTORS) {
       try {
         const elements = document.querySelectorAll(selector);
-        console.log(`[MenuDetector] Selector "${selector}" found ${elements.length} elements`);
+        console.log(`[MenuDetector] ARIA selector "${selector}" found ${elements.length} elements`);
+        
         for (const element of elements) {
-          const visible = this.isVisible(element);
-          const hasOpts = this.hasOptions(element);
-          console.log(`[MenuDetector]   Element: visible=${visible}, hasOptions=${hasOpts}, classes=${element.className.substring(0, 50)}`);
-          if (visible && hasOpts) {
-            console.log(`[MenuDetector] ✅ Found visible menu via selector: ${selector}`);
-            return element;
+          if (this.isLikelyMenu(element) && VisibilityChecker.isVisible(element)) {
+            const openTime = this.lastMenuOpenTime.get(element) || 0;
+            const itemCount = this.findMenuItems(element).length;
+            console.log(`[MenuDetector] Found candidate menu via ARIA: ${element.tagName}.${element.className.substring(0, 30)} with ${itemCount} items`);
+            candidateMenus.push({menu: element, openTime, itemCount});
           }
         }
       } catch (e) {
         console.warn(`[MenuDetector] Selector "${selector}" failed:`, e);
-        continue;
       }
     }
     
-    // CRITICAL: Also check inside CDK overlay containers
-    // Angular CDK menus are wrapped in .cdk-overlay-pane
-    // The overlay container might be invisible, but the menu inside might be visible!
-      try {
-        const overlays = document.querySelectorAll('.cdk-overlay-pane, .cdk-overlay-connected-position-bounding-box');
-        console.log(`[MenuDetector] Found ${overlays.length} CDK overlay containers`);
-        
-        // CRITICAL: Check ALL overlays - there might be multiple (notifications, menus, etc.)
-        for (let overlayIndex = 0; overlayIndex < overlays.length; overlayIndex++) {
-          const overlay = overlays[overlayIndex];
-          try {
-            console.log(`[MenuDetector] Checking overlay ${overlayIndex + 1}/${overlays.length}...`);
-            
-            // CRITICAL: Even if overlay is invisible, check inside it - menu might be visible!
-            // Look for menu inside overlay
-            console.log(`[MenuDetector]   Checking inside overlay for menu...`);
-            
-            // First, try standard menu selectors
-            let menuInside = overlay.querySelector('[role="menu"], [role="listbox"], .gs-popover-menu__list, .ant-menu, ul[role="menu"]');
-            
-            if (!menuInside) {
-              // Broader search - look for ANY element with menu items inside
-              console.log(`[MenuDetector]   Standard selectors failed, searching for any element with menu items...`);
-              const allChildren = Array.from(overlay.querySelectorAll('*'));
-              console.log(`[MenuDetector]   Overlay has ${allChildren.length} child elements total`);
-              
-              // Log first few children to see structure
-              allChildren.slice(0, 5).forEach((child, i) => {
-                console.log(`[MenuDetector]   Child ${i}: ${child.tagName}.${child.className.substring(0, 30)} role=${child.getAttribute('role')}`);
-              });
-              
-              // Find any child that contains menu items
-              for (const child of allChildren) {
-                const items = child.querySelectorAll(MENU_ITEM_SELECTORS.join(', '));
-                if (items.length > 0 && this.isVisible(child)) {
-                  console.log(`[MenuDetector]   Found ${items.length} menu items in child: ${child.tagName}.${child.className.substring(0, 30)}`);
-                  menuInside = child;
-                  break;
-                }
-              }
-            }
-            
-            if (menuInside) {
-              console.log(`[MenuDetector]   Found menu element inside overlay (checking visibility...)`);
-              const menuVisible = this.isVisible(menuInside);
-              const menuHasOpts = this.hasOptions(menuInside);
-              console.log(`[MenuDetector]   Menu element: visible=${menuVisible}, hasOptions=${menuHasOpts}, role=${menuInside.getAttribute('role')}, classes=${menuInside.className.substring(0, 50)}`);
-              if (menuVisible && menuHasOpts) {
-                console.log('[MenuDetector] ✅ Found visible menu inside CDK overlay');
-                return menuInside;
-              } else {
-                console.log(`[MenuDetector]   Menu element not usable: visible=${menuVisible}, hasOptions=${menuHasOpts}`);
-              }
-            } else {
-              console.log(`[MenuDetector]   ❌ This overlay doesn't contain a menu (might be notifications, tooltips, etc.)`);
-            }
-          } catch (innerError) {
-            console.error(`[MenuDetector] Error processing overlay ${overlayIndex}:`, innerError);
-          }
-        }
-      } catch (e) {
-        console.error('[MenuDetector] Overlay check failed:', e);
-      }
-    
-    // PHASE 3: Search inside Shadow DOMs - menu might be inside a web component
-    console.log('[MenuDetector] 🌑 Searching inside Shadow DOMs...');
-    const shadowMenuSelectors = [
-      '[role="menu"]', 
-      '[role="listbox"]', 
-      '.gs-popover-menu__list',
-      'ul.gs-popover-menu__list'
-    ];
-    
-    const candidateMenus: Array<{menu: Element, itemCount: number}> = [];
-    
-    for (const selector of shadowMenuSelectors) {
-      const shadowResults = this.querySelectorAllDeep(selector);
-      console.log(`[MenuDetector] 🌑 Deep search "${selector}" found ${shadowResults.length} elements`);
+    // Phase 2: Check inside CDK overlay containers using pattern detection
+    try {
+      const overlays = document.querySelectorAll('.cdk-overlay-pane, .cdk-overlay-connected-position-bounding-box');
+      console.log(`[MenuDetector] Found ${overlays.length} CDK overlay containers`);
       
-      for (const element of shadowResults) {
-        const visible = this.isVisible(element);
-        const hasOpts = this.hasOptions(element);
-        if (visible && hasOpts) {
-          const itemCount = this.extractMenuItems(element).length;
-          console.log(`[MenuDetector] 🌑 Found candidate menu in Shadow DOM: ${element.tagName}.${element.className.substring(0, 30)} with ${itemCount} items`);
-          candidateMenus.push({menu: element, itemCount});
+      for (const overlay of overlays) {
+        // Look for menus inside overlay using pattern detection
+        const menuInside = ShadowDOMUtils.queryDeepFirst('[role="menu"], [role="listbox"]', overlay);
+        
+        if (menuInside && this.isLikelyMenu(menuInside) && VisibilityChecker.isVisible(menuInside)) {
+          const openTime = this.lastMenuOpenTime.get(menuInside) || 0;
+          const itemCount = this.findMenuItems(menuInside).length;
+          console.log(`[MenuDetector] Found candidate menu inside CDK overlay with ${itemCount} items`);
+          candidateMenus.push({menu: menuInside, openTime, itemCount});
         }
+      }
+    } catch (e) {
+      console.error('[MenuDetector] CDK overlay check failed:', e);
+    }
+    
+    // Phase 3: Search Shadow DOMs using pattern detection
+    console.log('[MenuDetector] 🌑 Searching inside Shadow DOMs...');
+    const shadowResults = this.querySelectorAllDeep('[role="menu"], [role="listbox"]');
+    console.log(`[MenuDetector] 🌑 Deep search found ${shadowResults.length} elements`);
+    
+    for (const element of shadowResults) {
+      if (this.isLikelyMenu(element) && VisibilityChecker.isVisible(element)) {
+        const openTime = this.lastMenuOpenTime.get(element) || 0;
+        const itemCount = this.findMenuItems(element).length;
+        console.log(`[MenuDetector] 🌑 Found candidate menu in Shadow DOM with ${itemCount} items`);
+        candidateMenus.push({menu: element, openTime, itemCount});
       }
     }
     
-    // If multiple menus found, return the one with the MOST items
-    // (most likely to be the freshly opened dropdown, not a stale menu)
-    if (candidateMenus.length > 0) {
-      candidateMenus.sort((a, b) => b.itemCount - a.itemCount); // Sort descending
-      const winner = candidateMenus[0];
-      console.log(`[MenuDetector] ✅ Selected menu with ${winner.itemCount} items (${candidateMenus.length} candidates found)`);
-      return winner.menu;
+    // Handle multiple candidates - prioritize by open time, then by item count
+    if (candidateMenus.length === 0) {
+      console.log('[MenuDetector] ⚠️ No visible menu found');
+      return null;
     }
     
-    console.log('[MenuDetector] ⚠️ No visible menu found');
-    return null;
+    if (candidateMenus.length === 1) {
+      console.log(`[MenuDetector] ✅ Found single menu with ${candidateMenus[0].itemCount} items`);
+      return candidateMenus[0].menu;
+    }
+    
+    // Multiple menus: Select most recently opened (highest openTime)
+    // If same openTime, select one with most items
+    candidateMenus.sort((a, b) => {
+      if (b.openTime !== a.openTime) {
+        return b.openTime - a.openTime; // Most recent first
+      }
+      return b.itemCount - a.itemCount; // Most items first
+    });
+    
+    const winner = candidateMenus[0];
+    console.log(`[MenuDetector] ✅ Selected menu with ${winner.itemCount} items from ${candidateMenus.length} candidates (most recently opened)`);
+    return winner.menu;
   }
 
   /**
    * Extract menu items from a menu element
-   * Searches both regular DOM and Shadow DOMs
+   * Uses pattern-based findMenuItems method
    */
   static extractMenuItems(menu: Element): Element[] {
-    const items: Element[] = [];
-    
-    // First search in regular DOM
-    for (const selector of MENU_ITEM_SELECTORS) {
-      const found = menu.querySelectorAll(selector);
-      items.push(...Array.from(found));
-    }
-    
-    // Then search in the menu's own Shadow DOM (if it has one)
-    if (menu.shadowRoot) {
-      for (const selector of MENU_ITEM_SELECTORS) {
-        try {
-          const found = menu.shadowRoot.querySelectorAll(selector);
-          items.push(...Array.from(found));
-        } catch (e) {
-          // Invalid selector for this shadow root
-        }
-      }
-    }
-    
-    // Deduplicate
-    const uniqueItems = Array.from(new Set(items));
-    console.log(`[MenuDetector] extractMenuItems found ${uniqueItems.length} items in menu: ${menu.tagName}.${menu.className.substring(0, 30)}`);
-    
-    return uniqueItems;
+    return this.findMenuItems(menu);
   }
 
   /**
    * Check if element is inside a menu
    */
   static isInsideMenu(element: Element): boolean {
-    for (const selector of UNIVERSAL_MENU_SELECTORS) {
+    for (const selector of CORE_MENU_SELECTORS) {
       try {
         const menu = element.closest(selector);
         if (menu) return true;
@@ -799,14 +492,15 @@ export class MenuDetector {
         continue;
       }
     }
-    return false;
+    // Also check shadow DOM boundaries
+    return !!ShadowDOMUtils.closestAcrossShadow(element, '[role="menu"], [role="listbox"]');
   }
 
   /**
    * Find parent menu of an element
    */
   static findParentMenu(element: Element): Element | null {
-    for (const selector of UNIVERSAL_MENU_SELECTORS) {
+    for (const selector of CORE_MENU_SELECTORS) {
       try {
         const menu = element.closest(selector);
         if (menu) return menu;
@@ -814,7 +508,8 @@ export class MenuDetector {
         continue;
       }
     }
-    return null;
+    // Also check across shadow DOM boundaries
+    return ShadowDOMUtils.closestAcrossShadow(element, '[role="menu"], [role="listbox"]');
   }
 
   /**

@@ -277,6 +277,97 @@ export class ShadowDOMUtils {
       node = walker.nextNode();
     }
   }
+
+  /**
+   * Universal deep query - searches both light DOM and ALL shadow DOMs
+   * 
+   * This replaces duplicate implementations in MenuDetector and CandidateFinder.
+   * Searches recursively through all shadow roots to find matching elements.
+   * 
+   * @param selector - CSS selector to match
+   * @param root - Root element or document to start search from
+   * @returns Array of all matching elements in light and shadow DOMs
+   */
+  static queryDeep(selector: string, root: Element | Document = document): Element[] {
+    const results: Element[] = [];
+    const rootElement = root instanceof Element ? root : null;
+    
+    // Phase 1: Search light DOM
+    try {
+      const lightDOMMatches = root.querySelectorAll(selector);
+      results.push(...Array.from(lightDOMMatches));
+    } catch (e) {
+      // Invalid selector - continue with shadow DOM search
+    }
+    
+    // Phase 2: Search all Shadow DOMs recursively
+    // traverseShadowDOM expects Document or ShadowRoot, so get the document
+    const docRoot = root instanceof Document ? root : root.ownerDocument || document;
+    
+    this.traverseShadowDOM(docRoot, (el) => {
+      try {
+        // If root is an Element, only include descendants of that element
+        if (rootElement && !rootElement.contains(el)) {
+          return; // Skip elements outside the root container
+        }
+        
+        if (el.matches(selector)) {
+          // Deduplicate - check if already in results
+          if (!results.includes(el)) {
+            results.push(el);
+          }
+        }
+      } catch (e) {
+        // Invalid selector or element - continue
+      }
+    });
+    
+    return results;
+  }
+  
+  /**
+   * Find first matching element across light and shadow DOMs
+   * 
+   * More efficient than queryDeep when you only need one result.
+   * 
+   * @param selector - CSS selector to match
+   * @param root - Root element or document to start search from
+   * @returns First matching element or null
+   */
+  static queryDeepFirst(selector: string, root: Element | Document = document): Element | null {
+    const rootElement = root instanceof Element ? root : null;
+    
+    // Try light DOM first (faster)
+    try {
+      const lightMatch = root.querySelector(selector);
+      if (lightMatch) return lightMatch;
+    } catch (e) {
+      // Invalid selector
+    }
+    
+    // Search shadow DOMs
+    let found: Element | null = null;
+    const docRoot = root instanceof Document ? root : root.ownerDocument || document;
+    
+    this.traverseShadowDOM(docRoot, (el) => {
+      if (found) return; // Already found, stop searching
+      
+      try {
+        // If root is an Element, only include descendants of that element
+        if (rootElement && !rootElement.contains(el)) {
+          return;
+        }
+        
+        if (el.matches(selector)) {
+          found = el;
+        }
+      } catch (e) {
+        // Invalid selector or element
+      }
+    });
+    
+    return found;
+  }
 }
 
 

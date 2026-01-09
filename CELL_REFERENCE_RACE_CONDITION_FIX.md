@@ -338,3 +338,5 @@ January 7, 2025
 5. **Check console** for "Using EXPLICIT cell reference"
 6. **Verify variables** detected as A, B, C (NOT G!)
 
+
+

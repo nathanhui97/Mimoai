@@ -1446,7 +1446,7 @@ export class Tier1Executor {
     }
     
     // PRIORITY 2: Use Resolver.resolve() with semantic strategies
-    const result: ResolveResult = Resolver.resolve(bundle, intent);
+    const result: ResolveResult = await Resolver.resolve(bundle, intent);
     
     // #region agent log
     fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'tier1-executor.ts:1294',message:'SEMANTIC_RESOLVER_RESULT',data:{status:result.status,candidateCount:result.status === 'ambiguous' ? result.candidates.length : 0,winningStrategy:result.status === 'found' ? result.winningStrategy : undefined},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});

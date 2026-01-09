@@ -250,3 +250,5 @@ Edge function URL: https://jfboagngbpzollcipewh.supabase.co/functions/v1/detect_
 
 ⏳ **AWAITING USER TEST** - Need confirmation that headers are now detected correctly
 
+
+

@@ -67,3 +67,5 @@ npx supabase functions logs generate_step_description --tail
 
 You should see logs showing the copy/paste detection in the Edge Function.
 
+
+

@@ -1675,8 +1675,17 @@ export class AIAgent {
       if (hint.recordedScopeHint && candidates.length > 1) {
         console.log(`[Hybrid] 🔍 Filtering ${candidates.length} candidates by scope: "${hint.recordedScopeHint}"`);
         
+        // Import scope utilities
+        const { resolveScopeContainer } = await import('../types/scope');
+        const widgetElement = resolveScopeContainer({
+          kind: 'WIDGET',
+          title: hint.recordedScopeHint,
+        }, document);
+        
         // For shadow DOM elements, check widget title directly instead of distance
-        const filtered = candidates.filter(c => {
+        const filtered: HTMLElement[] = [];
+        
+        for (const c of candidates) {
           // Check if element is in a shadow root
           const rootNode = c.getRootNode();
           if (rootNode instanceof ShadowRoot) {
@@ -1692,7 +1701,7 @@ export class AIAgent {
             // Fuzzy match with recorded scope hint
             if (widgetTitle) {
               const titleLower = widgetTitle.toLowerCase();
-              const scopeLower = hint.recordedScopeHint!.toLowerCase();
+              const scopeLower = hint.recordedScopeHint.toLowerCase();
               const titleStripped = titleLower.replace(/\d+$/g, '').trim();
               const scopeStripped = scopeLower.replace(/\d+$/g, '').trim();
               
@@ -1703,21 +1712,16 @@ export class AIAgent {
               
               if (matches) {
                 console.log(`[Hybrid] ✅ Candidate in widget "${widgetTitle.substring(0, 50)}" matches scope "${hint.recordedScopeHint}"`);
-                return true;
+                filtered.push(c);
+                continue;
               } else {
                 console.log(`[Hybrid] ⚠️ Candidate in widget "${widgetTitle.substring(0, 50)}" does NOT match scope "${hint.recordedScopeHint}"`);
-                return false;
+                continue;
               }
             }
           }
           
           // For non-shadow elements, fall back to distance-based filtering
-          const { resolveScopeContainer } = require('../types/scope');
-          const widgetElement = resolveScopeContainer({
-            kind: 'WIDGET',
-            title: hint.recordedScopeHint,
-          }, document);
-          
           if (widgetElement) {
             const widgetRect = widgetElement.getBoundingClientRect();
             const candidateRect = c.getBoundingClientRect();
@@ -1725,11 +1729,11 @@ export class AIAgent {
               Math.pow(candidateRect.left + candidateRect.width/2 - (widgetRect.left + widgetRect.width/2), 2) +
               Math.pow(candidateRect.top + candidateRect.height/2 - (widgetRect.top + widgetRect.height/2), 2)
             );
-            return distance < 500; // Within 500px of widget
+            if (distance < 500) {
+              filtered.push(c);
+            }
           }
-          
-          return false;
-        });
+        }
         
         if (filtered.length > 0) {
           console.log(`[Hybrid] ✅ Scope filter: ${candidates.length} → ${filtered.length} candidates within widget "${hint.recordedScopeHint}"`);

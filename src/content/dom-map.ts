@@ -835,6 +835,12 @@ function elementToMapElement(el: Element, frameId: number = 0): DOMMapElement {
   const name = computeAccessibleName(el) || '';
   const text = getVisibleText(el);
   
+  // DEBUG: Log when aria-label exists but name is empty
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel && !name && role === 'button') {
+    console.warn(`[DOMMap] ⚠️ Button has aria-label="${ariaLabel}" but computeAccessibleName returned empty!`);
+  }
+  
   const mapEl: DOMMapElement = {
     role,
     name,

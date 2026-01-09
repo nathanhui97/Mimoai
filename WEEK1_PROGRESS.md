@@ -161,3 +161,5 @@ We've started Week 1 of the Safe but Slow refactoring approach. The goal is to c
 - Integration tests will be added in Week 2 (E2E setup)
 - Current tests provide a safety net for refactoring
 
+
+

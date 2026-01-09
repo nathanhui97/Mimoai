@@ -11,6 +11,7 @@ import { TextMatcher } from './text-matcher';
 import { FeatureFlags } from '../lib/feature-flags';
 import { computeAccessibleName } from '../lib/accessible-name';
 import { ShadowDOMUtils } from './shadow-dom-utils';
+import { VisibilityChecker } from './visibility-checker';
 
 /**
  * Result from finding a candidate element
@@ -31,66 +32,118 @@ export interface CandidateResult {
  */
 export class CandidateFinder {
   /**
-   * Shadow-aware querySelectorAll - searches both light DOM and shadow DOM
+   * Shadow-aware querySelectorAll - uses shared ShadowDOMUtils
    */
   private static querySelectorAllDeep(container: Element, selector: string): Element[] {
-    const results: Element[] = [];
-    
-    // Phase 1: Light DOM
-    try {
-      const lightDOMMatches = container.querySelectorAll(selector);
-      results.push(...Array.from(lightDOMMatches));
-    } catch (e) {
-      // Invalid selector
-    }
-    
-    // Phase 2: Shadow DOM
-    let shadowDOMCount = 0;
-    ShadowDOMUtils.traverseShadowDOM(container.ownerDocument || document, (el) => {
-      // Only include elements that are descendants of the container
-      // (either in light DOM or shadow DOM)
-      const shadowHost = (el.getRootNode() as ShadowRoot).host;
-      if (shadowHost && container.contains(shadowHost)) {
-        if (el.matches(selector)) {
-          // Deduplicate - check if already in results
-          if (!results.includes(el)) {
-            results.push(el);
-            shadowDOMCount++;
-          }
-        }
-      }
-    });
-    
-    if (shadowDOMCount > 0) {
-      console.log(`[CandidateFinder] Found ${shadowDOMCount} additional elements in shadow DOM`);
-    }
-    
-    return results;
+    return ShadowDOMUtils.queryDeep(selector, container);
   }
   
   /**
    * Find all candidates for each strategy within scope
    * Returns a map of strategy type -> candidates found
    */
-  static findCandidates(
+  static async findCandidates(
     bundle: LocatorBundle,
     doc: Document = document
-  ): Map<LocatorType, CandidateResult[]> {
+  ): Promise<Map<LocatorType, CandidateResult[]>> {
     const results = new Map<LocatorType, CandidateResult[]>();
     
     // CRITICAL: Check if we're looking for a menu item
     // Menu items are rendered in portals/overlays OUTSIDE the widget scope, so we MUST search document-wide
     const isMenuItem = bundle.role === 'menuitem' || bundle.role === 'option';
     
-    // Resolve scope container
-    // CRITICAL: If scope resolution fails, fall back to document-wide search
-    // We'll use scope for disambiguation later if multiple candidates are found
+    // PRIORITY: For menu items, ALWAYS use MenuDetector first (not as fallback)
+    if (isMenuItem) {
+      console.log(`[CandidateFinder] 🎯 Menu item detected (role: ${bundle.role}) - using MenuDetector to find candidates`);
+      
+      const { MenuDetector } = await import('./menu-detector');
+      const visibleMenu = MenuDetector.findVisibleMenu();
+      
+      if (visibleMenu) {
+        const allOptions = MenuDetector.extractMenuItems(visibleMenu);
+        console.log(`[CandidateFinder] Found ${allOptions.length} menu items in visible menu`);
+        
+        // Match menu items against strategies
+        for (const option of allOptions) {
+          if (!this.isElementVisible(option)) continue;
+          
+          // Get text from the option
+          let optionText = option.textContent?.trim() || '';
+          
+          // Check nested children if no direct text
+          if (!optionText) {
+            const childTextElements = option.querySelectorAll('div, span, p, label');
+            for (const child of Array.from(childTextElements)) {
+              const childText = child.textContent?.trim();
+              if (childText) {
+                optionText = childText;
+                break;
+              }
+            }
+          }
+          
+          if (!optionText) continue;
+          
+          // Match against each strategy
+          for (const strategy of bundle.strategies) {
+            // CSS selector strategy - try direct match
+            if (strategy.type === 'css') {
+              try {
+                if (option.matches(strategy.value)) {
+                  const existing = results.get(strategy.type) || [];
+                  results.set(strategy.type, [...existing, {
+                    element: option,
+                    strategy,
+                    matchScore: 1.0,
+                  }]);
+                  console.log(`[CandidateFinder] ✅ Matched menu item via CSS selector: ${strategy.value}`);
+                }
+              } catch (e) {
+                // Invalid selector
+              }
+            }
+            
+            // Text/role/aria strategies - fuzzy text matching
+            if (strategy.type === 'text' || strategy.type === 'role' || strategy.type === 'aria') {
+              let targetText = strategy.value;
+              
+              // For role strategy, extract name part (e.g., "menuitem:Download Data" -> "Download Data")
+              if (strategy.type === 'role' && targetText.includes(':')) {
+                targetText = targetText.split(':')[1];
+              }
+              
+              if (targetText && !targetText.startsWith('//')) {
+                const score = TextMatcher.similarityScore(targetText, optionText);
+                if (score >= 0.7) {
+                  const existing = results.get(strategy.type) || [];
+                  results.set(strategy.type, [...existing, {
+                    element: option,
+                    strategy,
+                    matchedText: optionText,
+                    matchScore: score,
+                  }]);
+                  console.log(`[CandidateFinder] ✅ Matched menu item "${optionText}" via ${strategy.type} (score: ${score.toFixed(2)})`);
+                }
+              }
+            }
+          }
+        }
+        
+        // If we found candidates via MenuDetector, return them (skip other strategies)
+        if (results.size > 0) {
+          return results;
+        }
+      } else {
+        console.warn(`[CandidateFinder] ⚠️ No visible menu found - menu items won't be findable`);
+      }
+    }
+    
+    // For non-menu items, use standard scope-based search
     let scopeContainer: Element | null;
     
     if (isMenuItem) {
-      // Menu items are in portals - ALWAYS search document-wide
-      console.log(`[CandidateFinder] 🎯 Menu item detected (role: ${bundle.role}) - searching document-wide (menus are in portals)`);
-      scopeContainer = doc.body;
+      // Already handled above
+      return results;
     } else {
       scopeContainer = bundle.scope 
         ? resolveScopeContainer(bundle.scope, doc)
@@ -113,88 +166,6 @@ export class CandidateFinder {
       if (candidates.length > 0) {
         const existing = results.get(strategy.type) || [];
         results.set(strategy.type, [...existing, ...candidates]);
-      }
-    }
-    
-    // Special fallback: If no candidates found and we're looking for dropdown options,
-    // search the entire document (for portals/overlays)
-    if (results.size === 0 || Array.from(results.values()).every(arr => arr.length === 0)) {
-      // Check if any strategy suggests we're looking for a dropdown option
-      const isDropdownOption = bundle.strategies.some(s => 
-        s.value.includes('option') || 
-        s.value.includes('BOGO') || 
-        s.value.includes('FLAT') ||
-        s.value.includes('role') ||
-        s.features.recordedTagName === 'li' ||
-        bundle.role === 'option'
-      );
-      
-      if (isDropdownOption) {
-        console.log('CandidateFinder: No candidates found in scope, searching entire document for dropdown option...');
-        // Search entire document body for dropdown options
-        const allOptions = doc.querySelectorAll('[role="option"], [role="menuitem"], li, .mat-menu-item, .slds-listbox__option, .MuiMenuItem-root, .ant-dropdown-menu-item');
-        for (const option of Array.from(allOptions)) {
-          if (this.isElementVisible(option)) {
-            // Get text from the option (including nested children)
-            let optionText = option.textContent?.trim() || '';
-            
-            // If no direct text, check nested children (for wrapper divs)
-            if (!optionText || optionText.length === 0) {
-              const childTextElements = option.querySelectorAll('div, span, p, label');
-              for (const child of Array.from(childTextElements) as Element[]) {
-                const childText = child.textContent?.trim();
-                if (childText && childText.length > 0) {
-                  optionText = childText;
-                  break;
-                }
-              }
-            }
-            
-            if (!optionText) continue;
-            
-            // Check if any strategy text matches
-            for (const strategy of bundle.strategies) {
-              if (strategy.type === 'text' || strategy.type === 'role') {
-                const targetText = strategy.value;
-                // For role strategy, extract the name part (e.g., "option:BOGO" -> "BOGO")
-                const textToMatch = strategy.type === 'role' && targetText.includes(':') 
-                  ? targetText.split(':')[1] 
-                  : targetText;
-                
-                if (textToMatch && !textToMatch.startsWith('//') && !textToMatch.startsWith('/')) {
-                  const score = TextMatcher.similarityScore(textToMatch, optionText);
-                  if (score >= 0.7) {
-                    // For dropdown options with wrapper divs, try to find the clickable child
-                    let clickableElement = option;
-                    if (option.getAttribute('role') === 'option' || option.tagName === 'LI') {
-                      const clickableChildren = option.querySelectorAll('div, span, button, a');
-                      for (const child of Array.from(clickableChildren) as Element[]) {
-                        const childText = child.textContent?.trim();
-                        if (childText && TextMatcher.similarityScore(textToMatch, childText) >= 0.7) {
-                          if (child instanceof HTMLElement && this.isElementVisible(child)) {
-                            clickableElement = child;
-                            break;
-                          }
-                        }
-                      }
-                    }
-                    
-                    // Found a match - add to results
-                    const existing = results.get(strategy.type) || [];
-                    results.set(strategy.type, [...existing, {
-                      element: clickableElement,
-                      strategy,
-                      matchedText: optionText,
-                      matchScore: score,
-                    }]);
-                    console.log(`CandidateFinder: Found dropdown option in document: "${optionText}" (score: ${score.toFixed(2)})`);
-                    break;
-                  }
-                }
-              }
-            }
-          }
-        }
       }
     }
     
@@ -664,19 +635,10 @@ export class CandidateFinder {
   
   /**
    * Check if element is visible
+   * Uses shared VisibilityChecker utility
    */
   private static isElementVisible(element: Element): boolean {
-    if (!(element instanceof HTMLElement)) return false;
-    
-    const rect = element.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return false;
-    
-    const style = window.getComputedStyle(element);
-    if (style.display === 'none') return false;
-    if (style.visibility === 'hidden') return false;
-    if (style.opacity === '0') return false;
-    
-    return true;
+    return VisibilityChecker.isVisible(element);
   }
   
   /**

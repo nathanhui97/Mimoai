@@ -272,3 +272,5 @@ describe('Form Coordinates Validation', () => {
 // setting up complex mock DOM structures with proper class names and attributes.
 // These are better tested in E2E tests with real websites like Google Sheets.
 
+
+
