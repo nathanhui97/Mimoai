@@ -1,0 +1,52 @@
+{
+  "description": "Generic dropdown menu rendered in portal (common pattern across frameworks)",
+  "workflowName": "Generic Dropdown Selection",
+  "expectedBehavior": {
+    "triggerElement": "Select Country",
+    "menuRole": "listbox",
+    "selectedOption": "United States"
+  },
+  "domPattern": {
+    "trigger": {
+      "role": "combobox",
+      "ariaLabel": "Select Country",
+      "ariaExpanded": "true",
+      "text": "Select..."
+    },
+    "portal": {
+      "type": "div",
+      "role": "listbox",
+      "position": "fixed",
+      "zIndex": 9999,
+      "items": [
+        {"role": "option", "text": "United States"},
+        {"role": "option", "text": "Canada"},
+        {"role": "option", "text": "United Kingdom"},
+        {"role": "option", "text": "Australia"},
+        {"role": "option", "text": "Germany"}
+      ]
+    }
+  },
+  "frameworks": [
+    "Material UI (MUI)",
+    "Radix UI",
+    "Ant Design",
+    "Bootstrap",
+    "Headless UI",
+    "Chakra UI"
+  ],
+  "criticalFeatures": [
+    "Menu detection without hardcoded selectors",
+    "Portal rendering - menu is outside trigger element's DOM tree",
+    "ARIA role-based detection - use role=listbox, role=menu, role=option",
+    "z-index filtering - menus typically have high z-index",
+    "Position detection - menus are position:fixed or position:absolute",
+    "Skip scope filtering for menu items - they render globally"
+  ],
+  "regressionTests": [
+    "MenuDetector should identify portal as a menu using pattern-based detection",
+    "MenuDetector should not require framework-specific selectors",
+    "CandidateFinder should skip widget scope filtering for role=menuitem/option",
+    "MenuDetector should extract all options from portal menu"
+  ]
+}

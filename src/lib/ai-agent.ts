@@ -313,6 +313,7 @@ export interface ActionHistoryEntry {
 export interface AgentState {
   workflowId?: string;
   goal: string;
+  analyzedIntent?: import('./intent-analyzer').AnalyzedIntent;
   hints: AgentHint[];
   history: ActionHistoryEntry[];
   currentHintIndex: number;
@@ -401,6 +402,7 @@ export class AIAgent {
     this.state = {
       workflowId: workflow.id,
       goal: this.inferGoal(workflow),
+      analyzedIntent: workflow.analyzedIntent,
       hints: this.extractHints(workflow, variableValues),
       history: [],
       currentHintIndex: 0,
@@ -412,6 +414,19 @@ export class AIAgent {
 
     console.log(`[AIAgent] Goal: ${this.state.goal}`);
     console.log(`[AIAgent] Hints: ${this.state.hints.length} steps`);
+    
+    // Log intent analysis if available
+    if (this.state.analyzedIntent) {
+      console.log('[AIAgent] 🧠 Workflow Intent Available:');
+      console.log(`  - Primary Goal: ${this.state.analyzedIntent.primaryGoal}`);
+      console.log(`  - Expected Outcome: ${this.state.analyzedIntent.expectedOutcome}`);
+      console.log(`  - Confidence: ${(this.state.analyzedIntent.confidence * 100).toFixed(0)}%`);
+      console.log(`  - Sub-Goals: ${this.state.analyzedIntent.subGoals?.length || 0}`);
+      console.log(`  - Failure Patterns: ${this.state.analyzedIntent.failurePatterns?.length || 0}`);
+      console.log(`  - Step Translations: ${this.state.analyzedIntent.stepTranslations?.length || 0}`);
+    } else {
+      console.log('[AIAgent] ⚠️ No analyzedIntent available (workflow may be older)');
+    }
     
     // Log variable values for debugging
     if (variableValues && Object.keys(variableValues).length > 0) {
@@ -489,6 +504,13 @@ export class AIAgent {
           const totalCount = this.state.hints.length;
           console.log(`[AIAgent] ✅ All hints completed (${completedCount}/${totalCount}) or reached end of workflow`);
           this.state.status = 'completed';
+          
+          // Verify workflow outcome if available
+          if (this.state.analyzedIntent?.expectedOutcome) {
+            const verification = await this.verifyWorkflowOutcome();
+            console.log(`[AIAgent] Outcome verification: ${verification.achieved ? '✅' : '⚠️'} ${verification.reason}`);
+          }
+          
           break;
         }
         
@@ -1033,6 +1055,13 @@ export class AIAgent {
         if (action.type === 'done') {
           console.log('[AIAgent] Goal achieved!');
           this.state.status = 'completed';
+          
+          // Verify workflow outcome if available
+          if (this.state.analyzedIntent?.expectedOutcome) {
+            const verification = await this.verifyWorkflowOutcome();
+            console.log(`[AIAgent] Outcome verification: ${verification.achieved ? '✅' : '⚠️'} ${verification.reason}`);
+          }
+          
           break;
         }
 
@@ -1248,6 +1277,12 @@ export class AIAgent {
                 if (completedCount >= totalCount * 0.7) {
                   console.log(`[AIAgent] ✅ Completed ${completedCount}/${totalCount} hints (>70%), marking as success`);
                   this.state.status = 'completed';
+                  
+                  // Verify workflow outcome if available
+                  if (this.state.analyzedIntent?.expectedOutcome) {
+                    const verification = await this.verifyWorkflowOutcome();
+                    console.log(`[AIAgent] Outcome verification: ${verification.achieved ? '✅' : '⚠️'} ${verification.reason}`);
+                  }
                 } else {
                   console.log(`[AIAgent] ❌ Only completed ${completedCount}/${totalCount} hints (<70%), marking as failed`);
                   this.state.status = 'failed';
@@ -2162,8 +2197,9 @@ export class AIAgent {
         headings: domMap.headings.map(h => h.text),
       },
       
-      // Goal and hints
+      // Goal and analyzed intent
       goal: this.state.goal,
+      analyzedIntent: this.state.analyzedIntent,
       hints: this.state.hints.map(h => ({
         stepNumber: h.stepNumber,
         description: h.description,
@@ -2240,6 +2276,17 @@ export class AIAgent {
       console.log('[AIAgent] 🧠 Calling dom_agent Edge Function...');
       console.log('[AIAgent] 📤 Sending: currentHintIndex =', payload.currentHintIndex, ', nextIncomplete =', nextIncompleteHint?.stepNumber);
       console.log('[AIAgent] 📤 Hints status:', payload.hints.map((h: any, i: number) => `${i}:${h.completed?'✅':'⬜'}`).join(' '));
+      
+      // Log intent data being sent
+      if (payload.analyzedIntent) {
+        console.log('[AIAgent] 📤 Including analyzedIntent:', {
+          primaryGoal: payload.analyzedIntent.primaryGoal,
+          expectedOutcome: payload.analyzedIntent.expectedOutcome,
+          confidence: payload.analyzedIntent.confidence,
+        });
+      } else {
+        console.log('[AIAgent] 📤 No analyzedIntent in payload');
+      }
       
       // DEBUG: Show current hint details
       const currentHintData = payload.hints[payload.currentHintIndex];
@@ -3244,6 +3291,52 @@ export class AIAgent {
     
     // Default: Assume action achieved the goal
     return false;
+  }
+
+  /**
+   * Verify if the workflow's expected outcome has been achieved
+   * This provides basic outcome checking based on URL and page content
+   */
+  private async verifyWorkflowOutcome(): Promise<{ achieved: boolean; reason: string }> {
+    if (!this.state.analyzedIntent?.expectedOutcome) {
+      return { achieved: false, reason: 'No expectedOutcome defined' };
+    }
+
+    const expectedOutcome = this.state.analyzedIntent.expectedOutcome.toLowerCase();
+    
+    // Check URL-based outcomes
+    const currentUrl = window.location.href.toLowerCase();
+    if (expectedOutcome.includes('confirmation') && currentUrl.includes('confirm')) {
+      return { achieved: true, reason: 'URL indicates confirmation page' };
+    }
+    if (expectedOutcome.includes('success') && currentUrl.includes('success')) {
+      return { achieved: true, reason: 'URL indicates success page' };
+    }
+    if (expectedOutcome.includes('thank you') && (currentUrl.includes('thankyou') || currentUrl.includes('thank-you'))) {
+      return { achieved: true, reason: 'URL indicates thank you page' };
+    }
+
+    // Check for success indicators in DOM
+    const successIndicators = ['success', 'confirmed', 'complete', 'saved', 'submitted', 'thank you'];
+    const bodyText = document.body.innerText.toLowerCase();
+    for (const indicator of successIndicators) {
+      if (expectedOutcome.includes(indicator) && bodyText.includes(indicator)) {
+        return { achieved: true, reason: `Found "${indicator}" on page` };
+      }
+    }
+
+    // Check visual confirmation if provided
+    if (this.state.analyzedIntent.visualConfirmation) {
+      const visualConfirmation = this.state.analyzedIntent.visualConfirmation.toLowerCase();
+      const visualIndicators = visualConfirmation.split(/,|\sand\s/).map(s => s.trim());
+      for (const indicator of visualIndicators) {
+        if (indicator && bodyText.includes(indicator)) {
+          return { achieved: true, reason: `Found visual confirmation: "${indicator}"` };
+        }
+      }
+    }
+
+    return { achieved: false, reason: 'Outcome not yet verified' };
   }
 
   private sleep(ms: number): Promise<void> {

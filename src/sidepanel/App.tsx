@@ -72,9 +72,6 @@ function App() {
   const [learningFeedback, setLearningFeedback] = useState<string | null>(null);
   // Variable detection state
   const [isDetectingVariables, setIsDetectingVariables] = useState(false);
-  // Natural language translation state
-  const [isTranslatingSteps, setIsTranslatingSteps] = useState(false);
-  const [translationProgress, setTranslationProgress] = useState<{ current: number; total: number } | null>(null);
   // Recording finalization state (flushing pending steps)
   const [isFinalizingRecording, setIsFinalizingRecording] = useState(false);
   const [expandedVariables, setExpandedVariables] = useState<Set<string>>(new Set());
@@ -698,8 +695,9 @@ function App() {
           console.log('[App] Variable detection finished, isDetectingVariables set to false');
         }
         
-        // Now translate steps to natural language
-        await translateStepsToNaturalLanguage(currentSteps);
+        // Note: Step translations now happen during intent analysis (in handleSaveWorkflow)
+        // This reduces API calls from N+1 to just 1
+        console.log('[App] ✅ Recording stopped - translations will happen on save');
       } else {
         console.log('[App] ⚠️ No workflow steps to analyze for variables (workflowSteps.length =', workflowSteps.length, ')');
         // Still set empty variables so UI shows the section
@@ -713,45 +711,7 @@ function App() {
       console.error('[App] Stop recording error:', err);
       setError(err instanceof Error ? err.message : 'Failed to stop recording');
       setIsDetectingVariables(false);
-      setIsTranslatingSteps(false);
       setIsFinalizingRecording(false);
-    }
-  };
-  
-  // Translate workflow steps to natural language
-  const translateStepsToNaturalLanguage = async (steps: WorkflowStep[]) => {
-    if (steps.length === 0) return;
-    
-    console.log('[App] 🧠 Starting natural language translation for', steps.length, 'steps');
-    setIsTranslatingSteps(true);
-    setTranslationProgress({ current: 0, total: steps.length });
-    setLearningFeedback('🧠 Translating steps to natural language...');
-    
-    try {
-      const { translateWorkflow } = await import('../lib/workflow-translator');
-      
-      // Translate with progress updates
-      const translatedSteps = await translateWorkflow(steps, (current, total) => {
-        setTranslationProgress({ current, total });
-        setLearningFeedback(`🧠 Translating step ${current}/${total}...`);
-      });
-      
-      console.log('[App] ✅ Translation complete:', translatedSteps.length, 'steps translated');
-      console.log('[App] Sample translation:', translatedSteps[0]?.naturalLanguage);
-      
-      // Update the workflow steps in the store with translations
-      setWorkflowSteps(translatedSteps);
-      
-      setLearningFeedback(`✨ Translated ${translatedSteps.length} steps - ready to save/export`);
-      setTimeout(() => setLearningFeedback(null), 3000);
-    } catch (err) {
-      console.error('[App] ❌ Translation error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to translate steps');
-      setLearningFeedback('⚠️ Translation failed, but you can still save/export');
-      setTimeout(() => setLearningFeedback(null), 4000);
-    } finally {
-      setIsTranslatingSteps(false);
-      setTranslationProgress(null);
     }
   };
 
@@ -839,19 +799,57 @@ function App() {
         console.log('[SaveWorkflow] Sample naturalLanguage:', (sortedSteps[0] as any)?.naturalLanguage);
       }
 
-      // Generate task summary using IntentAnalyzer
-      console.log('[SaveWorkflow] Analyzing workflow intent for summary...');
-      setLearningFeedback('📝 Generating task summary...');
+      // Generate task summary AND step translations using IntentAnalyzer
+      console.log('[SaveWorkflow] Analyzing workflow intent (includes step translations)...');
+      setLearningFeedback('📝 Analyzing workflow with AI...');
       let workflowDescription: string | undefined;
+      let analyzedIntent: import('../lib/intent-analyzer').AnalyzedIntent | undefined;
+      let stepsWithTranslations = sortedSteps;
       
       try {
         const intentAnalysis = await IntentAnalyzer.analyzeWorkflowIntent(tempWorkflow);
         if (intentAnalysis?.intent) {
+          // Store full intent for AI agent
+          analyzedIntent = intentAnalysis.intent;
           workflowDescription = IntentAnalyzer.formatIntentAsSummary(intentAnalysis.intent);
           console.log('[SaveWorkflow] Generated description:', workflowDescription);
+          
+          // Apply step translations if available
+          if (intentAnalysis.intent.stepTranslations && intentAnalysis.intent.stepTranslations.length > 0) {
+            console.log('[SaveWorkflow] ✨ Applying', intentAnalysis.intent.stepTranslations.length, 'step translations');
+            stepsWithTranslations = sortedSteps.map((step, index) => {
+              const translation = intentAnalysis.intent.stepTranslations?.find(t => t.stepIndex === index);
+              if (translation) {
+                return {
+                  ...step,
+                  naturalLanguage: {
+                    intent: translation.intent,
+                    precondition: translation.precondition,
+                    expectedOutcome: translation.expectedOutcome,
+                    dependencies: translation.dependencies,
+                  },
+                };
+              }
+              return step;
+            });
+            console.log('[SaveWorkflow] Sample translation:', stepsWithTranslations[0]?.naturalLanguage);
+          } else {
+            console.warn('[SaveWorkflow] ⚠️ No stepTranslations received from analyze_intent');
+          }
+          
+          // Log full intent for verification
+          console.log('[SaveWorkflow] 📊 Full Intent Analysis:', {
+            primaryGoal: analyzedIntent.primaryGoal,
+            expectedOutcome: analyzedIntent.expectedOutcome,
+            confidence: analyzedIntent.confidence,
+            subGoalsCount: analyzedIntent.subGoals?.length,
+            failurePatternsCount: analyzedIntent.failurePatterns?.length,
+            stepTranslationsCount: analyzedIntent.stepTranslations?.length,
+          });
         } else {
           // Fallback to local analysis
           const localIntent = IntentAnalyzer.analyzeIntentLocally(sortedSteps);
+          analyzedIntent = localIntent;
           workflowDescription = IntentAnalyzer.formatIntentAsSummary(localIntent);
           console.log('[SaveWorkflow] Generated description (local):', workflowDescription);
         }
@@ -859,6 +857,7 @@ function App() {
         console.warn('[SaveWorkflow] Failed to generate description:', error);
         // Fallback to local analysis
         const localIntent = IntentAnalyzer.analyzeIntentLocally(sortedSteps);
+        analyzedIntent = localIntent;
         workflowDescription = IntentAnalyzer.formatIntentAsSummary(localIntent);
       }
 
@@ -866,16 +865,17 @@ function App() {
         id: tempWorkflow.id,
         name: workflowName.trim(),
         description: workflowDescription,
+        analyzedIntent: analyzedIntent,
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        // Use sortedSteps to ensure correct execution order
-        steps: sortedSteps,
+        // Use steps with translations applied
+        steps: stepsWithTranslations,
         // Include detected variables if any were found
         variables: variables.variables.length > 0 ? variables : undefined,
-        // Use optimized steps if optimization reduced steps, otherwise use sortedSteps
+        // Use optimized steps if optimization reduced steps, otherwise use stepsWithTranslations
         optimizedSteps: optimizationResult.metadata.stepsRemoved > 0 
           ? optimizationResult.optimizedSteps 
-          : sortedSteps,
+          : stepsWithTranslations,
         optimizationMetadata: optimizationResult.metadata.stepsRemoved > 0 ? optimizationResult.metadata : undefined,
       };
 
@@ -1363,16 +1363,16 @@ function App() {
             <button
               onClick={() => setShowSaveDialog(true)}
               className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={workflowSteps.length === 0 || isRecording || isDetectingVariables || isTranslatingSteps}
+              disabled={workflowSteps.length === 0 || isRecording || isDetectingVariables}
             >
-              {isDetectingVariables ? 'Analyzing Variables...' : isTranslatingSteps ? `Translating ${translationProgress?.current || 0}/${translationProgress?.total || 0}...` : 'Save Workflow'}
+              {isDetectingVariables ? 'Analyzing Variables...' : 'Save Workflow'}
             </button>
             <button
               onClick={() => handleExportJSON()}
               className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              disabled={workflowSteps.length === 0 || isRecording || isDetectingVariables || isTranslatingSteps}
+              disabled={workflowSteps.length === 0 || isRecording || isDetectingVariables}
             >
-              {isTranslatingSteps ? 'Translating...' : 'Export JSON'}
+              Export JSON
             </button>
             <button
               onClick={clearWorkflowSteps}
@@ -2074,7 +2074,7 @@ function App() {
           {learningFeedback && (
             <div className="mb-3 p-2 bg-green-50 border border-green-200 rounded text-sm text-green-700">
               <div className="flex items-center gap-2">
-                {(isDetectingVariables || isTranslatingSteps) && (
+                {isDetectingVariables && (
                   <svg className="animate-spin h-4 w-4 text-green-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -2082,16 +2082,6 @@ function App() {
                 )}
                 {learningFeedback}
               </div>
-              {isTranslatingSteps && translationProgress && (
-                <div className="mt-2">
-                  <div className="w-full bg-green-200 rounded-full h-1.5">
-                    <div 
-                      className="bg-green-600 h-1.5 rounded-full transition-all duration-300" 
-                      style={{ width: `${(translationProgress.current / translationProgress.total) * 100}%` }}
-                    ></div>
-                  </div>
-                </div>
-              )}
             </div>
           )}
           

@@ -40,6 +40,14 @@ interface AnalyzeIntentRequest {
   };
 }
 
+interface StepTranslation {
+  stepIndex: number;
+  intent: string;
+  precondition: string;
+  expectedOutcome: string;
+  dependencies: number[];
+}
+
 interface AnalyzedIntent {
   primaryGoal: string;
   subGoals: string[];
@@ -51,6 +59,7 @@ interface AnalyzedIntent {
     visualIndicator?: string;
     recovery?: string;
   }>;
+  stepTranslations?: StepTranslation[];
 }
 
 interface AnalyzeIntentResponse {
@@ -265,6 +274,15 @@ ANALYZE AND RETURN JSON:
         "visualIndicator": "<What would failure look like?>",
         "recovery": "<How to recover from this failure>"
       }
+    ],
+    "stepTranslations": [
+      {
+        "stepIndex": 0,
+        "intent": "<What this step does in natural language>",
+        "precondition": "<What must be true before executing this step>",
+        "expectedOutcome": "<What should happen immediately after this step>",
+        "dependencies": []
+      }
     ]
   },
   "suggestions": ["<Improvement suggestion 1>", "<Improvement suggestion 2>"],
@@ -276,7 +294,12 @@ GUIDELINES:
 - List sub-goals in order of execution
 - Describe expected outcome in user-friendly terms
 - Include 2-3 likely failure patterns
-- Provide actionable suggestions for improving reliability`;
+- Provide actionable suggestions for improving reliability
+- Generate stepTranslations for EVERY step in the workflow
+- For CLICK on dropdown: expectedOutcome = "dropdown menu opens"
+- For dropdown option selection: dependencies = [index of step that opened dropdown]
+- For INPUT: expectedOutcome = "field contains entered value"
+- For navigation: expectedOutcome = "page loads successfully"`;
 
   return prompt;
 }
@@ -390,6 +413,15 @@ function parseGeminiResponse(geminiData: any): AnalyzeIntentResponse {
               description: p.description || '',
               visualIndicator: p.visualIndicator,
               recovery: p.recovery,
+            }))
+          : [],
+        stepTranslations: Array.isArray(parsed.intent?.stepTranslations)
+          ? parsed.intent.stepTranslations.map((st: any) => ({
+              stepIndex: typeof st.stepIndex === 'number' ? st.stepIndex : 0,
+              intent: st.intent || '',
+              precondition: st.precondition || '',
+              expectedOutcome: st.expectedOutcome || '',
+              dependencies: Array.isArray(st.dependencies) ? st.dependencies : [],
             }))
           : [],
       },

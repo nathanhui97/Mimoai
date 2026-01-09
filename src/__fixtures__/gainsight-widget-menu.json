@@ -1,0 +1,63 @@
+{
+  "description": "Gainsight widget with Download Data button and CDK overlay menu",
+  "workflowName": "Gainsight Download CSV",
+  "expectedBehavior": {
+    "widgetScope": "STORE LOCATION OVERVIEW 119",
+    "buttonTarget": "Download Data",
+    "menuItems": ["Download CSV", "Download PDF", "Download XLSX", "Download JSON", "Share"]
+  },
+  "domPattern": {
+    "widgets": [
+      {
+        "title": "STORE LOCATION OVERVIEW 119",
+        "type": "gs-report-widget-element",
+        "hasShadowDOM": true,
+        "buttons": [
+          {
+            "ariaLabel": "Download Data",
+            "text": "Download Data",
+            "triggersMenu": true
+          }
+        ]
+      },
+      {
+        "title": "REVENUE TRENDS",
+        "type": "gs-report-widget-element",
+        "hasShadowDOM": true,
+        "buttons": [
+          {
+            "ariaLabel": "Download Data",
+            "text": "Download Data",
+            "triggersMenu": true
+          }
+        ]
+      }
+    ],
+    "menuPortal": {
+      "type": "cdk-overlay-pane",
+      "position": "fixed",
+      "zIndex": 1000,
+      "role": "menu",
+      "items": [
+        {"role": "menuitem", "text": "Download CSV"},
+        {"role": "menuitem", "text": "Download PDF"},
+        {"role": "menuitem", "text": "Download XLSX"},
+        {"role": "menuitem", "text": "Download JSON"},
+        {"role": "menuitem", "text": "Share"}
+      ]
+    }
+  },
+  "criticalFeatures": [
+    "Widget scope filtering - must click button in correct widget",
+    "Shadow DOM traversal - widget content is in shadow root",
+    "CDK overlay detection - menu renders in portal outside widget",
+    "Menu item extraction - must find all 5 menu options",
+    "Most recent menu selection - if multiple menus, select latest opened"
+  ],
+  "regressionTests": [
+    "CandidateFinder should find Download Data button in STORE LOCATION widget, not REVENUE",
+    "MenuDetector should identify CDK overlay as a menu",
+    "MenuDetector should extract all 5 menu items from portal",
+    "When multiple widgets have same button, scope hint should disambiguate"
+  ]
+}

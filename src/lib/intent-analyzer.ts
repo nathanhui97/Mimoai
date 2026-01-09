@@ -9,6 +9,14 @@ import { AICache } from './ai-cache';
 import { aiConfig } from './ai-config';
 import { AIDataBuilder } from '../content/ai-data-builder';
 
+export interface StepTranslation {
+  stepIndex: number;
+  intent: string;
+  precondition: string;
+  expectedOutcome: string;
+  dependencies: number[];
+}
+
 export interface AnalyzedIntent {
   primaryGoal: string;
   subGoals: string[];
@@ -20,6 +28,7 @@ export interface AnalyzedIntent {
     visualIndicator?: string;
     recovery?: string;
   }>;
+  stepTranslations?: StepTranslation[];
 }
 
 export interface IntentAnalysisResult {
@@ -354,6 +363,9 @@ export class IntentAnalyzer {
         confidence: typeof response.intent?.confidence === 'number' ? response.intent.confidence : 0,
         failurePatterns: Array.isArray(response.intent?.failurePatterns) 
           ? response.intent.failurePatterns 
+          : [],
+        stepTranslations: Array.isArray(response.intent?.stepTranslations)
+          ? response.intent.stepTranslations
           : [],
       },
       suggestions: Array.isArray(response.suggestions) ? response.suggestions : [],

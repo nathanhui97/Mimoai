@@ -1,0 +1,70 @@
+{
+  "description": "Salesforce Lightning navigation with aria-labeled buttons",
+  "workflowName": "SFDC Show Navigation Menu",
+  "expectedBehavior": {
+    "scope": "Eats Lightning",
+    "scopeType": "NEAREST_SECTION",
+    "buttonTarget": "Show Navigation Menu",
+    "targetAriaLabel": "Show Navigation Menu"
+  },
+  "domPattern": {
+    "navigation": {
+      "role": "navigation",
+      "class": "slds-context-bar",
+      "buttons": [
+        {
+          "ariaLabel": "Show Navigation Menu",
+          "class": "slds-button slds-icon-waffle_container",
+          "text": "Show Navigation Menu",
+          "expected": true
+        },
+        {
+          "ariaLabel": "Add to Favorites",
+          "class": "slds-button",
+          "text": "Add to Favorites",
+          "expected": false
+        },
+        {
+          "ariaLabel": "Remove favorite",
+          "class": "slds-button",
+          "text": "Remove favorite",
+          "expected": false
+        }
+      ]
+    },
+    "sections": [
+      {
+        "heading": "Eats Lightning",
+        "hasTargetButton": true,
+        "buttons": [
+          {"ariaLabel": "Show Navigation Menu"},
+          {"ariaLabel": "Settings"}
+        ]
+      },
+      {
+        "heading": "Craps Thunder",
+        "hasTargetButton": true,
+        "buttons": [
+          {"ariaLabel": "Show Navigation Menu"},
+          {"ariaLabel": "Dashboard"}
+        ]
+      }
+    ]
+  },
+  "criticalFeatures": [
+    "Aria-label matching - must match exact aria-label text",
+    "NEAREST_SECTION scope - must handle section-based scoping",
+    "Button disambiguation - must not confuse with 'Remove favorite' or 'Add to Favorites'",
+    "Scope filtering with aria-label override - even if scope doesn't match, aria-label should include element"
+  ],
+  "regressionTests": [
+    "CandidateFinder should find button with aria-label='Show Navigation Menu'",
+    "CandidateFinder should NOT select 'Remove favorite' button",
+    "Scope filter should include elements matching recordedAriaLabel even if scopePath doesn't match",
+    "When multiple sections have same button, scope hint should prefer correct section"
+  ],
+  "knownBugs": [
+    "FIXED: Scope filtering was excluding correct button because scopePath didn't match",
+    "FIXED: computeAccessibleName was returning empty for aria-labeled buttons"
+  ]
+}

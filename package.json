@@ -9,7 +9,10 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run src/content/integration-tests",
+    "precommit": "npm run test:integration"
   },
   "dependencies": {
     "react": "^19.2.0",

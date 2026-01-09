@@ -119,6 +119,25 @@ interface DOMAgentRequest {
   domMap?: string;  // Text representation of the DOM
   pageContext?: PageContext;
   goal: string;
+  analyzedIntent?: {
+    primaryGoal: string;
+    subGoals: string[];
+    expectedOutcome: string;
+    visualConfirmation?: string;
+    confidence: number;
+    failurePatterns?: Array<{
+      description: string;
+      visualIndicator?: string;
+      recovery?: string;
+    }>;
+    stepTranslations?: Array<{
+      stepIndex: number;
+      intent: string;
+      precondition: string;
+      expectedOutcome: string;
+      dependencies: number[];
+    }>;
+  };
   hints?: AgentHint[];
   currentHintIndex?: number;
   history?: HistoryEntry[];
@@ -259,6 +278,18 @@ serve(async (req) => {
     const mode = payload.mode || 'dom';
     console.log('Mode:', mode);
     console.log('Goal:', payload.goal);
+    
+    // Log analyzed intent if present
+    if (payload.analyzedIntent) {
+      console.log('✅ Analyzed Intent received:');
+      console.log('  Primary Goal:', payload.analyzedIntent.primaryGoal);
+      console.log('  Expected Outcome:', payload.analyzedIntent.expectedOutcome);
+      console.log('  Confidence:', payload.analyzedIntent.confidence);
+      console.log('  Sub-Goals:', payload.analyzedIntent.subGoals?.length);
+      console.log('  Failure Patterns:', payload.analyzedIntent.failurePatterns?.length);
+    } else {
+      console.log('⚠️ No analyzedIntent in request');
+    }
     
     if (mode === 'recover') {
       console.log('Rejection code:', payload.rejectionCode);
@@ -491,10 +522,34 @@ This context helps you understand the OVERALL INTENT of the workflow, especially
 `;
   }
 
+  // Add workflow intent section (AI-analyzed understanding)
+  let intentSection = '';
+  if (payload.analyzedIntent) {
+    const intent = payload.analyzedIntent;
+    intentSection = `
+## 🧠 WORKFLOW INTENT (AI-Analyzed)
+**Primary Goal:** ${intent.primaryGoal}
+**Expected Outcome:** ${intent.expectedOutcome}
+**Confidence:** ${(intent.confidence * 100).toFixed(0)}%
+
+**Checkpoints:**
+${intent.subGoals.map((sg, i) => `${i + 1}. ${sg}`).join('\n')}
+
+${intent.failurePatterns?.length ? `**Watch For:**
+${intent.failurePatterns.map(fp => `- ${fp.description}${fp.visualIndicator ? ` (look for: ${fp.visualIndicator})` : ''}`).join('\n')}
+
+` : ''}Use this understanding to make smarter decisions:
+- Skip steps if expectedOutcome is already achieved
+- Recognize failure patterns early and attempt recovery
+- Prioritize actions that advance toward the primaryGoal
+`;
+  }
+
   const prompt = `You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
 
 IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.
 ${taskSummarySection}
+${intentSection}
 ${prioritySection}
 ${variableSection}
 ${spreadsheetSection}
