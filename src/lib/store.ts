@@ -88,11 +88,24 @@ export const useExtensionStore = create<ExtensionStore>((set) => ({
     set((state) => {
       // Prevent duplicate steps based on timestamp (within 100ms window)
       const stepTimestamp = step.payload.timestamp;
-      const isDuplicate = state.workflowSteps.some(
+      const existingIndex = state.workflowSteps.findIndex(
         (existingStep) => Math.abs(existingStep.payload.timestamp - stepTimestamp) < 100
       );
       
-      if (isDuplicate) {
+      if (existingIndex >= 0) {
+        const existing = state.workflowSteps[existingIndex];
+        
+        // Check if new step has more complete data (e.g., dropdown options)
+        const hasMoreData = (step.payload as any).context?.decisionSpace?.options?.length > 0 &&
+                           !(existing.payload as any).context?.decisionSpace?.options;
+        
+        if (hasMoreData) {
+          console.log('[Store] Updating duplicate step with more complete data:', step.type, stepTimestamp);
+          const updated = [...state.workflowSteps];
+          updated[existingIndex] = step; // Replace with more complete version
+          return { workflowSteps: updated };
+        }
+        
         console.warn('[Store] Prevented duplicate step addition:', step.type, stepTimestamp);
         return state; // Return unchanged state
       }

@@ -217,8 +217,17 @@ function App() {
           total: event.stepTotal,
         });
       } else if (message.type === 'RECORDED_STEP' && message.payload?.step) {
+        const receivedStep = message.payload.step;
+        console.log('[App] 📨 Received RECORDED_STEP message:', {
+          type: receivedStep.type,
+          hasPayload: !!receivedStep.payload,
+          hasContext: !!(receivedStep.payload as any)?.context,
+          hasDecisionSpace: !!(receivedStep.payload as any)?.context?.decisionSpace,
+          decisionSpaceOptions: (receivedStep.payload as any)?.context?.decisionSpace?.options?.length || 0,
+        });
+        
         // Use the store actions directly instead of from hook to avoid stale closures
-        useExtensionStore.getState().addWorkflowStep(message.payload.step);
+        useExtensionStore.getState().addWorkflowStep(receivedStep);
         
         // Track tab metadata
         const tabIndex = message.payload.tabIndex;
@@ -535,10 +544,10 @@ function App() {
           // This is more reliable than trying to detect headers programmatically
           console.log('[App] 📊 Spreadsheet variable detection will use cell references as default names');
           
-          // Use AI-based variable detection
-          console.log('[App] Calling AI VariableDetector.detectVariables...');
-          const variables = await VariableDetector.detectVariables(currentSteps, initialFullPageSnapshot);
-          console.log('[App] ✅ AI Variable detection completed:', {
+          // Use simplified variable detection (no AI needed)
+          console.log('[App] Calling simplified VariableDetector.detectVariablesSimplified...');
+          const variables = VariableDetector.detectVariablesSimplified(currentSteps);
+          console.log('[App] ✅ Simplified variable detection completed:', {
             totalVariables: variables.variables.length,
             analysisCount: variables.analysisCount,
             variables: variables.variables.map(v => ({
@@ -612,7 +621,17 @@ function App() {
   };
 
   const handleSaveWorkflow = async () => {
+    console.log('[SaveWorkflow] 🚀 Save button clicked', {
+      hasName: !!workflowName.trim(),
+      workflowName: workflowName,
+      stepsCount: workflowSteps.length,
+    });
+    
     if (!workflowName.trim() || workflowSteps.length === 0) {
+      console.warn('[SaveWorkflow] ❌ Cannot save: missing name or no steps', {
+        workflowName: workflowName,
+        stepsCount: workflowSteps.length,
+      });
       return;
     }
 
@@ -631,13 +650,31 @@ function App() {
       // Start variable detection
       setIsDetectingVariables(true);
       
-      // Detect variables using AI vision analysis (if enabled)
-      // Always use AI-based variable detection
-      console.log('[SaveWorkflow] Starting AI variable detection for', sortedSteps.length, 'steps');
-      console.log('[SaveWorkflow] Step types:', sortedSteps.map(s => ({ type: s.type, hasSnapshot: isWorkflowStepPayload(s.payload) ? !!s.payload.visualSnapshot : false })));
-      // For saved workflows, we don't have the initial snapshot, so pass null
-      const variables = await VariableDetector.detectVariables(sortedSteps, null);
-      console.log('[SaveWorkflow] AI variables detected:', JSON.stringify(variables, null, 2));
+      // Detect variables using simplified deterministic rules (no AI needed)
+      // NEW: Use simplified detection - all INPUT steps with values are variables
+      console.log('[SaveWorkflow] ========================================');
+      console.log('[SaveWorkflow] Starting simplified variable detection for', sortedSteps.length, 'steps');
+      console.log('[SaveWorkflow] Step breakdown:', sortedSteps.map((s, i) => ({ 
+        index: i,
+        type: s.type, 
+        hasPayload: isWorkflowStepPayload(s.payload),
+        hasValue: isWorkflowStepPayload(s.payload) ? !!s.payload.value : false,
+        value: isWorkflowStepPayload(s.payload) ? s.payload.value?.substring(0, 30) : 'N/A',
+        label: isWorkflowStepPayload(s.payload) ? s.payload.label : 'N/A',
+      })));
+      
+      const variables = VariableDetector.detectVariablesSimplified(sortedSteps);
+      
+      console.log('[SaveWorkflow] ========================================');
+      console.log('[SaveWorkflow] VARIABLE DETECTION COMPLETE');
+      console.log('[SaveWorkflow] Total variables detected:', variables.variables.length);
+      console.log('[SaveWorkflow] Variables:', variables.variables.map(v => ({
+        fieldName: v.fieldName,
+        variableName: v.variableName,
+        defaultValue: v.defaultValue?.substring(0, 30),
+        stepIndex: v.stepIndex,
+      })));
+      console.log('[SaveWorkflow] ========================================');
 
       // OPTIMIZATION DISABLED - Breaks AI Agent workflows
       // The optimizer removes "redundant" clicks that are actually ESSENTIAL for UI flow
@@ -1099,6 +1136,42 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
+  /**
+   * Export a specific workflow as JSON
+   */
+  const handleExportWorkflowJSON = (workflow: SavedWorkflow) => {
+    const json = JSON.stringify(workflow, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const filename = `ghostwriter-${workflow.name.replace(/[^a-z0-9]/gi, '-')}-${Date.now()}.json`;
+    
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  /**
+   * Delete a workflow
+   */
+  const handleDeleteWorkflow = async (workflowId: string) => {
+    if (!confirm('Are you sure you want to delete this task?')) {
+      return;
+    }
+    
+    try {
+      await WorkflowStorage.deleteWorkflow(workflowId);
+      const workflows = await WorkflowStorage.loadWorkflows();
+      setSavedWorkflows(workflows);
+    } catch (error) {
+      console.error('Error deleting workflow:', error);
+      setError(error instanceof Error ? error.message : 'Failed to delete workflow');
+    }
+  };
+
   // Conversational interface handlers
   const handleSearch = async (query: string) => {
     setTaskQuery(query);
@@ -1223,19 +1296,43 @@ function App() {
                 Choose a task below or type what you'd like to do
               </p>
               
-              {/* Task Bubbles */}
+              {/* Task Cards */}
               {savedWorkflows.length > 0 && (
                 <div className="mb-4">
-                  <div className="flex flex-wrap gap-2 mb-2">
+                  <div className="space-y-2 mb-2">
                     {savedWorkflows.map((workflow) => (
-                      <button
+                      <div
                         key={workflow.id}
-                        onClick={() => handleTaskSelect(workflow)}
-                        disabled={isExecuting}
-                        className="px-4 py-2 bg-muted border border-border rounded-full text-sm text-foreground hover:bg-primary/10 hover:border-primary transition-colors disabled:opacity-50"
+                        className="flex items-center gap-2 p-3 bg-card border border-border rounded-md hover:border-primary/50 transition-colors"
                       >
-                        {workflow.name}
-                      </button>
+                        <button
+                          onClick={() => handleTaskSelect(workflow)}
+                          disabled={isExecuting}
+                          className="flex-1 text-left px-3 py-2 bg-muted border border-border rounded-md text-sm text-foreground hover:bg-primary/10 hover:border-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {workflow.name}
+                        </button>
+                        <button
+                          onClick={() => handleExportWorkflowJSON(workflow)}
+                          disabled={isExecuting}
+                          className="px-3 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Export as JSON"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                        </button>
+                        <button
+                          onClick={() => handleDeleteWorkflow(workflow.id)}
+                          disabled={isExecuting}
+                          className="px-3 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Delete task"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
                     ))}
                   </div>
                   
@@ -1243,7 +1340,7 @@ function App() {
                   <button
                     onClick={handleStartRecording}
                     disabled={state === 'CONNECTING'}
-                    className="px-4 py-2 bg-background border border-dashed border-border rounded-full text-sm text-muted-foreground hover:text-foreground hover:border-primary transition-colors disabled:opacity-50"
+                    className="w-full px-4 py-2 bg-background border border-dashed border-border rounded-md text-sm text-muted-foreground hover:text-foreground hover:border-primary transition-colors disabled:opacity-50"
                   >
                     + Teach me something new
                   </button>

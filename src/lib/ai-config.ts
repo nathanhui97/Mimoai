@@ -21,6 +21,7 @@ export interface AIConfig {
   visualAnalysisEdgeFunctionName: string;
   analyzeIntentEdgeFunctionName: string;
   detectVariablesEdgeFunctionName: string;
+  extractFieldLabelEdgeFunctionName: string; // AI vision label extraction
   visualAnalysisTimeout: number;
   // Visual AI Click function (95-99% accuracy fallback)
   visualClickEdgeFunctionName: string;
@@ -30,6 +31,7 @@ export interface AIConfig {
   visualAnalysisEnabled: boolean;
   correctionLearningEnabled: boolean;
   aiSelfHealingEnabled: boolean;
+  aiLabelEnhancementEnabled: boolean; // Enable AI label enhancement for low-confidence labels
   // Timeouts
   timeout: number;
   localCacheTTL: number;
@@ -64,6 +66,7 @@ class AIConfigManager {
       visualAnalysisEdgeFunctionName: 'visual_analysis',
       analyzeIntentEdgeFunctionName: 'analyze_intent',
       detectVariablesEdgeFunctionName: 'detect_variables',
+      extractFieldLabelEdgeFunctionName: 'extract_field_label', // AI vision label extraction
       visualAnalysisTimeout: 20000, // 20 seconds for visual analysis (images are larger)
       
       // Visual AI Click (95-99% accuracy final fallback)
@@ -75,6 +78,7 @@ class AIConfigManager {
       visualAnalysisEnabled: true, // Enable visual analysis features
       correctionLearningEnabled: true, // Enable learning from user corrections
       aiSelfHealingEnabled: true, // Enable AI-powered self-healing during replay
+      aiLabelEnhancementEnabled: true, // Enable AI label enhancement for low-confidence labels
       
       // Timeouts
       timeout: 10000, // 10 seconds for standard Edge Function calls
@@ -122,6 +126,13 @@ class AIConfigManager {
    */
   isAISelfHealingEnabled(): boolean {
     return this.config.enabled && this.config.aiSelfHealingEnabled;
+  }
+
+  /**
+   * Check if AI label enhancement is enabled
+   */
+  isAILabelEnhancementEnabled(): boolean {
+    return this.config.enabled && this.config.aiLabelEnhancementEnabled;
   }
 
   /**

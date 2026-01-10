@@ -186,9 +186,14 @@ export class NavigationOptimizer {
     // Step 3: Generate optimized workflow
     const result = this.generateOptimizedWorkflow(steps, classifiedSequences, opts);
 
-    console.log(`🔧 NavigationOptimizer: Optimization complete - ${result.metadata.stepsRemoved} steps removed`);
+    console.log(`🔧 NavigationOptimizer: Navigation optimization complete - ${result.metadata.stepsRemoved} steps removed`);
     
-    return result;
+    // Step 4: Consolidate duplicate INPUT and SCROLL steps
+    const consolidatedResult = this.consolidateDuplicateSteps(result.optimizedSteps, result.metadata.optimizationMap);
+    
+    console.log(`🔧 NavigationOptimizer: Total optimization complete - ${consolidatedResult.metadata.stepsRemoved} steps removed (${result.optimizedSteps.length} → ${consolidatedResult.optimizedSteps.length})`);
+    
+    return consolidatedResult;
   }
 
   // ============================================================================
@@ -939,6 +944,142 @@ export class NavigationOptimizer {
     
     if (confidences.length === 0) return undefined;
     return confidences.reduce((a, b) => a + b, 0) / confidences.length;
+  }
+
+  // ============================================================================
+  // Step Consolidation (INPUT/SCROLL Deduplication)
+  // ============================================================================
+
+  /**
+   * Consolidate duplicate INPUT and SCROLL steps
+   * - For INPUT: Keep only the final value for each field (remove intermediate keystrokes)
+   * - For SCROLL: Combine sequential scrolls in the same direction
+   */
+  private consolidateDuplicateSteps(
+    steps: WorkflowStep[],
+    existingMap: OptimizationMapEntry[]
+  ): OptimizationResult {
+    const consolidatedSteps: WorkflowStep[] = [];
+    const consolidationMap: OptimizationMapEntry[] = [...existingMap];
+    let additionalStepsRemoved = 0;
+
+    // Track which original indices are being consolidated
+    const originalIndexMap = new Map<number, number>(); // original → optimized
+    
+    // Build reverse map from existing optimization map
+    for (const entry of existingMap) {
+      for (const originalIdx of entry.originalIndices) {
+        originalIndexMap.set(originalIdx, entry.optimizedIndex);
+      }
+    }
+
+    let i = 0;
+    while (i < steps.length) {
+      const step = steps[i];
+      const payload = isWorkflowStepPayload(step.payload) ? step.payload : null;
+
+      // ====== INPUT CONSOLIDATION ======
+      if (step.type === 'INPUT' && payload) {
+        // Look ahead for more INPUT steps on the same field
+        const fieldSelector = payload.selector;
+        const fieldLabel = payload.label;
+        let lastInputStep = step;
+        let lastInputIndex = i;
+        const consolidatedIndices = [i];
+
+        // Scan forward for consecutive INPUT steps on the same field
+        let j = i + 1;
+        while (j < steps.length) {
+          const nextStep = steps[j];
+          const nextPayload = isWorkflowStepPayload(nextStep.payload) ? nextStep.payload : null;
+
+          // Stop if we hit a non-INPUT step or different field
+          if (nextStep.type !== 'INPUT' || !nextPayload) break;
+          if (nextPayload.selector !== fieldSelector && nextPayload.label !== fieldLabel) break;
+
+          // Same field - this is an intermediate keystroke
+          lastInputStep = nextStep;
+          lastInputIndex = j;
+          consolidatedIndices.push(j);
+          j++;
+        }
+
+        // If we found duplicates, keep only the last one
+        if (consolidatedIndices.length > 1) {
+          console.log(`🔧 Consolidating ${consolidatedIndices.length} INPUT steps → keeping final value:`, 
+            (isWorkflowStepPayload(lastInputStep.payload) ? lastInputStep.payload.value : ''));
+          
+          consolidatedSteps.push(lastInputStep);
+          additionalStepsRemoved += consolidatedIndices.length - 1;
+
+          // Add to consolidation map
+          consolidationMap.push({
+            originalIndices: consolidatedIndices,
+            optimizedIndex: consolidatedSteps.length - 1,
+            reason: `Consolidated ${consolidatedIndices.length} INPUT keystrokes → final value`,
+            decisionMethod: 'rule-based',
+          });
+
+          // Skip all the intermediate steps
+          i = lastInputIndex + 1;
+          continue;
+        }
+      }
+
+      // ====== SCROLL CONSOLIDATION ======
+      if (step.type === 'SCROLL' && payload) {
+        // Look ahead for consecutive SCROLL steps
+        const scrollSteps = [step];
+        const consolidatedIndices = [i];
+
+        let j = i + 1;
+        while (j < steps.length && steps[j].type === 'SCROLL') {
+          scrollSteps.push(steps[j]);
+          consolidatedIndices.push(j);
+          j++;
+        }
+
+        // If we found multiple scrolls, combine them
+        if (scrollSteps.length > 1) {
+          console.log(`🔧 Consolidating ${scrollSteps.length} SCROLL steps → single scroll`);
+          
+          // Keep the last scroll (it represents the final scroll position)
+          const lastScroll = scrollSteps[scrollSteps.length - 1];
+          consolidatedSteps.push(lastScroll);
+          additionalStepsRemoved += scrollSteps.length - 1;
+
+          // Add to consolidation map
+          consolidationMap.push({
+            originalIndices: consolidatedIndices,
+            optimizedIndex: consolidatedSteps.length - 1,
+            reason: `Consolidated ${scrollSteps.length} SCROLL steps → final position`,
+            decisionMethod: 'rule-based',
+          });
+
+          // Skip all the scroll steps
+          i = j;
+          continue;
+        }
+      }
+
+      // Keep step as-is
+      consolidatedSteps.push(step);
+      i++;
+    }
+
+    // Update metadata
+    const metadata: OptimizationMetadata = {
+      analyzedAt: Date.now(),
+      sequencesFound: 0, // Only navigation sequences tracked separately
+      sequencesOptimized: 0,
+      stepsRemoved: existingMap.reduce((sum, entry) => {
+        return sum + (entry.originalIndices.length > 1 && entry.optimizedIndex === -1 ? entry.originalIndices.length : 0);
+      }, 0) + additionalStepsRemoved,
+      aiAnalysisUsed: false,
+      optimizationMap: consolidationMap,
+    };
+
+    return { optimizedSteps: consolidatedSteps, metadata };
   }
 }
 

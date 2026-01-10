@@ -191,7 +191,7 @@ export interface AgentAction {
 export interface AgentHint {
   stepNumber: number;
   description: string;
-  actionType: 'click' | 'type' | 'navigate' | 'scroll' | 'other';
+  actionType: 'click' | 'type' | 'select' | 'navigate' | 'scroll' | 'other';
   targetText?: string;
   targetRole?: string;
   targetPlaceholder?: string; // For input fields

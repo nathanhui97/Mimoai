@@ -92,8 +92,21 @@ export function VariableInputForm({
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const variable of variables.variables) {
-      initial[variable.variableName] = variable.defaultValue || '';
+      // For dropdowns, ensure default value exists in options
+      if (variable.isDropdown && variable.options && variable.options.length > 0) {
+        const defaultInOptions = variable.options.includes(variable.defaultValue || '');
+        initial[variable.variableName] = defaultInOptions ? (variable.defaultValue || '') : variable.options[0];
+        console.log('[VariableInputForm] Dropdown init:', {
+          variableName: variable.variableName,
+          defaultValue: variable.defaultValue,
+          defaultInOptions,
+          selectedValue: initial[variable.variableName],
+        });
+      } else {
+        initial[variable.variableName] = variable.defaultValue || '';
+      }
     }
+    console.log('[VariableInputForm] Initial values:', initial);
     return initial;
   });
 
@@ -111,7 +124,12 @@ export function VariableInputForm({
    * Handle input change
    */
   const handleChange = (variableName: string, value: string) => {
-    setValues(prev => ({ ...prev, [variableName]: value }));
+    console.log('[VariableInputForm] Value changed:', { variableName, value, previousValues: values });
+    setValues(prev => {
+      const next = { ...prev, [variableName]: value };
+      console.log('[VariableInputForm] Updated values:', next);
+      return next;
+    });
     
     // Clear error when user types
     if (errors[variableName]) {
@@ -263,8 +281,15 @@ export function VariableInputForm({
                 {variable.isDropdown && variable.options && variable.options.length > 0 ? (
                   <select
                     id={variable.variableName}
-                    value={values[variable.variableName]}
-                    onChange={(e) => handleChange(variable.variableName, e.target.value)}
+                    value={values[variable.variableName] || variable.options[0]}
+                    onChange={(e) => {
+                      console.log('[VariableInputForm] Dropdown changed:', {
+                        variableName: variable.variableName,
+                        newValue: e.target.value,
+                        allValues: values,
+                      });
+                      handleChange(variable.variableName, e.target.value);
+                    }}
                     onBlur={() => handleBlur(variable)}
                     className={`w-full px-3 py-2 border rounded-md bg-background text-foreground ${
                       hasError 

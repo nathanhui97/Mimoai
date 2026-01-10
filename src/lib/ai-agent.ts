@@ -200,7 +200,7 @@ export interface AgentAction {
 export interface AgentHint {
   stepNumber: number;
   description: string;
-  actionType: 'click' | 'type' | 'navigate' | 'scroll' | 'other';
+  actionType: 'click' | 'type' | 'select' | 'navigate' | 'scroll' | 'other';
   targetText?: string;
   targetRole?: string;
   targetPlaceholder?: string; // For input fields
@@ -2399,6 +2399,34 @@ export class AIAgent {
         result = JSON.parse(responseText);
         console.log('[AIAgent] Parsed result:', result);
         console.log('[AIAgent] 📥 AI returned hintStepIndex:', result.hintStepIndex, '(expected:', payload.currentHintIndex, ')');
+        
+        // CRITICAL: Ensure SELECT actions have the option parameter set from hint
+        const currentHint = this.state.hints[payload.currentHintIndex];
+        
+        // Case 1: Override AI's 'click' to 'select' when hint specified dropdown
+        if (currentHint?.actionType === 'select' && result.action === 'click') {
+          console.log('[AIAgent] 📋 Overriding AI action "click" → "select" (hint specified dropdown selection)');
+          result.action = 'select';
+        }
+        
+        // Case 2: Ensure option is set for ALL select actions (whether AI returned select or we overrode)
+        // This handles: 
+        //   - AI returns 'click' but hint says 'select' (overridden above)
+        //   - AI returns 'select' but doesn't include option param
+        //   - AI returns 'select' with option, but we want to use hint's value (variable substitution)
+        if (result.action === 'select' && currentHint?.actionType === 'select') {
+          const optionToSelect = currentHint.value || currentHint.targetText;
+          if (optionToSelect && !result.option) {
+            result.option = optionToSelect;
+            console.log('[AIAgent] 📋 Setting option parameter from hint:', result.option);
+          } else if (optionToSelect && result.option !== optionToSelect) {
+            // If AI returned a different option, prefer hint's value (for variable substitution)
+            console.log('[AIAgent] 📋 Overriding AI option with hint value:', optionToSelect, '(AI had:', result.option, ')');
+            result.option = optionToSelect;
+          } else if (!optionToSelect) {
+            console.warn('[AIAgent] ⚠️ No option value found in hint (value or targetText missing)');
+          }
+        }
       } catch (parseError) {
         console.error('[AIAgent] JSON parse error:', parseError);
         console.error('[AIAgent] Response was:', responseText);
@@ -2482,9 +2510,14 @@ export class AIAgent {
       fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai-agent.ts:2177',message:'FINAL_SCOPE_USED',data:{finalScope:scopeHintFromHint,inheritedScopeHint,recordedScope:nextIncompleteHint?.recordedScopeHint,candidateWidget:resolvedTarget?.scopeHint,candidateIndex,targetRole:resolvedTarget?.role,targetName:resolvedTarget?.name?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
       // #endregion
       
+      // Check if we overrode the action to 'select'
+      const finalActionType = result.action || 'fail';
+      
       const action: AgentAction = {
-        type: result.action || 'fail',
+        type: finalActionType,
         params: {
+          // For SELECT actions, include the option parameter
+          ...(finalActionType === 'select' && result.option ? { option: result.option } : {}),
           // Semantic target for element identification
           target: resolvedTarget ? {
             role: resolvedTarget.role,

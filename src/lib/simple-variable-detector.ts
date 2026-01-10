@@ -1,10 +1,13 @@
 /**
  * Simple Variable Detector (No AI Required)
  * 
- * Detects variables using pattern-based rules:
- * - All INPUT steps are variables (unless blacklisted patterns)
- * - All dropdown/select CLICK steps are variables
- * - Navigation buttons are excluded
+ * Detects variables using deterministic rules:
+ * - All INPUT steps with values → VARIABLES (user typed data)
+ * - CLICK steps on choice elements → VARIABLES (dropdown, radio, checkbox)
+ * - CLICK steps on buttons → NOT VARIABLES (actions like Submit, Save)
+ * 
+ * This is the primary detector - AI is only used for label enhancement,
+ * not for deciding whether something is a variable.
  */
 
 import type { WorkflowStep, WorkflowStepPayload } from '../types/workflow';
@@ -31,11 +34,14 @@ const VARIABLE_FIELD_PATTERNS = [
   'search', 'query', 'filter',
 ];
 
-// Roles that indicate selectable options
+// Roles that indicate selectable options (choice elements = variables)
 const SELECTABLE_ROLES = [
-  'option', 'radio', 'checkbox', 'menuitem', 'menuitemradio', 'menuitemcheckbox',
-  'listitem', 'treeitem', 'tab', 'switch',
+  'option', 'radio', 'checkbox', 'menuitemradio', 'menuitemcheckbox',
+  'listitem', 'switch',
 ];
+
+// Roles that indicate buttons (NOT variables)
+const BUTTON_ROLES = ['button', 'link', 'menuitem', 'tab', 'treeitem'];
 
 export class SimpleVariableDetector {
   /**
@@ -123,6 +129,7 @@ export class SimpleVariableDetector {
   
   /**
    * Create variable from CLICK step (dropdown/select/checkbox)
+   * Only creates variable for choice elements, NOT buttons
    */
   private static createClickVariable(
     stepIndex: number,
@@ -132,11 +139,17 @@ export class SimpleVariableDetector {
     const elementText = payload.elementText || payload.label;
     if (!elementText) return null;
     
-    // Check if this is a selectable option
+    // FIRST: Check if this is a button (buttons are NOT variables)
+    if (this.isButtonElement(payload)) {
+      console.log('[SimpleVariableDetector] ⏭️ Skipping button:', elementText.substring(0, 30));
+      return null;
+    }
+    
+    // Check if this is a selectable option (choice element)
     const isSelectable = this.isSelectableOption(payload);
     if (!isSelectable) return null;
     
-    // Check if this is a navigation button (exclude these)
+    // Double-check: navigation text patterns (buttons with action text)
     if (this.isNavigationButton(elementText)) {
       console.log('[SimpleVariableDetector] ⏭️ Skipping navigation button:', elementText);
       return null;
@@ -153,6 +166,9 @@ export class SimpleVariableDetector {
     // Check if this is a dropdown
     const isDropdown = this.isDropdown(payload);
     
+    // Get available options from decisionSpace if available
+    const options = payload.context?.decisionSpace?.options || [];
+    
     return {
       stepIndex,
       stepId,
@@ -162,8 +178,9 @@ export class SimpleVariableDetector {
       defaultValue: elementText,
       isVariable: true,
       confidence: 0.8,
-      reasoning: isDropdown ? 'Pattern-based detection: Dropdown option' : 'Pattern-based detection: Selectable option',
+      reasoning: isDropdown ? 'Choice selection: Dropdown option' : 'Choice selection: Selectable option',
       isDropdown,
+      options: options.length > 0 ? options : undefined,
     };
   }
   
@@ -201,6 +218,26 @@ export class SimpleVariableDetector {
            false;
   }
   
+  /**
+   * Check if element is a button (NOT a variable)
+   */
+  private static isButtonElement(payload: WorkflowStepPayload): boolean {
+    const role = (payload.elementRole || '').toLowerCase();
+    const inputType = payload.inputDetails?.type?.toLowerCase();
+    const selector = (payload.selector || '').toLowerCase();
+
+    // Check by role
+    if (BUTTON_ROLES.includes(role)) return true;
+
+    // Check by input type
+    if (inputType === 'submit' || inputType === 'button' || inputType === 'reset') return true;
+
+    // Check by tag in selector
+    if (selector.startsWith('button') || selector.includes('button[')) return true;
+
+    return false;
+  }
+
   /**
    * Check if this is a navigation button (should not be a variable)
    */

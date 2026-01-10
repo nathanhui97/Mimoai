@@ -422,6 +422,10 @@ export class Tier1Executor {
   private static async executeSelect(action: AgentAction): Promise<Tier1ExecutionResult> {
     const { target, option } = action.params;
     
+    console.log('[Tier1] 🎯 Executing SELECT for dropdown');
+    console.log('[Tier1] Option to select:', option);
+    console.log('[Tier1] Target:', target);
+    
     if (!option) {
       return {
         status: 'rejected',
@@ -431,8 +435,13 @@ export class Tier1Executor {
       };
     }
     
-    // First, open dropdown if target specified
-    if (target) {
+    // Check if dropdown is already open
+    const dropdownAlreadyOpen = document.querySelectorAll('[role="option"]').length > 0;
+    console.log('[Tier1] Dropdown already open:', dropdownAlreadyOpen);
+    
+    // Open dropdown if not already open
+    if (!dropdownAlreadyOpen && target) {
+      console.log('[Tier1] Opening dropdown first...');
       const clickResult = await this.executeClick({
         ...action,
         type: 'click',
@@ -443,26 +452,66 @@ export class Tier1Executor {
         return clickResult;
       }
       
-      // Wait for dropdown to open (optimized from 300ms)
+      // Wait for dropdown to open
       await new Promise(resolve => setTimeout(resolve, 150));
+    } else if (dropdownAlreadyOpen) {
+      console.log('[Tier1] ✅ Dropdown already open, skipping trigger click');
     }
     
-    // Find and click option
-    const optionTarget: SemanticTarget = {
-      role: 'option',
-      text: option,
-    };
+    // Find and click option - use ONLY the option text, ignore recorded selectors
+    console.log('[Tier1] Searching for dropdown option with text:', option);
     
-    const bundle = this.buildLocatorBundle(optionTarget);
-    const intent: Intent = { kind: 'SELECT_DROPDOWN_OPTION', optionVar: 'option' };
-    const resolveResult = await this.resolveElement(bundle, intent);
+    // STRATEGY 1: Try simple query selector first
+    console.log('[Tier1] Strategy 1: Querying for [role="option"] elements...');
+    const allOptions = document.querySelectorAll('[role="option"]');
+    console.log('[Tier1] Found', allOptions.length, 'option elements total');
     
-    if (resolveResult.status !== 'success') {
-      return resolveResult;
+    let matchedOption: Element | null = null;
+    for (const opt of allOptions) {
+      const optText = opt.textContent?.trim();
+      console.log('[Tier1] Checking option:', optText);
+      if (optText === option) {
+        matchedOption = opt;
+        console.log('[Tier1] ✅ Exact match found!');
+        break;
+      }
     }
     
-    const element = resolveResult.details.element!;
-    this.clickElement(element);
+    // STRATEGY 2: Use resolver as fallback
+    if (!matchedOption) {
+      console.log('[Tier1] Strategy 2: Using resolver...');
+      const optionTarget: SemanticTarget = {
+        role: 'option',
+        text: option,
+      };
+      
+      const bundle = this.buildLocatorBundle(optionTarget);
+      bundle.recordedFallbackSelectors = []; // Clear recorded selectors
+      console.log('[Tier1] Cleared recorded fallback selectors (using fresh search)');
+      
+      const intent: Intent = { kind: 'SELECT_DROPDOWN_OPTION', optionVar: 'option' };
+      const resolveResult = await this.resolveElement(bundle, intent);
+      
+      if (resolveResult.status !== 'success') {
+        console.error('[Tier1] ❌ Failed to find option:', option);
+        console.error('[Tier1] Available options:', Array.from(allOptions).map(o => o.textContent?.trim()));
+        return resolveResult;
+      }
+      
+      matchedOption = resolveResult.details.element!;
+    }
+    
+    if (!matchedOption) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: `Option "${option}" not found in dropdown`,
+      };
+    }
+    
+    console.log('[Tier1] ✅ Found option element, clicking:', option);
+    this.clickElement(matchedOption);
     
     await StateWaitEngine.waitForStability({
       domQuietMs: 150,
@@ -471,7 +520,7 @@ export class Tier1Executor {
     
     return {
       status: 'success',
-      details: { element },
+      details: { element: matchedOption },
     };
   }
 

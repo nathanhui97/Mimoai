@@ -7,6 +7,7 @@
 
 import { SelectorEngine } from './selector-engine';
 import { LabelFinder } from './label-finder';
+// DropdownOptionScanner - options now captured directly via MenuDetector + DOM scanning
 import { ElementContext } from './element-context';
 import { ElementSimilarity } from './element-similarity';
 import { ElementStateCapture } from './element-state';
@@ -19,6 +20,8 @@ import { ContextScanner } from './context-scanner';
 import { SheetStateExtractor } from './sheet-state-extractor';
 import { VisualSnapshotService, type AnnotatedCaptureResult } from './visual-snapshot';
 import { AIService } from '../lib/ai-service';
+import { aiLabelEnhancer } from '../lib/ai-label-enhancer';
+import { aiConfig } from '../lib/ai-config';
 // import { VisualAnalysisService } from '../lib/visual-analysis'; // Removed to prevent zoom issues
 import { DOMDistiller } from '../lib/dom-distiller';
 import { PIIScrubber } from '../lib/pii-scrubber';
@@ -40,6 +43,7 @@ import { ElementFinder } from './recording/element-finder';
 import { StepPublisher } from './recording/step-publisher';
 import { StepEnricher } from './recording/step-enricher';
 import { MenuDetector, UNIVERSAL_MENU_SELECTORS } from './menu-detector';
+import { InteractionDetector } from './interaction-detector';
 
 export class RecordingManager {
   // Feature flag for reliable replayer enhancements
@@ -1267,7 +1271,47 @@ export class RecordingManager {
           // Capture click coordinates for annotation
           const clickPoint = this.pendingClickPoint || { x: event.clientX, y: event.clientY };
           
+          // CAPTURE DROPDOWN OPTIONS: Get all available options when selecting from a dropdown
+          let dropdownOptions: string[] | undefined;
+          
           if (shouldTreatAsDropdownItem) {
+            try {
+              console.log('📋 GhostWriter: Scanning for dropdown options...');
+              
+              // Find the parent dropdown menu/listbox that contains this option
+              const dropdownContainer = MenuDetector.findParentMenu(target);
+              
+              if (dropdownContainer) {
+                console.log('📋 GhostWriter: Found dropdown container:', dropdownContainer.tagName, dropdownContainer.className?.toString().substring(0, 50));
+                
+                // Scan for options ONLY within this specific dropdown container
+                const options: string[] = [];
+                const optionElements = dropdownContainer.querySelectorAll('[role="option"], li[role="presentation"]');
+                
+                console.log('📋 GhostWriter: Found', optionElements.length, 'option elements in container');
+                
+                optionElements.forEach(opt => {
+                  const text = opt.textContent?.trim();
+                  if (text && text.length > 0 && text.length < 200) {
+                    options.push(text);
+                  }
+                });
+                
+                if (options.length > 0 && options.length < 100) { // Sanity check: max 100 options per dropdown
+                  dropdownOptions = Array.from(new Set(options)); // Deduplicate
+                  console.log(`📋 GhostWriter: Captured ${dropdownOptions.length} unique dropdown options:`, dropdownOptions.slice(0, 5));
+                } else if (options.length >= 100) {
+                  console.warn('📋 GhostWriter: Too many options detected (', options.length, '), likely capturing all page dropdowns - skipping');
+                } else {
+                  console.log('📋 GhostWriter: No valid options found');
+                }
+              } else {
+                console.log('📋 GhostWriter: No dropdown container found for option');
+              }
+            } catch (optionErr) {
+              console.warn('📋 GhostWriter: Error scanning dropdown options:', optionErr);
+            }
+            
             // For dropdown items, capture a fresh snapshot to ensure we get the actual dropdown item
             try {
               console.log('📸 GhostWriter: Capturing fresh annotated snapshot for dropdown item');
@@ -1368,6 +1412,10 @@ export class RecordingManager {
             this.pendingClickPoint = null;
           }
 
+          // UNIFIED INTERACTION DETECTION: Detect interaction type once
+          const interactionType = InteractionDetector.detect(target, event, dropdownOptions);
+          console.log('[RecordingManager] Detected interaction type:', interactionType);
+
           // Phase 6: Capture AI Evidence (context snapshot)
           const contextSnapshot = DOMDistiller.captureInteractionContext(actualElement as HTMLElement);
 
@@ -1419,8 +1467,46 @@ export class RecordingManager {
               uniqueAttributes: Object.keys(disambiguationAttrs).length > 0 ? disambiguationAttrs : undefined,
             formContext: context.formContext,
             // Capture semantic coordinates for AI interpretation (includes decisionSpace)
-            ...ContextScanner.scan(target),
-          } : ContextScanner.scan(target),
+            ...(() => {
+              const scanned = ContextScanner.scan(target);
+              console.log('📋 GhostWriter: Building context - dropdownOptions available:', !!dropdownOptions, 'count:', dropdownOptions?.length || 0);
+              // ENHANCEMENT: Add captured dropdown options to decisionSpace
+              if (dropdownOptions && dropdownOptions.length > 0) {
+            if (!scanned.decisionSpace) {
+              scanned.decisionSpace = {
+                type: 'LIST_SELECTION',
+                selectedText: elementText || '',
+                selectedIndex: dropdownOptions.indexOf(elementText || '') !== -1 ? dropdownOptions.indexOf(elementText || '') : 0,
+                options: dropdownOptions,
+              };
+            } else {
+              scanned.decisionSpace.options = dropdownOptions;
+              scanned.decisionSpace.selectedIndex = dropdownOptions.indexOf(elementText || '') !== -1 ? dropdownOptions.indexOf(elementText || '') : 0;
+            }
+                console.log('📋 GhostWriter: Added dropdown options to decisionSpace:', dropdownOptions.length);
+              }
+              return scanned;
+            })(),
+          } : (() => {
+            const scanned = ContextScanner.scan(target);
+            console.log('📋 GhostWriter: Building context (no context) - dropdownOptions available:', !!dropdownOptions, 'count:', dropdownOptions?.length || 0);
+            // ENHANCEMENT: Add captured dropdown options to decisionSpace
+            if (dropdownOptions && dropdownOptions.length > 0) {
+              if (!scanned.decisionSpace) {
+                scanned.decisionSpace = {
+                  type: 'LIST_SELECTION',
+                  selectedText: elementText || '',
+                  selectedIndex: dropdownOptions.indexOf(elementText || '') !== -1 ? dropdownOptions.indexOf(elementText || '') : 0,
+                  options: dropdownOptions,
+                };
+              } else {
+                scanned.decisionSpace.options = dropdownOptions;
+                scanned.decisionSpace.selectedIndex = dropdownOptions.indexOf(elementText || '') !== -1 ? dropdownOptions.indexOf(elementText || '') : 0;
+              }
+              console.log('📋 GhostWriter: Added dropdown options to decisionSpace (no context):', dropdownOptions.length);
+            }
+            return scanned;
+          })(),
             similarity: similarElements.length > 0 ? {
               similarCount: similarElements.length,
               uniquenessScore,
@@ -1445,6 +1531,8 @@ export class RecordingManager {
             },
             // NEW: Spreadsheet context for AI comprehension
             spreadsheetContext: spreadsheetContext || undefined,
+            // Unified Interaction Type Detection
+            interactionType: interactionType,
           };
 
           // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
@@ -1529,6 +1617,7 @@ export class RecordingManager {
             scope: stepPayload.scope,
             isListItem: finalIsListItemOrOption,
           });
+          console.log('📋 GhostWriter: Final step check before sending - has decisionSpace:', !!stepPayload.context?.decisionSpace, 'has options:', !!stepPayload.context?.decisionSpace?.options, 'count:', stepPayload.context?.decisionSpace?.options?.length || 0);
           this.sendStep(step);
           this.lastStep = step;
           // Update last click timestamp (already set earlier, but update with actual step timestamp)
@@ -2615,8 +2704,19 @@ export class RecordingManager {
                                 element.getAttribute('contenteditable') === 'true';
       
       const selectors = SelectorEngine.generateSelectors(element, undefined);
-      const label = LabelFinder.findLabel(element);
-      console.log(`[RecordingManager] Label extracted for INPUT step:`, { label, elementTag: element.tagName, elementClass: element.className?.toString().substring(0, 50), ariaLabel: element.getAttribute('aria-label')?.substring(0, 50) });
+      
+      // Use enhanced label finder with confidence scoring
+      const labelResult = LabelFinder.findLabelWithConfidence(element as HTMLElement);
+      const label = labelResult.label !== 'Unknown Field' ? labelResult.label : null;
+      console.log(`[RecordingManager] Label extracted for INPUT step:`, { 
+        label, 
+        confidence: labelResult.confidence, 
+        source: labelResult.source,
+        elementTag: element.tagName, 
+        elementClass: element.className?.toString().substring(0, 50), 
+        ariaLabel: element.getAttribute('aria-label')?.substring(0, 50),
+        needsAIEnhancement: LabelFinder.needsAIEnhancement(labelResult)
+      });
       
       // Extract value: for contenteditable, use textContent/innerText; for standard inputs, use value
       let value: string;
@@ -2646,7 +2746,85 @@ export class RecordingManager {
           }
         }
       } else {
-        value = '';
+        // Custom web components (Salesforce Lightning, etc.)
+        // Try to find the actual input element inside the custom component
+        console.log('GhostWriter: Element is not a standard input, checking for custom component:', element.tagName);
+        
+        // Salesforce picklist special handling
+        const isSalesforcePicklist = element.tagName === 'RECORDS-RECORD-PICKLIST' ||
+                                     element.tagName === 'LIGHTNING-PICKLIST' ||
+                                     element.tagName === 'LIGHTNING-COMBOBOX';
+        
+        if (isSalesforcePicklist) {
+          console.log('GhostWriter: Detected Salesforce picklist, extracting value...');
+          console.log('GhostWriter: Cached lastInputValue:', this.lastInputValue?.substring(0, 30));
+          console.log('GhostWriter: Fallback value:', fallbackValue?.substring(0, 30));
+          
+          // CRITICAL: For Salesforce picklists, ALWAYS use cached value first
+          // The picklist component updates asynchronously, so the value might not be in the DOM yet
+          value = fallbackValue !== undefined ? fallbackValue : (this.lastInputValue || '');
+          
+          // If we have cached value, use it
+          if (value) {
+            console.log('GhostWriter: ✅ Using cached value for Salesforce picklist:', value.substring(0, 30));
+          } else {
+            // Try to extract from DOM as fallback
+            // Strategy 1: Check for data-value attribute
+            value = element.getAttribute('data-value') || 
+                    element.getAttribute('value') ||
+                    '';
+            
+            // Strategy 2: Check shadowRoot for input
+            if (!value && (element as any).shadowRoot) {
+              const shadowInput = (element as any).shadowRoot.querySelector('input, select, [role="combobox"], [role="textbox"]');
+              if (shadowInput) {
+                value = shadowInput.value || 
+                       shadowInput.getAttribute('value') || 
+                       shadowInput.textContent?.trim() || '';
+                console.log('GhostWriter: Extracted from shadowRoot input:', value.substring(0, 30));
+              }
+            }
+            
+            // Strategy 3: Check regular DOM
+            if (!value) {
+              const domInput = element.querySelector('input, select, [role="combobox"], [role="textbox"]');
+              if (domInput) {
+                value = (domInput as HTMLInputElement).value || 
+                       domInput.getAttribute('value') ||
+                       domInput.textContent?.trim() || '';
+                console.log('GhostWriter: Extracted from DOM input:', value.substring(0, 30));
+              }
+            }
+            
+            console.log('GhostWriter: Final picklist value:', value || '(empty)');
+          }
+        } else {
+          // Generic custom component handling
+          // Try to find input inside custom element (Shadow DOM or regular)
+          let actualInput: HTMLInputElement | HTMLTextAreaElement | null = null;
+          
+          // Check if element has shadowRoot
+          if ((element as any).shadowRoot) {
+            actualInput = (element as any).shadowRoot.querySelector('input, textarea');
+            console.log('GhostWriter: Found input in shadowRoot:', !!actualInput);
+          }
+          
+          // If not in shadowRoot, check in regular DOM
+          if (!actualInput) {
+            actualInput = element.querySelector('input, textarea');
+            console.log('GhostWriter: Found input in regular DOM:', !!actualInput);
+          }
+          
+          // Extract value from the actual input
+          if (actualInput) {
+            value = actualInput.value || '';
+            console.log('GhostWriter: Extracted value from nested input:', value.substring(0, 30));
+          } else {
+            // Last resort: use cached value if available
+            value = fallbackValue !== undefined ? fallbackValue : (this.lastInputValue || '');
+            console.log('GhostWriter: No input found, using fallback value:', value.substring(0, 30));
+          }
+        }
       }
       
       const url = window.location.href;
@@ -2939,6 +3117,11 @@ export class RecordingManager {
       const elementAnalysis = ElementAnalyzer.analyze(element);
       console.log('🔍 GhostWriter: Element Analysis (INPUT):\n' + ElementAnalyzer.formatAnalysis(elementAnalysis));
 
+      // UNIFIED INTERACTION DETECTION: Detect interaction type for INPUT
+      // Pass inputDetails to help detect Shadow DOM inputs (Salesforce Lightning)
+      const interactionType = InteractionDetector.detect(element, undefined, undefined, inputDetails);
+      console.log('[RecordingManager] Detected interaction type (INPUT):', interactionType);
+
       // NEW: For INPUT steps in spreadsheets, capture spreadsheet context (same as CLICK steps)
       let inputSpreadsheetContext: any = undefined;
       if (VisualSnapshotService.isSpreadsheetDomain()) {
@@ -3061,6 +3244,8 @@ export class RecordingManager {
           bestSelector: elementAnalysis.bestSelector,
           fallbackSelectors: elementAnalysis.fallbackSelectors,
         },
+        // Unified Interaction Type Detection
+        interactionType: interactionType,
       };
 
       // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
@@ -3141,6 +3326,33 @@ export class RecordingManager {
 
       this.sendStep(step);
       this.lastStep = step;
+
+      // Queue for AI label enhancement if confidence is low and AI is enabled
+      if (LabelFinder.needsAIEnhancement(labelResult) && 
+          aiConfig.isAILabelEnhancementEnabled() && 
+          visualSnapshot?.viewport) {
+        console.log(`[RecordingManager] Queueing step for AI label enhancement:`, {
+          stepId: stepPayload.timestamp.toString(),
+          currentLabel: label,
+          confidence: labelResult.confidence,
+          source: labelResult.source
+        });
+        
+        // Queue async - doesn't block recording
+        aiLabelEnhancer.queueForEnhancement(
+          stepPayload.timestamp.toString(),
+          visualSnapshot.viewport,
+          {
+            elementBounds: elementBounds,
+            domLabelHint: label || undefined,
+            placeholderHint: (element as HTMLInputElement).placeholder || undefined,
+            inputType: inputDetails?.type,
+            pageTitle: document.title,
+            pageUrl: url,
+            nearbyText: semanticAnchors.nearbyText,
+          }
+        );
+      }
 
       // Clear cache after successful record
       this.lastInputValue = '';

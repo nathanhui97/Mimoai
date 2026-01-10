@@ -362,10 +362,11 @@ export class SheetStateExtractor {
         return true;
       }
       
-      // Excel Online / Office 365
-      if (hostname.includes('excel.office.com') || 
-          (hostname.includes('office.com') && urlLower.includes('/excel')) ||
-          hostname.includes('onedrive.live.com')) {
+      // Excel Online - Be specific to avoid false positives
+      if (hostname === 'excel.office.com' || 
+          hostname.endsWith('.excel.office.com') ||
+          (hostname.includes('onedrive.live.com') && urlLower.includes('/excel')) ||
+          (hostname.includes('.sharepoint.com') && urlLower.includes('/_layouts/15/doc.aspx'))) {
         return true;
       }
       

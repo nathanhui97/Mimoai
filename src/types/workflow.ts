@@ -357,6 +357,10 @@ export interface WorkflowStepPayload {
       firstEmptyRow?: number;
     };
   };
+  
+  // Unified Interaction Type Detection
+  // Detected once during recording to eliminate fragmented detection logic
+  interactionType?: import('../content/interaction-detector').InteractionType;
 }
 
 export interface Pattern {

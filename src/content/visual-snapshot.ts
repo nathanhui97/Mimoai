@@ -89,11 +89,11 @@ export class VisualSnapshotService {
       return true;
     }
     
-    // Excel Online / Office 365
-    if (hostname.includes('office.com') || 
-        hostname.includes('excel.office.com') || 
-        hostname.includes('onedrive.live.com') ||
-        hostname.includes('office365.com')) {
+    // Excel Online - Be specific to avoid false positives
+    if (hostname === 'excel.office.com' || 
+        hostname.endsWith('.excel.office.com') ||
+        (hostname.includes('onedrive.live.com') && url.includes('/excel')) ||
+        (hostname.includes('.sharepoint.com') && url.includes('/_layouts/15/Doc.aspx'))) {
       return true;
     }
     

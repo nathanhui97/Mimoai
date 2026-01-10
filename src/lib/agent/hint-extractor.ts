@@ -96,8 +96,8 @@ export class HintExtractor {
         }
       }
       
-      // Determine action type
-      const actionType = this.determineActionType(step.type);
+      // Determine action type (pass payload to check for dropdown)
+      const actionType = this.determineActionType(step.type, payload);
       
       // Substitute variables in value
       const { value, description } = this.processValueAndDescription(
@@ -112,9 +112,13 @@ export class HintExtractor {
       const scrollData = this.extractScrollData(step.type, payload, step.description || '');
       
       // Extract targetText with fallback logic
-      // Priority: originalElementText (for NAVIGATION) > elementText > decisionSpace.selectedText > label/placeholder (for INPUT)
+      // For dropdown selections with variables, use the substituted value as targetText
       let targetText: string | undefined;
-      if (step.type === 'NAVIGATION' && originalElementText) {
+      if (actionType === 'select' && value) {
+        // For SELECT actions (dropdowns), the value IS the option to select
+        targetText = value;
+        console.log(`[HintExtractor] Using substituted value as targetText for SELECT: "${targetText}"`);
+      } else if (step.type === 'NAVIGATION' && originalElementText) {
         targetText = originalElementText;
       } else if (payload.elementText) {
         targetText = payload.elementText;
@@ -233,8 +237,38 @@ export class HintExtractor {
     return stepIdToVariable;
   }
 
-  private determineActionType(stepType: string): AgentHint['actionType'] {
-    if (stepType === 'CLICK') return 'click';
+  private determineActionType(stepType: string, payload?: any): AgentHint['actionType'] {
+    // UNIFIED DETECTION: Check interactionType first (if available)
+    if (payload?.interactionType) {
+      const kind = payload.interactionType.kind;
+      if (kind === 'DROPDOWN_SELECTION') {
+        console.log('[HintExtractor] 📋 Converting to SELECT action via interactionType');
+        return 'select';
+      }
+      if (kind === 'TEXT_INPUT') {
+        console.log('[HintExtractor] Converting to TYPE action via interactionType');
+        return 'type';
+      }
+      if (kind === 'MENU_ITEM_CLICK') {
+        console.log('[HintExtractor] Converting to CLICK action via interactionType (navigation menu)');
+        return 'click';
+      }
+      if (kind === 'BUTTON_CLICK' || kind === 'LINK_CLICK') {
+        console.log('[HintExtractor] Converting to CLICK action via interactionType');
+        return 'click';
+      }
+      // For other kinds, fall through to legacy logic
+    }
+
+    // LEGACY DETECTION: Fallback for old workflows
+    if (stepType === 'CLICK') {
+      // Check if this is a dropdown selection (has decisionSpace with options)
+      if (payload?.context?.decisionSpace?.options?.length > 0) {
+        console.log('[HintExtractor] 📋 Converting dropdown CLICK to SELECT action (legacy)');
+        return 'select';
+      }
+      return 'click';
+    }
     if (stepType === 'INPUT') return 'type';
     if (stepType === 'NAVIGATION') return 'click'; // Always convert to click
     if (stepType === 'SCROLL') return 'scroll';
@@ -293,6 +327,11 @@ export class HintExtractor {
       const userValue = variableValues[stepVariable.variableName];
       console.log(`[HintExtractor] 📝 Variable substitution: step ${index} "${originalValue}" → "${userValue}"`);
       value = userValue;
+      
+      // CRITICAL: For dropdown selections (CLICK steps), also update the description
+      if (step.type === 'CLICK' && originalValue !== userValue) {
+        console.log(`[HintExtractor] 📝 Updating description for dropdown variable substitution`);
+      }
     } else if (value && variableValues) {
       // Legacy {{varName}} pattern replacement
       value = value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
@@ -300,7 +339,7 @@ export class HintExtractor {
       });
     }
     
-    // Build description with fallback to decisionSpace.selectedText
+    // Build description - use substituted value for dropdowns
     let description = step.description;
     
     if (step.type === 'NAVIGATION') {
@@ -319,6 +358,11 @@ export class HintExtractor {
     } else if (step.type === 'INPUT' && value) {
       const fieldName = placeholder || payload.elementText || 'field';
       description = `Enter "${value}" in ${fieldName}`;
+    } else if (step.type === 'CLICK' && payload.context?.decisionSpace?.options && payload.context.decisionSpace.options.length > 0 && value) {
+      // DROPDOWN SELECTION: Use substituted value in description
+      const fieldName = stepVariable?.fieldName || payload.label || 'dropdown';
+      description = `Select "${value}" from ${fieldName}`;
+      console.log(`[HintExtractor] 📋 Dropdown selection description updated: "${description}"`);
     } else if (step.type === 'CLICK' && !payload.elementText && payload.context?.decisionSpace?.selectedText) {
       // Special case: dropdown option without elementText - use selectedText
       const selectedText = payload.context.decisionSpace.selectedText;

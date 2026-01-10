@@ -1,13 +1,16 @@
 /**
  * Variable Detector Service
  * 
- * Analyzes workflow steps to detect which values should be parameterized as variables.
- * Uses AI vision analysis of snapshots to determine variable vs static values.
+ * Detects which workflow steps should be parameterized as variables.
  * 
- * Filtering strategy (cost optimization):
- * - Primary focus: INPUT and TEXTAREA steps (most common variable sources)
- * - CLICK steps: Only analyze if element is a selectable option (dropdown, radio, checkbox)
- * - Exclude: Navigation CLICK steps (Next, Submit, tabs, links)
+ * SIMPLIFIED RULES (no AI needed for classification):
+ * - INPUT steps with values → ALWAYS variables (user typed data)
+ * - CLICK steps on choice elements → VARIABLES (dropdown, radio, checkbox)
+ * - CLICK steps on buttons → NOT variables (actions like Submit, Save)
+ * 
+ * AI is only used for:
+ * - Label extraction when DOM-based detection fails
+ * - Dropdown option extraction when DOM-based detection fails
  */
 
 import { aiConfig } from './ai-config';
@@ -104,7 +107,445 @@ const SELECTABLE_ROLES = [
   'listitem', 'treeitem', 'tab', 'switch',
 ];
 
+// Roles that indicate choice elements (variables)
+const CHOICE_ROLES = [
+  'option', 'radio', 'checkbox', 'menuitemradio', 'menuitemcheckbox',
+  'switch', 'listitem',
+];
+
+// Roles that indicate buttons/triggers (NOT variables)
+const BUTTON_ROLES = ['button', 'link', 'menuitem', 'combobox']; // combobox = dropdown trigger, not the selection
+
 export class VariableDetector {
+  // ============================================================================
+  // NEW: Simplified Variable Detection with Deterministic Rules
+  // ============================================================================
+
+  /**
+   * Detect variables using simple deterministic rules (no AI needed for classification)
+   * 
+   * Rules:
+   * - INPUT steps with values → ALWAYS variables
+   * - CLICK steps on choice elements → VARIABLES (dropdown, radio, checkbox)
+   * - CLICK steps on buttons → NOT variables
+   */
+  static detectVariablesSimplified(steps: WorkflowStep[]): WorkflowVariables {
+    console.log('[VariableDetector] Using simplified detection for', steps.length, 'steps');
+    
+    const variables: VariableDefinition[] = [];
+    const processedFields = new Map<string, VariableDefinition>(); // Deduplicate by field key
+    const skipSteps = new Set<number>(); // Track steps to skip (e.g., CLICK when INPUT follows)
+
+    // Pre-pass: Identify CLICK+INPUT pairs for the same dropdown field
+    // Transfer dropdown options from CLICK to INPUT before skipping
+    for (let i = 0; i < steps.length - 1; i++) {
+      const currentStep = steps[i];
+      const nextStep = steps[i + 1];
+      
+      if (!isWorkflowStepPayload(currentStep.payload) || !isWorkflowStepPayload(nextStep.payload)) continue;
+      
+      // Check if this is a CLICK followed by INPUT within 2 seconds (dropdown selection pattern)
+      if (currentStep.type === 'CLICK' && nextStep.type === 'INPUT') {
+        const timeDiff = nextStep.payload.timestamp - currentStep.payload.timestamp;
+        // Match by: label, elementText, or if CLICK elementText matches INPUT label
+        const sameField = currentStep.payload.label === nextStep.payload.label ||
+                         currentStep.payload.elementText === nextStep.payload.value ||
+                         currentStep.payload.elementText === nextStep.payload.label;
+        
+        if (timeDiff < 2000 && sameField) {
+          console.log(`[VariableDetector] Detected CLICK+INPUT pair for same field at steps ${i} and ${i+1}`);
+          console.log(`[VariableDetector] CLICK label: "${currentStep.payload.label}", INPUT label: "${nextStep.payload.label}"`);
+          console.log(`[VariableDetector] CLICK step context:`, {
+            hasContext: !!currentStep.payload.context,
+            hasDecisionSpace: !!currentStep.payload.context?.decisionSpace,
+            hasOptions: !!currentStep.payload.context?.decisionSpace?.options,
+            optionsCount: currentStep.payload.context?.decisionSpace?.options?.length || 0,
+          });
+          
+          // CRITICAL: Transfer dropdown options from CLICK to INPUT
+          if (currentStep.payload.context?.decisionSpace?.options) {
+            const options = currentStep.payload.context.decisionSpace.options;
+            console.log(`[VariableDetector] 📋 Transferring ${options.length} dropdown options from CLICK to INPUT step`);
+            
+            // Ensure context exists
+            const inputPayload = nextStep.payload as any;
+            if (!inputPayload.context) {
+              inputPayload.context = {};
+            }
+            
+            // Create or update decisionSpace on INPUT step
+            if (!inputPayload.context.decisionSpace) {
+              inputPayload.context.decisionSpace = {
+                type: 'LIST_SELECTION',
+                selectedText: nextStep.payload.value || '',
+                selectedIndex: options.indexOf(nextStep.payload.value || ''),
+                options: options,
+              };
+            } else {
+              inputPayload.context.decisionSpace.options = options;
+              inputPayload.context.decisionSpace.selectedIndex = options.indexOf(nextStep.payload.value || '');
+            }
+          }
+          
+          console.log(`[VariableDetector] Will skip CLICK step and only use INPUT step (with transferred options)`);
+          skipSteps.add(i); // Skip the CLICK, keep the INPUT
+        }
+      }
+    }
+
+    for (let i = 0; i < steps.length; i++) {
+      // Skip if identified as duplicate CLICK in a CLICK+INPUT pair
+      if (skipSteps.has(i)) {
+        console.log(`[VariableDetector] ⏭️ Skipping step ${i} (duplicate CLICK in CLICK+INPUT pair)`);
+        continue;
+      }
+      
+      const step = steps[i];
+      const payload = step.payload;
+
+      if (!isWorkflowStepPayload(payload)) {
+        console.log(`[VariableDetector] ⏭️ Skipping step ${i}: not a workflow step payload`);
+        continue;
+      }
+
+      // Rule 1: INPUT steps with values are ALWAYS variables
+      if ((step.type === 'INPUT' || step.type === 'KEYBOARD') && payload.value) {
+        console.log(`[VariableDetector] 📝 Processing INPUT step ${i}:`, {
+          type: step.type,
+          hasValue: !!payload.value,
+          value: payload.value?.substring(0, 30),
+          label: payload.label,
+          selector: payload.selector?.substring(0, 50),
+        });
+        
+        const variable = this.createVariableFromInput(i, step, payload);
+        if (variable) {
+          // Deduplicate: Use label + selector as key (same field = update value)
+          const fieldKey = `${variable.fieldLabel || 'field'}-${payload.selector?.substring(0, 30) || i}`;
+          
+          if (processedFields.has(fieldKey)) {
+            // Update existing variable with latest value
+            const existing = processedFields.get(fieldKey)!;
+            existing.defaultValue = variable.defaultValue;
+            existing.stepIndex = i; // Update to latest step
+            console.log(`[VariableDetector] 🔄 Updated existing variable:`, existing.fieldName);
+          } else {
+            // New variable
+            processedFields.set(fieldKey, variable);
+            console.log(`[VariableDetector] ✅ Created INPUT variable:`, {
+              fieldName: variable.fieldName,
+              variableName: variable.variableName,
+              defaultValue: variable.defaultValue?.substring(0, 30),
+            });
+          }
+        } else {
+          console.log(`[VariableDetector] ❌ Failed to create variable for step ${i}`);
+        }
+      }
+
+      // Rule 2: CLICK steps on choice elements are variables
+      else if (step.type === 'CLICK') {
+        const isChoice = this.isChoiceElement(payload);
+        const isButton = this.isButtonElement(payload);
+
+        console.log(`[VariableDetector] 🖱️ Processing CLICK step ${i}:`, {
+          isChoice,
+          isButton,
+          elementText: payload.elementText?.substring(0, 30),
+          role: payload.elementRole,
+          label: payload.label?.substring(0, 30),
+        });
+
+        if (isChoice && !isButton) {
+          const variable = this.createVariableFromChoice(i, step, payload);
+          if (variable) {
+            // Deduplicate by label/selector
+            const fieldKey = `choice-${variable.fieldLabel || 'selection'}-${payload.selector?.substring(0, 30) || i}`;
+            
+            if (!processedFields.has(fieldKey)) {
+              processedFields.set(fieldKey, variable);
+              console.log(`[VariableDetector] ✅ Created CHOICE variable:`, {
+                fieldName: variable.fieldName,
+                defaultValue: variable.defaultValue?.substring(0, 30),
+              });
+            } else {
+              console.log(`[VariableDetector] 🔄 Skipping duplicate choice:`, variable.fieldName);
+            }
+          }
+        } else if (isButton) {
+          console.log('[VariableDetector] ⏭️ Skipping button:', payload.elementText?.substring(0, 30));
+        } else {
+          console.log('[VariableDetector] ⏭️ Skipping non-choice CLICK:', payload.elementText?.substring(0, 30));
+        }
+      }
+    }
+    
+    // Convert map to array
+    variables.push(...Array.from(processedFields.values()));
+
+    console.log(`[VariableDetector] 🎯 Detected ${variables.length} variables using simplified rules`);
+    console.log('[VariableDetector] Variables:', variables.map(v => ({
+      fieldName: v.fieldName,
+      variableName: v.variableName,
+      value: v.defaultValue?.substring(0, 20),
+    })));
+
+    return {
+      variables,
+      detectedAt: Date.now(),
+      analysisCount: steps.length,
+    };
+  }
+
+  /**
+   * Check if a CLICK step is on a choice element (dropdown option, radio, checkbox)
+   */
+  private static isChoiceElement(payload: WorkflowStepPayload): boolean {
+    // UNIFIED DETECTION: Check interactionType first (if available)
+    if (payload.interactionType) {
+      const kind = payload.interactionType.kind;
+      if (kind === 'DROPDOWN_SELECTION' || kind === 'CHECKBOX_TOGGLE' || kind === 'RADIO_SELECTION') {
+        console.log('[VariableDetector] ✅ Is choice element via interactionType:', kind);
+        return true;
+      }
+      if (kind === 'BUTTON_CLICK' || kind === 'LINK_CLICK') {
+        console.log('[VariableDetector] ❌ Not choice element via interactionType:', kind);
+        return false;
+      }
+      // If UNKNOWN or other types, fall through to legacy detection
+    }
+
+    // LEGACY DETECTION: Fallback for old workflows without interactionType
+    const role = (payload.elementRole || '').toLowerCase();
+    const inputType = payload.inputDetails?.type?.toLowerCase();
+    const selector = (payload.selector || '').toLowerCase();
+    const label = (payload.label || '').toLowerCase();
+
+    console.log('[VariableDetector] Checking if choice element (legacy):', {
+      role,
+      inputType,
+      selectorPreview: selector.substring(0, 100),
+      label: label.substring(0, 50),
+      hasDecisionSpace: !!payload.context?.decisionSpace,
+    });
+
+    // Check by role
+    if (CHOICE_ROLES.includes(role)) {
+      console.log('[VariableDetector] ✅ Is choice element (by role):', role);
+      return true;
+    }
+
+    // Check by input type
+    if (inputType === 'radio' || inputType === 'checkbox') {
+      console.log('[VariableDetector] ✅ Is choice element (by inputType):', inputType);
+      return true;
+    }
+
+    // Check by selector patterns
+    if (selector.includes('role="option"') || 
+        selector.includes("role='option'") ||
+        selector.includes('[role="listbox"]') ||
+        selector.includes('[role="menu"]')) {
+      console.log('[VariableDetector] ✅ Is choice element (by selector role)');
+      return true;
+    }
+
+    // Check by context (decisionSpace indicates dropdown)
+    if (payload.context?.decisionSpace?.type === 'LIST_SELECTION') {
+      console.log('[VariableDetector] ✅ Is choice element (by decisionSpace)');
+      return true;
+    }
+
+    // Check if inside a listbox or menu
+    if (selector.includes('listbox') || 
+        selector.includes('lightning-base-combobox') ||
+        selector.includes('slds-dropdown') ||
+        selector.includes('slds-listbox') ||
+        payload.context?.container?.type?.toLowerCase().includes('dropdown')) {
+      console.log('[VariableDetector] ✅ Is choice element (by Salesforce pattern)');
+      return true;
+    }
+
+    // Salesforce Lightning specific patterns
+    if (selector.includes('lightning-combobox') || 
+        selector.includes('lightning-dual-listbox') ||
+        selector.includes('lightning-menu-item') ||
+        selector.includes('records-record-picklist') ||
+        selector.includes('lightning-picklist') ||
+        selector.includes('data-value=') ||
+        role === 'presentation' && selector.includes('listbox')) {
+      console.log('[VariableDetector] ✅ Is choice element (by Lightning component)');
+      return true;
+    }
+
+    // Check if previous step was a dropdown trigger for this field
+    // (CLICK to open dropdown, followed by another CLICK or INPUT for the selection)
+    if (label.includes('status') || 
+        label.includes('type') || 
+        label.includes('category') ||
+        label.includes('priority') ||
+        label.includes('stage')) {
+      console.log('[VariableDetector] ✅ Is choice element (by common dropdown field name):', label);
+      return true;
+    }
+
+    console.log('[VariableDetector] ❌ Not a choice element');
+    return false;
+  }
+
+  /**
+   * Check if a CLICK step is on a button (NOT a variable)
+   */
+  private static isButtonElement(payload: WorkflowStepPayload): boolean {
+    const role = (payload.elementRole || '').toLowerCase();
+    const inputType = payload.inputDetails?.type?.toLowerCase();
+    const elementText = (payload.elementText || '').toLowerCase();
+    const label = (payload.label || '').toLowerCase();
+    const selector = (payload.selector || '').toLowerCase();
+
+    // Check by role
+    if (BUTTON_ROLES.includes(role)) return true;
+
+    // Check by input type
+    if (inputType === 'submit' || inputType === 'button' || inputType === 'reset') return true;
+
+    // Check by tag (via selector)
+    if (selector.startsWith('button') || selector.includes('<button')) return true;
+
+    // Check by navigation text patterns
+    const textToCheck = elementText || label;
+    if (this.isNavigationButton(textToCheck)) return true;
+
+    return false;
+  }
+
+  /**
+   * Create a variable definition from an INPUT step
+   */
+  private static createVariableFromInput(
+    stepIndex: number,
+    _step: WorkflowStep,
+    payload: WorkflowStepPayload
+  ): VariableDefinition | null {
+    if (!payload.value) return null;
+
+    // Check for spreadsheet cell reference
+    const cellRef = SpreadsheetHelpers.extractCellReference(payload);
+    if (cellRef) {
+      return {
+        stepIndex,
+        stepId: `${payload.timestamp}`,
+        fieldName: cellRef,
+        fieldLabel: payload.label || cellRef,
+        variableName: SpreadsheetHelpers.generateVariableName(cellRef),
+        defaultValue: payload.value,
+        inputType: payload.inputDetails?.type,
+        isVariable: true,
+        confidence: 1.0,
+        reasoning: 'User typed value in spreadsheet cell',
+        cellReference: cellRef,
+        columnHeader: payload.context?.gridCoordinates?.columnHeader,
+      };
+    }
+
+    // Regular input field
+    const fieldName = payload.label || 'Input Field';
+    
+    // Check if this INPUT is actually a dropdown (has decisionSpace with options)
+    const hasDropdownOptions = payload.context?.decisionSpace?.options && 
+                               payload.context.decisionSpace.options.length > 0;
+    
+    if (hasDropdownOptions) {
+      console.log('[VariableDetector] 📋 INPUT step has dropdown options:', {
+        fieldName,
+        optionsCount: payload.context!.decisionSpace!.options!.length,
+        options: payload.context!.decisionSpace!.options!.slice(0, 5),
+      });
+    }
+    
+    return {
+      stepIndex,
+      stepId: `${payload.timestamp}`,
+      fieldName,
+      fieldLabel: payload.label,
+      variableName: this.generateVariableName(fieldName),
+      defaultValue: payload.value,
+      inputType: payload.inputDetails?.type,
+      isVariable: true,
+      confidence: 0.9,
+      reasoning: hasDropdownOptions ? 'User selected option from dropdown' : 'User typed value in input field',
+      // Include dropdown data if available
+      isDropdown: hasDropdownOptions,
+      options: hasDropdownOptions ? payload.context!.decisionSpace!.options : undefined,
+    };
+  }
+
+  /**
+   * Create a variable definition from a choice CLICK step
+   */
+  private static createVariableFromChoice(
+    stepIndex: number,
+    _step: WorkflowStep,
+    payload: WorkflowStepPayload
+  ): VariableDefinition | null {
+    // UNIFIED DETECTION: Use interactionType if available
+    let selectedText: string;
+    let options: string[] = [];
+    let isDropdown = false;
+    
+    if (payload.interactionType?.kind === 'DROPDOWN_SELECTION' && payload.interactionType.dropdown) {
+      // Use unified detection data
+      selectedText = payload.interactionType.dropdown.selectedOption;
+      options = payload.interactionType.dropdown.options;
+      isDropdown = true;
+      console.log('[VariableDetector] Using interactionType dropdown metadata:', {
+        selectedOption: selectedText,
+        optionsCount: options.length,
+      });
+    } else {
+      // LEGACY: Fallback to old detection
+      selectedText = payload.elementText || 
+                     payload.context?.decisionSpace?.selectedText || 
+                     '';
+      options = payload.context?.decisionSpace?.options || [];
+      isDropdown = payload.elementRole === 'option' || 
+                   payload.context?.decisionSpace?.type === 'LIST_SELECTION' ||
+                   options.length > 0;
+    }
+    
+    if (!selectedText) return null;
+
+    const fieldName = payload.label || 
+                     payload.context?.container?.text || 
+                     'Selection';
+    
+    console.log('[VariableDetector] Creating choice variable:', {
+      fieldName,
+      selectedText,
+      hasOptions: options.length > 0,
+      optionsCount: options.length,
+      options: options.slice(0, 5), // Show first 5 options
+    });
+
+    return {
+      stepIndex,
+      stepId: `${payload.timestamp}`,
+      fieldName,
+      fieldLabel: payload.label,
+      variableName: this.generateVariableName(fieldName),
+      defaultValue: selectedText,
+      isVariable: true,
+      confidence: payload.interactionType?.confidence || 0.9,
+      reasoning: 'User selected option from choices',
+      isDropdown: isDropdown,
+      options: options.length > 0 ? options : undefined,
+    };
+  }
+
+  // ============================================================================
+  // LEGACY: AI-based Variable Detection (kept for backward compatibility)
+  // ============================================================================
+
   /**
    * Detect variables in workflow steps
    * Filters steps before sending to AI for cost optimization
