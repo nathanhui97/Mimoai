@@ -489,23 +489,200 @@ export class Tier1Executor {
     // Find and click option - use ONLY the option text, ignore recorded selectors
     console.log('[Tier1] Searching for dropdown option with text:', option);
     
-    // STRATEGY 1: Try simple query selector first
-    console.log('[Tier1] Strategy 1: Querying for [role="option"] elements...');
-    const allOptions = document.querySelectorAll('[role="option"]');
+    // Helper: Normalize text for comparison (lowercase, collapse whitespace, trim)
+    const normalizeText = (text: string | undefined | null): string => {
+      if (!text) return '';
+      return text.toLowerCase().replace(/\s+/g, ' ').trim();
+    };
+    
+    const normalizedSearchText = normalizeText(option);
+    console.log('[Tier1] Normalized search text:', normalizedSearchText);
+    
+    // 🎯 STRATEGY 0: Find the CORRECT dropdown using aria-controls matching
+    // This prevents selecting from the wrong dropdown when multiple are open
+    let targetDropdownId: string | null = null;
+    let targetDropdownContainer: Element | null = null;
+    
+    // Try to find the dropdown trigger and get its aria-controls
+    const triggerLabel = target?.name || target?.text;
+    if (triggerLabel) {
+      console.log(`[Tier1] 🎯 Looking for dropdown trigger with label: "${triggerLabel}"`);
+      
+      // Find combobox/button with matching aria-label
+      const triggers = document.querySelectorAll('[role="combobox"], button[aria-haspopup="listbox"]');
+      for (const trigger of triggers) {
+        const ariaLabel = trigger.getAttribute('aria-label');
+        const triggerTextContent = trigger.textContent?.trim();
+        
+        if (ariaLabel?.toLowerCase() === triggerLabel.toLowerCase() ||
+            triggerTextContent?.toLowerCase().includes(triggerLabel.toLowerCase())) {
+          targetDropdownId = trigger.getAttribute('aria-controls');
+          console.log(`[Tier1] 🎯 Found matching trigger with aria-controls="${targetDropdownId}"`);
+          break;
+        }
+      }
+      
+      // Also search in Shadow DOM for triggers
+      if (!targetDropdownId) {
+        try {
+          const { ShadowDOMUtils } = await import('../content/shadow-dom-utils');
+          const shadowTriggers = ShadowDOMUtils.queryDeep('[role="combobox"], button[aria-haspopup="listbox"]', document.body);
+          for (const trigger of shadowTriggers) {
+            const ariaLabel = trigger.getAttribute('aria-label');
+            const triggerTextContent = trigger.textContent?.trim();
+            
+            if (ariaLabel?.toLowerCase() === triggerLabel.toLowerCase() ||
+                triggerTextContent?.toLowerCase().includes(triggerLabel.toLowerCase())) {
+              targetDropdownId = trigger.getAttribute('aria-controls');
+              console.log(`[Tier1] 🎯 Found matching trigger in Shadow DOM with aria-controls="${targetDropdownId}"`);
+              break;
+            }
+          }
+        } catch (e) {
+          console.warn('[Tier1] Shadow DOM trigger search failed:', e);
+        }
+      }
+    }
+    
+    // If we found the dropdown ID, get the container
+    if (targetDropdownId) {
+      targetDropdownContainer = document.getElementById(targetDropdownId);
+      if (!targetDropdownContainer) {
+        // Try Shadow DOM
+        try {
+          const { ShadowDOMUtils } = await import('../content/shadow-dom-utils');
+          const containers = ShadowDOMUtils.queryDeep(`#${targetDropdownId}`, document.body);
+          if (containers.length > 0) {
+            targetDropdownContainer = containers[0];
+          }
+        } catch (e) {
+          console.warn('[Tier1] Shadow DOM container search failed:', e);
+        }
+      }
+      
+      if (targetDropdownContainer) {
+        console.log(`[Tier1] 🎯 Found correct dropdown container: #${targetDropdownId} with ${targetDropdownContainer.querySelectorAll('[role="option"]').length} options`);
+      }
+    }
+    
+    // STRATEGY 1: Search for options - prioritize the correct dropdown container
+    console.log('[Tier1] Strategy 1: Searching for [role="option"] elements...');
+    
+    let allOptions: Element[] = [];
+    
+    // If we found the correct dropdown container, search ONLY within it first
+    if (targetDropdownContainer) {
+      console.log('[Tier1] 🎯 Searching within the correct dropdown container first');
+      const containerOptions = Array.from(targetDropdownContainer.querySelectorAll('[role="option"]'));
+      
+      // Also check Shadow DOM within the container
+      try {
+        const { ShadowDOMUtils } = await import('../content/shadow-dom-utils');
+        const shadowOptions = ShadowDOMUtils.queryDeep('[role="option"]', targetDropdownContainer);
+        const allContainerOptions = new Set([...containerOptions, ...shadowOptions]);
+        allOptions = Array.from(allContainerOptions);
+        console.log(`[Tier1] 🎯 Found ${allOptions.length} options in correct dropdown container`);
+      } catch (e) {
+        allOptions = containerOptions;
+      }
+    }
+    
+    // Fallback: search entire page if no container found or no options in container
+    if (allOptions.length === 0) {
+      console.log('[Tier1] ⚠️ No options in target container, falling back to page-wide search');
+      
+      // Get options from regular DOM
+      const regularOptions = Array.from(document.querySelectorAll('[role="option"]'));
+      
+      // Get options from Shadow DOM using deep search
+      let shadowOptions: Element[] = [];
+      try {
+        const { ShadowDOMUtils } = await import('../content/shadow-dom-utils');
+        shadowOptions = ShadowDOMUtils.queryDeep('[role="option"]', document.body);
+      } catch (e) {
+        console.warn('[Tier1] Shadow DOM search failed:', e);
+      }
+      
+      // Combine and deduplicate options
+      const allOptionsSet = new Set([...regularOptions, ...shadowOptions]);
+      allOptions = Array.from(allOptionsSet);
+    }
+    
     console.log('[Tier1] Found', allOptions.length, 'option elements total');
     
     let matchedOption: Element | null = null;
+    let matchType = '';
+    
+    // Pass 1: Exact match (fastest, most reliable)
     for (const opt of allOptions) {
       const optText = opt.textContent?.trim();
-      console.log('[Tier1] Checking option:', optText);
       if (optText === option) {
         matchedOption = opt;
-        console.log('[Tier1] ✅ Exact match found!');
+        matchType = 'exact';
+        console.log('[Tier1] ✅ Exact match found:', optText);
         break;
       }
     }
     
-    // STRATEGY 2: Use resolver as fallback
+    // Pass 2: Case-insensitive + whitespace-normalized match (safe improvement)
+    if (!matchedOption) {
+      console.log('[Tier1] No exact match, trying case-insensitive normalized match...');
+      for (const opt of allOptions) {
+        const optText = opt.textContent;
+        const normalizedOptText = normalizeText(optText);
+        if (normalizedOptText === normalizedSearchText) {
+          matchedOption = opt;
+          matchType = 'case-insensitive';
+          console.log('[Tier1] ✅ Case-insensitive match found:', optText?.trim(), '→', normalizedOptText);
+          break;
+        }
+      }
+    }
+    
+    // Pass 3: Check aria-label attribute (some dropdowns use this instead of text content)
+    if (!matchedOption) {
+      console.log('[Tier1] No text match, trying aria-label match...');
+      for (const opt of allOptions) {
+        const ariaLabel = opt.getAttribute('aria-label');
+        const normalizedAriaLabel = normalizeText(ariaLabel);
+        if (normalizedAriaLabel === normalizedSearchText) {
+          matchedOption = opt;
+          matchType = 'aria-label';
+          console.log('[Tier1] ✅ Aria-label match found:', ariaLabel);
+          break;
+        }
+      }
+    }
+    
+    // Pass 4: Check data-value attribute (Salesforce Lightning uses this)
+    if (!matchedOption) {
+      console.log('[Tier1] No aria-label match, trying data-value match...');
+      for (const opt of allOptions) {
+        const dataValue = opt.getAttribute('data-value');
+        const normalizedDataValue = normalizeText(dataValue);
+        if (normalizedDataValue === normalizedSearchText) {
+          matchedOption = opt;
+          matchType = 'data-value';
+          console.log('[Tier1] ✅ Data-value match found:', dataValue);
+          break;
+        }
+      }
+    }
+    
+    // Log available options for debugging if no match found
+    if (!matchedOption) {
+      console.log('[Tier1] ⚠️ No DOM match found. Available options:');
+      allOptions.slice(0, 20).forEach((opt, i) => {
+        console.log(`  ${i}: text="${opt.textContent?.trim()?.substring(0, 50)}" aria-label="${opt.getAttribute('aria-label')}" data-value="${opt.getAttribute('data-value')}"`);
+      });
+      if (allOptions.length > 20) {
+        console.log(`  ... and ${allOptions.length - 20} more`);
+      }
+    } else {
+      console.log(`[Tier1] ✅ Found option via ${matchType} match`);
+    }
+    
+    // STRATEGY 2: Use resolver as fallback (only if DOM search failed)
     if (!matchedOption) {
       console.log('[Tier1] Strategy 2: Using resolver...');
       const optionTarget: SemanticTarget = {
