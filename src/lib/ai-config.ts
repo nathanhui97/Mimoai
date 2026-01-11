@@ -32,6 +32,8 @@ export interface AIConfig {
   correctionLearningEnabled: boolean;
   aiSelfHealingEnabled: boolean;
   aiLabelEnhancementEnabled: boolean; // Enable AI label enhancement for low-confidence labels
+  // Debug mode - controls verbose logging (OPTIMIZATION)
+  debugMode: boolean;
   // Timeouts
   timeout: number;
   localCacheTTL: number;
@@ -79,6 +81,9 @@ class AIConfigManager {
       correctionLearningEnabled: true, // Enable learning from user corrections
       aiSelfHealingEnabled: true, // Enable AI-powered self-healing during replay
       aiLabelEnhancementEnabled: true, // Enable AI label enhancement for low-confidence labels
+      
+      // Debug mode - set to false for production to reduce logging overhead
+      debugMode: false, // OPTIMIZATION: Disable verbose logging by default
       
       // Timeouts
       timeout: 10000, // 10 seconds for standard Edge Function calls
@@ -136,6 +141,14 @@ class AIConfigManager {
   }
 
   /**
+   * Check if debug mode is enabled (OPTIMIZATION)
+   * When false, verbose logging is suppressed for better performance
+   */
+  isDebugMode(): boolean {
+    return this.config.debugMode;
+  }
+
+  /**
    * Get Supabase URL
    */
   getSupabaseUrl(): string {
@@ -187,3 +200,29 @@ class AIConfigManager {
 
 // Singleton instance
 export const aiConfig = new AIConfigManager();
+
+/**
+ * Debug logger - only logs when debug mode is enabled (OPTIMIZATION)
+ * Use this for verbose logging that isn't needed in production
+ */
+export function debugLog(category: string, message: string, data?: unknown): void {
+  if (aiConfig.isDebugMode()) {
+    if (data !== undefined) {
+      console.log(`[${category}] ${message}`, data);
+    } else {
+      console.log(`[${category}] ${message}`);
+    }
+  }
+}
+
+/**
+ * Always log - for important messages that should always be shown
+ * Use this for errors, warnings, and critical execution info
+ */
+export function alwaysLog(category: string, message: string, data?: unknown): void {
+  if (data !== undefined) {
+    console.log(`[${category}] ${message}`, data);
+  } else {
+    console.log(`[${category}] ${message}`);
+  }
+}

@@ -45,32 +45,53 @@ export const CONFIDENCE_THRESHOLD = {
 };
 
 export class LabelFinder {
+  // Confidence threshold for early exit (OPTIMIZATION)
+  private static readonly EARLY_EXIT_CONFIDENCE = 0.95;
+  
   /**
    * Find the label for an input element with confidence scoring
    * Returns the best label found along with confidence score
+   * OPTIMIZATION: Early exits when high-confidence (>=0.95) result found
    */
   static findLabelWithConfidence(inputElement: HTMLElement): LabelResult {
-    const results: LabelResult[] = [];
-
     // Strategy 1: Explicit label[for="id"] association (highest confidence)
     const labelForResult = this.findLabelByFor(inputElement);
-    if (labelForResult) results.push(labelForResult);
+    if (labelForResult && labelForResult.confidence >= this.EARLY_EXIT_CONFIDENCE) {
+      return labelForResult; // EARLY EXIT - high confidence found
+    }
 
     // Strategy 2: aria-labelledby (high confidence)
     const ariaLabelledByResult = this.findLabelByAriaLabelledBy(inputElement);
-    if (ariaLabelledByResult) results.push(ariaLabelledByResult);
+    if (ariaLabelledByResult && ariaLabelledByResult.confidence >= this.EARLY_EXIT_CONFIDENCE) {
+      return ariaLabelledByResult; // EARLY EXIT
+    }
 
     // Strategy 3: aria-label attribute (high confidence)
     const ariaLabelResult = this.findAriaLabel(inputElement);
-    if (ariaLabelResult) results.push(ariaLabelResult);
+    if (ariaLabelResult && ariaLabelResult.confidence >= this.EARLY_EXIT_CONFIDENCE) {
+      return ariaLabelResult; // EARLY EXIT
+    }
 
     // Strategy 4: Parent <label> element (high confidence)
     const parentLabelResult = this.findParentLabel(inputElement);
-    if (parentLabelResult) results.push(parentLabelResult);
+    if (parentLabelResult && parentLabelResult.confidence >= this.EARLY_EXIT_CONFIDENCE) {
+      return parentLabelResult; // EARLY EXIT
+    }
 
     // Strategy 4.5: Salesforce Lightning (SLDS) label (high confidence)
     // Must come before generic form patterns to avoid picking up validation messages
     const sldsLabelResult = this.findSalesforceLabel(inputElement);
+    if (sldsLabelResult && sldsLabelResult.confidence >= this.EARLY_EXIT_CONFIDENCE) {
+      return sldsLabelResult; // EARLY EXIT
+    }
+
+    // If we get here, no high-confidence result found yet
+    // Collect all results and pick the best one
+    const results: LabelResult[] = [];
+    if (labelForResult) results.push(labelForResult);
+    if (ariaLabelledByResult) results.push(ariaLabelledByResult);
+    if (ariaLabelResult) results.push(ariaLabelResult);
+    if (parentLabelResult) results.push(parentLabelResult);
     if (sldsLabelResult) results.push(sldsLabelResult);
 
     // Strategy 5: Shadow DOM label (medium-high confidence)

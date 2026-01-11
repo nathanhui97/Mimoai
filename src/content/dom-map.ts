@@ -17,6 +17,54 @@ import { ShadowDOMUtils } from './shadow-dom-utils';
 import { isRealModal, isNavigationContext, isSaaSAppContainer, detectModalWithFormHeuristic, detectPersistentPanel } from './modal-detector';
 
 // ============================================================================
+// DOM Map Cache (OPTIMIZATION)
+// ============================================================================
+
+interface DOMMapCache {
+  map: DOMMap | null;
+  hash: string;
+  timestamp: number;
+}
+
+// Cache for DOM map with 200ms TTL
+const domMapCache: DOMMapCache = {
+  map: null,
+  hash: '',
+  timestamp: 0,
+};
+
+// Cache TTL in milliseconds - DOM maps are valid for a short time
+const CACHE_TTL_MS = 200;
+
+/**
+ * Generate a quick hash of the current DOM state for cache invalidation
+ * This is much faster than generating the full DOM map
+ */
+function computeDOMHash(): string {
+  // Quick hash based on:
+  // 1. URL (page changes)
+  // 2. Count of interactive elements (rough DOM change detection)
+  // 3. Active element (focus changes)
+  // 4. Any visible modal/dropdown
+  const url = window.location.href;
+  const interactiveCount = document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"]').length;
+  const activeElementTag = document.activeElement?.tagName || 'none';
+  const hasModal = document.querySelector('[role="dialog"], [aria-modal="true"]') !== null;
+  const hasDropdown = document.querySelector('[role="listbox"], [role="menu"]') !== null;
+  
+  return `${url}|${interactiveCount}|${activeElementTag}|${hasModal}|${hasDropdown}`;
+}
+
+/**
+ * Invalidate the DOM map cache (call after actions that modify DOM)
+ */
+export function invalidateDOMMapCache(): void {
+  domMapCache.map = null;
+  domMapCache.hash = '';
+  domMapCache.timestamp = 0;
+}
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -113,9 +161,21 @@ let previousFormFieldCount = 0;
 
 /**
  * Generate a simplified DOM map of the current page
+ * OPTIMIZATION: Uses caching to avoid repeated full DOM scans
  */
 export function generateDOMMap(): DOMMap {
   const startTime = performance.now();
+  
+  // Check cache first (OPTIMIZATION)
+  const currentHash = computeDOMHash();
+  const now = Date.now();
+  
+  if (domMapCache.map && 
+      domMapCache.hash === currentHash && 
+      (now - domMapCache.timestamp) < CACHE_TTL_MS) {
+    console.log(`[DOMMap] ⚡ Cache hit (${now - domMapCache.timestamp}ms old) - skipping full scan`);
+    return domMapCache.map;
+  }
   
   const map: DOMMap = {
     url: window.location.href,
@@ -256,6 +316,11 @@ export function generateDOMMap(): DOMMap {
     hasModal: !!map.activeModal,
     uiTransition: uiTransitionDetected,
   });
+  
+  // Cache the result (OPTIMIZATION)
+  domMapCache.map = map;
+  domMapCache.hash = currentHash;
+  domMapCache.timestamp = Date.now();
   
   return map;
 }

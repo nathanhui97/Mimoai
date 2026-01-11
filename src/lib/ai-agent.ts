@@ -14,9 +14,9 @@
  * - HintExtractor: Converts workflow steps to hints with variable substitution
  */
 
-import { aiConfig } from './ai-config';
+import { aiConfig, debugLog } from './ai-config';
 import { VisualSnapshotService } from '../content/visual-snapshot';
-import { generateDOMMap, domMapToText, type DOMMap, type DOMMapElement } from '../content/dom-map';
+import { generateDOMMap, domMapToText, invalidateDOMMapCache, type DOMMap, type DOMMapElement } from '../content/dom-map';
 import { FeatureFlags } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
@@ -237,6 +237,11 @@ export interface AgentHint {
   scrollAmount?: number;      // Recorded scroll distance in pixels
   scrollDirection?: 'up' | 'down' | 'left' | 'right';
   scrollContainer?: string;   // CSS selector for scroll container (e.g., ".main-content")
+  
+  // 🚀 OPTIMIZATION: Pre-scroll to recorded position before element detection
+  // This skips the slow "AI figuring out where to scroll" loop
+  recordedScrollY?: number;   // Window scroll position when element was interacted with
+  recordedScrollX?: number;   // Window scroll position X (for horizontal scrolling)
   
   // NEW: Spreadsheet context (minimal - full state extracted during replay)
   spreadsheetContext?: {
@@ -807,15 +812,15 @@ export class AIAgent {
                     console.log(`[AIAgent] 📜 Widget found but not in viewport (top: ${Math.round(rect.top)}px) - scrolling to it...`);
                     try {
                       widgetElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-                      // Wait for scroll animation to complete
-                      await this.sleep(800);
+                      // Wait for scroll animation to complete (OPTIMIZED from 800ms)
+                      await this.sleep(300);
                       
-                      // Wait for lazy-loaded content after scroll
+                      // Wait for lazy-loaded content after scroll (OPTIMIZED)
                       const { StateWaitEngine } = await import('../content/state-wait-engine');
                       await StateWaitEngine.waitForStability({
-                        domQuietMs: 800,
-                        networkQuietMs: 1000,
-                        maxWaitMs: 5000,
+                        domQuietMs: 200,
+                        networkQuietMs: 300,
+                        maxWaitMs: 2000,
                         checkSpinners: true,
                       });
                       
@@ -866,8 +871,8 @@ export class AIAgent {
               }
             } else {
               console.log(`[AIAgent] ℹ️ Next hint has no scope requirement - available widgets: ${visibleWidgets.slice(0, 5).join(', ')}`);
-              // No specific widget required, just wait for general page stability (optimized from 500ms)
-              await this.sleep(200);
+              // No specific widget required, just wait for general page stability (OPTIMIZED from 200ms)
+              await this.sleep(100);
             }
           } else {
             // Scroll failed - increment failure count
@@ -1033,9 +1038,10 @@ export class AIAgent {
         // which could be stale or point to wrong records (e.g., different account IDs)
 
         // ============================================================================
-        // 🚀 CONFIDENCE-BASED HYBRID EXECUTION
+        // 🚀 CONFIDENCE-BASED HYBRID EXECUTION (OPTIMIZED)
         // DOM finds candidates and calculates confidence
-        // Route based on confidence: 95%+ = instant, 80-94% = fast, <80% = LLM
+        // Route based on confidence: 95%+ = instant, 70-94% = fast, <70% = LLM
+        // OPTIMIZATION: Lowered threshold from 80% to 70% to skip more LLM calls
         // This saves ~500-1500ms per step for high-confidence actions
         // ============================================================================
         if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type')) {
@@ -1067,10 +1073,10 @@ export class AIAgent {
               timestamp: Date.now(),
             });
             
-            // Brief pause then continue
-            await this.sleep(150);
+            // Brief pause then continue (OPTIMIZED from 150ms)
+            await this.sleep(50);
             continue;
-          } else if (hybridResult.confidence !== undefined && hybridResult.confidence >= 60) {
+          } else if (hybridResult.confidence !== undefined && hybridResult.confidence >= 50) {
             console.log(`[Hybrid] 🧠 MEDIUM CONFIDENCE (${hybridResult.confidence}%) - Using LLM for disambiguation`);
             // Fall through to LLM call below
           } else if (hybridResult.confidence !== undefined) {
@@ -1367,8 +1373,8 @@ export class AIAgent {
           result.success ? 'completed' : 'failed'
         );
 
-        // Brief pause between actions (optimized from 500ms)
-        await this.sleep(150);
+        // Brief pause between actions (OPTIMIZED from 150ms)
+        await this.sleep(50);
       }
     } catch (error) {
       console.error('[AIAgent] Error:', error);
@@ -1617,6 +1623,24 @@ export class AIAgent {
         return { executed: false };
       }
 
+      // 🚀 OPTIMIZATION: Pre-scroll to recorded position BEFORE element detection
+      // This skips the slow "AI figuring out where to scroll" loop
+      if (hint.recordedScrollY !== undefined && hint.recordedScrollY > 0) {
+        const currentScrollY = window.scrollY || window.pageYOffset;
+        const scrollDiff = Math.abs(hint.recordedScrollY - currentScrollY);
+        
+        // Only scroll if we're significantly away from the recorded position (>100px)
+        if (scrollDiff > 100) {
+          console.log(`[Hybrid] 🚀 Pre-scrolling to recorded position: ${hint.recordedScrollY}px (current: ${currentScrollY}px)`);
+          window.scrollTo({
+            top: hint.recordedScrollY,
+            behavior: 'instant', // Use instant for speed
+          });
+          // Brief wait for DOM to update after scroll
+          await this.sleep(50);
+        }
+      }
+
       // Check if a dropdown is currently open
       const { generateDOMMap } = await import('../content/dom-map');
       const domMap = generateDOMMap();
@@ -1683,11 +1707,11 @@ export class AIAgent {
           };
           return scoreSelector(b) - scoreSelector(a); // Higher score first
         });
-        console.log(`[Hybrid] 🔍 DEBUG: Reordered selectors (scope-aware), trying highest priority first: ${selectors[0].substring(0, 80)}`);
+        debugLog('Hybrid', `🔍 Reordered selectors (scope-aware), trying highest priority first: ${selectors[0].substring(0, 80)}`);
       }
 
-      // DEBUG: Log selectors being tried
-      console.log(`[Hybrid] 🔍 DEBUG: Trying ${selectors.length} selectors:`, selectors.map(s => s.substring(0, 80)));
+      // DEBUG: Log selectors being tried (only in debug mode)
+      debugLog('Hybrid', `🔍 Trying ${selectors.length} selectors`, selectors.map(s => s.substring(0, 80)));
 
       // Find ALL matching candidates
       const candidates: HTMLElement[] = [];
@@ -1698,7 +1722,7 @@ export class AIAgent {
           
           // Handle XPath selectors using document.evaluate
           if (selector.startsWith('/')) {
-            console.log(`[Hybrid] 🔍 DEBUG: Trying XPath selector: ${selector.substring(0, 80)}`);
+            debugLog('Hybrid', `🔍 Trying XPath selector: ${selector.substring(0, 80)}`);
             try {
               const xpathResult = document.evaluate(
                 selector,
@@ -1716,14 +1740,14 @@ export class AIAgent {
                 }
               }
               found = xpathElements;
-              console.log(`[Hybrid] 🔍 DEBUG: XPath found ${found.length} elements`);
+              debugLog('Hybrid', `🔍 XPath found ${found.length} elements`);
             } catch (xpathError) {
-              console.log(`[Hybrid] 🔍 DEBUG: XPath evaluation failed:`, xpathError);
+              debugLog('Hybrid', `🔍 XPath evaluation failed`, xpathError);
               continue;
             }
           } else if (selector.includes(' >> ')) {
             // Handle shadow-piercing selectors (e.g., "gs-report-widget-element >> [aria-label='More Options']")
-            console.log(`[Hybrid] 🔍 DEBUG: Trying shadow-piercing selector: ${selector.substring(0, 80)}`);
+            debugLog('Hybrid', `🔍 Trying shadow-piercing selector: ${selector.substring(0, 80)}`);
             const parts = selector.split(' >> ');
             if (parts.length === 2) {
               let [hostSelector, innerSelector] = parts;
@@ -1732,14 +1756,14 @@ export class AIAgent {
               // This handles selectors like "gs-report-widget-element.ng-star-inserted"
               // that were recorded but may not match during replay
               hostSelector = this.normalizeShadowHostSelector(hostSelector);
-              console.log(`[Hybrid] 🔍 DEBUG: Normalized host selector: "${hostSelector}"`);
+              debugLog('Hybrid', `🔍 Normalized host selector: "${hostSelector}"`);
               
               // Find all shadow hosts matching the first part
               let hosts: NodeListOf<Element>;
               try {
                 hosts = document.querySelectorAll(hostSelector);
               } catch (selectorError) {
-                console.log(`[Hybrid] 🔍 DEBUG: Host selector invalid after normalization, trying tag-only fallback`);
+                debugLog('Hybrid', `🔍 Host selector invalid after normalization, trying tag-only fallback`);
                 // Extract just the tag name as last resort
                 const tagMatch = hostSelector.match(/^([a-z][-a-z0-9]*)/i);
                 if (tagMatch) {
@@ -1748,7 +1772,7 @@ export class AIAgent {
                   continue;
                 }
               }
-              console.log(`[Hybrid] 🔍 DEBUG: Found ${hosts.length} shadow hosts for "${hostSelector}"`);
+              debugLog('Hybrid', `🔍 Found ${hosts.length} shadow hosts for "${hostSelector}"`);
               
               const shadowElements: Element[] = [];
               for (const host of Array.from(hosts)) {
@@ -1756,22 +1780,22 @@ export class AIAgent {
                   try {
                     const innerElements = host.shadowRoot.querySelectorAll(innerSelector);
                     shadowElements.push(...Array.from(innerElements));
-                    console.log(`[Hybrid] 🔍 DEBUG: Found ${innerElements.length} elements in shadow root`);
+                    debugLog('Hybrid', `🔍 Found ${innerElements.length} elements in shadow root`);
                   } catch (innerError) {
-                    console.log(`[Hybrid] 🔍 DEBUG: Inner selector failed:`, innerError);
+                    debugLog('Hybrid', `🔍 Inner selector failed`, innerError);
                   }
                 }
               }
               found = shadowElements;
-              console.log(`[Hybrid] 🔍 DEBUG: Shadow-piercing found ${found.length} total elements`);
+              debugLog('Hybrid', `🔍 Shadow-piercing found ${found.length} total elements`);
             } else {
-              console.log(`[Hybrid] 🔍 DEBUG: Invalid shadow-piercing selector format`);
+              debugLog('Hybrid', `🔍 Invalid shadow-piercing selector format`);
               continue;
             }
           } else {
             // CSS selector
             found = document.querySelectorAll(selector);
-            console.log(`[Hybrid] 🔍 DEBUG: CSS selector "${selector.substring(0, 80)}" found ${found.length} elements`);
+            debugLog('Hybrid', `🔍 CSS selector "${selector.substring(0, 80)}" found ${found.length} elements`);
           }
           
           let visibleCount = 0;
@@ -1787,24 +1811,24 @@ export class AIAgent {
             }
           }
           
-          console.log(`[Hybrid] 🔍 DEBUG: ${visibleCount} of ${found.length} passed visibility+size checks`);
+          debugLog('Hybrid', `🔍 ${visibleCount} of ${found.length} passed visibility+size checks`);
           
           // If we found a match with this selector, stop trying others
           // With selector prioritization, we try widget-scoped selectors first, so if they match, we're done!
           if (candidates.length > 0) {
-            console.log(`[Hybrid] 🔍 DEBUG: Stopping selector search - found ${candidates.length} candidates with first matching selector`);
+            debugLog('Hybrid', `🔍 Stopping selector search - found ${candidates.length} candidates with first matching selector`);
             break;
           }
         } catch (err) {
-          console.log(`[Hybrid] 🔍 DEBUG: Selector failed:`, err);
+          debugLog('Hybrid', `🔍 Selector failed`, err);
           // Invalid selector, try next
         }
       }
       
       // DEBUG: Log actual candidate count to diagnose "unique match" bug
-      console.log(`[Hybrid] 🔍 DEBUG: Found ${candidates.length} candidates matching selectors`);
+      debugLog('Hybrid', `🔍 Found ${candidates.length} candidates matching selectors`);
       if (candidates.length > 0) {
-        console.log(`[Hybrid] 🔍 DEBUG: First 3 candidates:`, candidates.slice(0, 3).map(c => ({
+        debugLog('Hybrid', `🔍 First 3 candidates`, candidates.slice(0, 3).map(c => ({
           tag: c.tagName,
           text: c.textContent?.substring(0, 30),
           ariaLabel: c.getAttribute('aria-label'),
@@ -1900,22 +1924,22 @@ export class AIAgent {
         return await this.instantExecute(hint, confidenceAnalysis.bestCandidate, confidenceAnalysis.confidence);
       }
       
-      // MEDIUM-HIGH CONFIDENCE (80-94%): Execute with caution
-      // Still fast, but we're slightly less certain
-      if (confidenceAnalysis.confidence >= 80 && confidenceAnalysis.bestCandidate) {
-        console.log('[Hybrid] ⚡ MEDIUM-HIGH CONFIDENCE (80-94%) - Fast execution with logging');
+      // MEDIUM-HIGH CONFIDENCE (70-94%): Execute with caution (OPTIMIZED from 80%)
+      // Lowered threshold to skip more LLM calls - saves ~500-1500ms per step
+      if (confidenceAnalysis.confidence >= 70 && confidenceAnalysis.bestCandidate) {
+        console.log('[Hybrid] ⚡ MEDIUM-HIGH CONFIDENCE (70-94%) - Fast execution');
         return await this.instantExecute(hint, confidenceAnalysis.bestCandidate, confidenceAnalysis.confidence);
       }
       
-      // MEDIUM CONFIDENCE (60-79%): Let LLM disambiguate
+      // MEDIUM CONFIDENCE (50-69%): Let LLM disambiguate (OPTIMIZED from 60%)
       // DOM found candidates, but LLM should pick the right one
-      if (confidenceAnalysis.confidence >= 60) {
-        console.log('[Hybrid] 🧠 MEDIUM CONFIDENCE (60-79%) - Let LLM pick from candidates');
+      if (confidenceAnalysis.confidence >= 50) {
+        console.log('[Hybrid] 🧠 MEDIUM CONFIDENCE (50-69%) - Let LLM pick from candidates');
         return { executed: false, confidence: confidenceAnalysis.confidence };
       }
       
-      // LOW CONFIDENCE (<60%): Full LLM recovery
-      console.log('[Hybrid] 🔧 LOW CONFIDENCE (<60%) - Full LLM recovery needed');
+      // LOW CONFIDENCE (<50%): Full LLM recovery (OPTIMIZED from 60%)
+      console.log('[Hybrid] 🔧 LOW CONFIDENCE (<50%) - Full LLM recovery needed');
       return { executed: false, confidence: confidenceAnalysis.confidence };
       
     } catch (error) {
@@ -2027,9 +2051,12 @@ export class AIAgent {
         }
       }
       
-      // Wait for stability
+      // Invalidate DOM map cache after action (OPTIMIZATION)
+      invalidateDOMMapCache();
+      
+      // Wait for stability (OPTIMIZED from 2000ms)
       const { StateWaitEngine } = await import('../content/state-wait-engine');
-      await StateWaitEngine.waitForStability({ maxWaitMs: 2000 });
+      await StateWaitEngine.waitForStability({ maxWaitMs: 1000 });
       
       console.log(`[Hybrid] ⚡ ${hint.actionType} executed successfully (${confidence}% confidence)`);
       return { executed: true, success: true, confidence };
@@ -3118,8 +3145,8 @@ export class AIAgent {
         
         if (clickResult.success) {
           console.log('[AIAgent] ✅ Coordinate click succeeded');
-          // Wait for stability after click
-          await StateWaitEngine.waitForStability({ maxWaitMs: 2000 });
+          // Wait for stability after click (OPTIMIZED from 2000ms)
+          await StateWaitEngine.waitForStability({ maxWaitMs: 1000 });
           return { success: true };
         }
         

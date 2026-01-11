@@ -515,7 +515,11 @@ export class VariableDetector {
     
     if (!selectedText) return null;
 
+    // FIX: Use semantic anchors for field name (they contain the actual dropdown label like "Account Status")
+    // This prevents multiple dropdowns from having the same variableName "selection"
     const fieldName = payload.label || 
+                     payload.aiEvidence?.semanticAnchors?.textLabel ||
+                     payload.aiEvidence?.semanticAnchors?.ariaLabel ||
                      payload.context?.container?.text || 
                      'Selection';
     
@@ -525,13 +529,14 @@ export class VariableDetector {
       hasOptions: options.length > 0,
       optionsCount: options.length,
       options: options.slice(0, 5), // Show first 5 options
+      semanticAnchors: payload.aiEvidence?.semanticAnchors,
     });
 
     return {
       stepIndex,
       stepId: `${payload.timestamp}`,
       fieldName,
-      fieldLabel: payload.label,
+      fieldLabel: payload.label || payload.aiEvidence?.semanticAnchors?.textLabel,
       variableName: this.generateVariableName(fieldName),
       defaultValue: selectedText,
       isVariable: true,

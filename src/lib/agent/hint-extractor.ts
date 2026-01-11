@@ -134,6 +134,11 @@ export class HintExtractor {
         console.log(`[HintExtractor] Using label/placeholder as targetText for INPUT: "${targetText}"`);
       }
       
+      // 🚀 OPTIMIZATION: Extract recorded scroll position for pre-scrolling
+      // This allows the executor to scroll to the right place BEFORE element detection
+      const recordedScrollY = payload.viewport?.scrollY;
+      const recordedScrollX = payload.viewport?.scrollX;
+      
       return {
         stepNumber: index + 1,
         description,
@@ -151,6 +156,9 @@ export class HintExtractor {
         naturalLanguage: this.extractNaturalLanguage(step),
         spreadsheetContext: payload.spreadsheetContext,
         iframeContext: payload.iframeContext,
+        // 🚀 Pre-scroll optimization: store recorded scroll position
+        recordedScrollY,
+        recordedScrollX,
       };
     });
   }
@@ -324,14 +332,26 @@ export class HintExtractor {
     }
     
     // Substitute variable value if found
-    if (stepVariable && variableValues && variableValues[stepVariable.variableName] !== undefined) {
-      const userValue = variableValues[stepVariable.variableName];
-      console.log(`[HintExtractor] 📝 Variable substitution: step ${index} "${originalValue}" → "${userValue}"`);
-      value = userValue;
+    // FIX: Check stepId first, then variableName (stepId is unique, variableName may have collisions)
+    if (stepVariable && variableValues) {
+      // Try stepId first (unique identifier for each step)
+      let userValue: string | undefined = undefined;
+      if (stepVariable.stepId && variableValues[stepVariable.stepId] !== undefined) {
+        userValue = variableValues[stepVariable.stepId];
+        console.log(`[HintExtractor] 📝 Variable substitution via stepId: step ${index} "${originalValue}" → "${userValue}"`);
+      } else if (variableValues[stepVariable.variableName] !== undefined) {
+        // Fall back to variableName (legacy)
+        userValue = variableValues[stepVariable.variableName];
+        console.log(`[HintExtractor] 📝 Variable substitution via variableName: step ${index} "${originalValue}" → "${userValue}"`);
+      }
       
-      // CRITICAL: For dropdown selections (CLICK steps), also update the description
-      if (step.type === 'CLICK' && originalValue !== userValue) {
-        console.log(`[HintExtractor] 📝 Updating description for dropdown variable substitution`);
+      if (userValue !== undefined) {
+        value = userValue;
+        
+        // CRITICAL: For dropdown selections (CLICK steps), also update the description
+        if (step.type === 'CLICK' && originalValue !== userValue) {
+          console.log(`[HintExtractor] 📝 Updating description for dropdown variable substitution`);
+        }
       }
     } else if (value && variableValues) {
       // Legacy {{varName}} pattern replacement

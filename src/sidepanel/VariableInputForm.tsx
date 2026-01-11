@@ -88,22 +88,23 @@ export function VariableInputForm({
   onConfirm,
   onCancel,
 }: VariableInputFormProps) {
-  // Initialize values with defaults
+  // Initialize values with defaults - use stepId as key to avoid collisions
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const variable of variables.variables) {
       // For dropdowns, ensure default value exists in options
       if (variable.isDropdown && variable.options && variable.options.length > 0) {
         const defaultInOptions = variable.options.includes(variable.defaultValue || '');
-        initial[variable.variableName] = defaultInOptions ? (variable.defaultValue || '') : variable.options[0];
+        initial[variable.stepId] = defaultInOptions ? (variable.defaultValue || '') : variable.options[0];
         console.log('[VariableInputForm] Dropdown init:', {
+          stepId: variable.stepId,
           variableName: variable.variableName,
           defaultValue: variable.defaultValue,
           defaultInOptions,
-          selectedValue: initial[variable.variableName],
+          selectedValue: initial[variable.stepId],
         });
       } else {
-        initial[variable.variableName] = variable.defaultValue || '';
+        initial[variable.stepId] = variable.defaultValue || '';
       }
     }
     console.log('[VariableInputForm] Initial values:', initial);
@@ -123,19 +124,19 @@ export function VariableInputForm({
   /**
    * Handle input change
    */
-  const handleChange = (variableName: string, value: string) => {
-    console.log('[VariableInputForm] Value changed:', { variableName, value, previousValues: values });
+  const handleChange = (stepId: string, value: string) => {
+    console.log('[VariableInputForm] Value changed:', { stepId, value, previousValues: values });
     setValues(prev => {
-      const next = { ...prev, [variableName]: value };
+      const next = { ...prev, [stepId]: value };
       console.log('[VariableInputForm] Updated values:', next);
       return next;
     });
     
     // Clear error when user types
-    if (errors[variableName]) {
+    if (errors[stepId]) {
       setErrors(prev => {
         const next = { ...prev };
-        delete next[variableName];
+        delete next[stepId];
         return next;
       });
     }
@@ -145,11 +146,11 @@ export function VariableInputForm({
    * Handle input blur - validate on blur
    */
   const handleBlur = (variable: VariableDefinition) => {
-    setTouched(prev => ({ ...prev, [variable.variableName]: true }));
+    setTouched(prev => ({ ...prev, [variable.stepId]: true }));
     
-    const error = validateInput(values[variable.variableName], variable.inputType, variable.isDropdown);
+    const error = validateInput(values[variable.stepId], variable.inputType, variable.isDropdown);
     if (error) {
-      setErrors(prev => ({ ...prev, [variable.variableName]: error }));
+      setErrors(prev => ({ ...prev, [variable.stepId]: error }));
     }
   };
 
@@ -159,7 +160,7 @@ export function VariableInputForm({
   const handleUseDefaults = () => {
     const defaults: Record<string, string> = {};
     for (const variable of variables.variables) {
-      defaults[variable.variableName] = variable.defaultValue || '';
+      defaults[variable.stepId] = variable.defaultValue || '';
     }
     setValues(defaults);
     setErrors({});
@@ -175,9 +176,9 @@ export function VariableInputForm({
     // Validate all fields
     const newErrors: Record<string, string> = {};
     for (const variable of variables.variables) {
-      const error = validateInput(values[variable.variableName], variable.inputType, variable.isDropdown);
+      const error = validateInput(values[variable.stepId], variable.inputType, variable.isDropdown);
       if (error) {
-        newErrors[variable.variableName] = error;
+        newErrors[variable.stepId] = error;
       }
     }
 
@@ -186,15 +187,26 @@ export function VariableInputForm({
       // Mark all as touched to show errors
       const allTouched: Record<string, boolean> = {};
       for (const variable of variables.variables) {
-        allTouched[variable.variableName] = true;
+        allTouched[variable.stepId] = true;
       }
       setTouched(allTouched);
       return;
     }
 
+    // Transform values from stepId keys to include BOTH stepId AND variableName as keys
+    // This ensures the hint-extractor can find values by either key (stepId is unique, variableName may collide)
+    const valuesForParent: Record<string, string> = {};
+    for (const variable of variables.variables) {
+      const value = values[variable.stepId];
+      // Add by stepId (unique - prevents collisions between dropdowns with same variableName)
+      valuesForParent[variable.stepId] = value;
+      // Also add by variableName for backwards compatibility
+      valuesForParent[variable.variableName] = value;
+    }
+
     // Pass edited description if different from original
     const editedDesc = description !== workflowDescription ? description : undefined;
-    onConfirm(values, editedDesc);
+    onConfirm(valuesForParent, editedDesc);
   };
 
   return (
@@ -256,12 +268,12 @@ export function VariableInputForm({
         <form onSubmit={handleSubmit} className="space-y-4">
           {variables.variables.map((variable) => {
             const inputType = getInputType(variable.inputType);
-            const hasError = touched[variable.variableName] && errors[variable.variableName];
+            const hasError = touched[variable.stepId] && errors[variable.stepId];
             
             return (
-              <div key={variable.variableName} className="space-y-1">
+              <div key={variable.stepId} className="space-y-1">
                 <label 
-                  htmlFor={variable.variableName}
+                  htmlFor={variable.stepId}
                   className="block text-sm font-medium text-foreground"
                 >
                   {variable.fieldName}
@@ -280,26 +292,27 @@ export function VariableInputForm({
                 {/* Show dropdown if options are available, otherwise show input */}
                 {variable.isDropdown && variable.options && variable.options.length > 0 ? (
                   <select
-                    id={variable.variableName}
-                    value={values[variable.variableName] ?? variable.options[0]}
+                    id={variable.stepId}
+                    value={values[variable.stepId] ?? variable.options[0]}
                     onChange={(e) => {
                       const newValue = e.target.value;
                       console.log('[VariableInputForm] Dropdown changed:', {
+                        stepId: variable.stepId,
                         variableName: variable.variableName,
                         newValue,
                         currentValues: { ...values },
                       });
                       // Use functional update to ensure we preserve all other values
                       setValues(currentValues => {
-                        const updated = { ...currentValues, [variable.variableName]: newValue };
+                        const updated = { ...currentValues, [variable.stepId]: newValue };
                         console.log('[VariableInputForm] State after update:', updated);
                         return updated;
                       });
                       // Clear any error
-                      if (errors[variable.variableName]) {
+                      if (errors[variable.stepId]) {
                         setErrors(prev => {
                           const next = { ...prev };
-                          delete next[variable.variableName];
+                          delete next[variable.stepId];
                           return next;
                         });
                       }
@@ -319,10 +332,10 @@ export function VariableInputForm({
                   </select>
                 ) : (
                   <input
-                    id={variable.variableName}
+                    id={variable.stepId}
                     type={inputType}
-                    value={values[variable.variableName]}
-                    onChange={(e) => handleChange(variable.variableName, e.target.value)}
+                    value={values[variable.stepId]}
+                    onChange={(e) => handleChange(variable.stepId, e.target.value)}
                     onBlur={() => handleBlur(variable)}
                     placeholder={variable.defaultValue || `Enter ${variable.fieldName.toLowerCase()}`}
                     className={`w-full px-3 py-2 border rounded-md bg-background text-foreground ${
@@ -334,7 +347,7 @@ export function VariableInputForm({
                 )}
                 
                 {hasError && (
-                  <p className="text-xs text-red-500">{errors[variable.variableName]}</p>
+                  <p className="text-xs text-red-500">{errors[variable.stepId]}</p>
                 )}
                 
                 {variable.isDropdown && variable.options && (
@@ -349,7 +362,7 @@ export function VariableInputForm({
                   </p>
                 )}
                 
-                {variable.defaultValue && values[variable.variableName] !== variable.defaultValue && (
+                {variable.defaultValue && values[variable.stepId] !== variable.defaultValue && (
                   <p className="text-xs text-muted-foreground">
                     Default: <span className="font-mono">{variable.defaultValue.substring(0, 30)}{variable.defaultValue.length > 30 ? '...' : ''}</span>
                   </p>

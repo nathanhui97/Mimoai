@@ -132,9 +132,9 @@ export class StateWaitEngine {
    */
   static async waitForStability(config: StabilityConfig = {}): Promise<StabilityResult> {
     const {
-      domQuietMs = 400,           // Reasonable middle ground (300-600ms)
-      networkQuietMs = 600,       // Slightly longer for network (400-800ms)
-      maxWaitMs = 5000,           // Total timeout
+      domQuietMs = 150,           // OPTIMIZED from 400ms for faster execution
+      networkQuietMs = 200,       // OPTIMIZED from 600ms for faster execution
+      maxWaitMs = 3000,           // OPTIMIZED from 5000ms - shorter max wait
       checkSpinners = true,
     } = config;
     
