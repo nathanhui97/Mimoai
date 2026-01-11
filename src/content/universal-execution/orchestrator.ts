@@ -18,6 +18,7 @@ import { resolveElement, resolveAcrossBoundaries } from './element-resolver';
 import { waitForDOMStable } from './state-verifier';
 import { executeHumanClick } from './action-primitives/human-click';
 import { executeDropdownSelect } from './action-primitives/dropdown-select';
+import { getElementLabel } from '../../lib/label-utils';
 import { executeTextInput } from './action-primitives/text-input';
 import { isDropdownPattern, isSimpleClickPattern, isTextInputPattern } from './component-detector';
 import { aiConfig } from '../../lib/ai-config';
@@ -828,7 +829,13 @@ export function convertLegacyStep(
   const signature: ElementSignature = {
     identity: {
       testId: payload.context?.uniqueAttributes?.['data-testid'],
-      ariaLabel: payload.aiEvidence?.semanticAnchors?.ariaLabel,
+      ariaLabel: getElementLabel(
+        payload.aiEvidence, 
+        payload.label, 
+        payload.context?.uniqueAttributes,
+        payload.context?.formCoordinates,
+        payload.context?.uniqueAttributes?.placeholder
+      ),
       role: payload.elementRole,
       name: payload.label,
     },

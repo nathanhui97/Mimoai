@@ -68,6 +68,11 @@ export class LabelFinder {
     const parentLabelResult = this.findParentLabel(inputElement);
     if (parentLabelResult) results.push(parentLabelResult);
 
+    // Strategy 4.5: Salesforce Lightning (SLDS) label (high confidence)
+    // Must come before generic form patterns to avoid picking up validation messages
+    const sldsLabelResult = this.findSalesforceLabel(inputElement);
+    if (sldsLabelResult) results.push(sldsLabelResult);
+
     // Strategy 5: Shadow DOM label (medium-high confidence)
     const shadowLabelResult = this.findShadowDOMLabel(inputElement);
     if (shadowLabelResult) results.push(shadowLabelResult);
@@ -236,6 +241,87 @@ export class LabelFinder {
       }
       parent = parent.parentElement;
       depth++;
+    }
+
+    return null;
+  }
+
+  // ============================================================================
+  // Strategy 4.5: Salesforce Lightning Design System (SLDS) label
+  // ============================================================================
+  private static findSalesforceLabel(inputElement: HTMLElement): LabelResult | null {
+    // Check if we're in a Salesforce Lightning context
+    const isSalesforce = document.querySelector('lightning-input, lightning-combobox, [class*="slds-"]') !== null;
+    if (!isSalesforce) return null;
+
+    // Find the SLDS form element container
+    const sldsContainer = inputElement.closest(
+      'lightning-input, lightning-combobox, lightning-textarea, lightning-select, ' +
+      'lightning-dual-listbox, lightning-radio-group, lightning-checkbox-group, ' +
+      '.slds-form-element, [class*="form-element"]'
+    );
+    if (!sldsContainer) return null;
+
+    // Priority 1: Look for .slds-form-element__label specifically
+    // This is the cleanest source - it contains ONLY the label text
+    const sldsLabelSelectors = [
+      '.slds-form-element__label',
+      'label.slds-form-element__label',
+      '[class*="form-element__label"]',
+    ];
+
+    for (const selector of sldsLabelSelectors) {
+      const labelElement = sldsContainer.querySelector(selector);
+      if (labelElement) {
+        // Get text content but exclude any nested elements like abbreviations
+        let labelText = '';
+        for (const node of labelElement.childNodes) {
+          if (node.nodeType === Node.TEXT_NODE) {
+            labelText += node.textContent || '';
+          } else if (node.nodeType === Node.ELEMENT_NODE) {
+            const el = node as Element;
+            // Include text from abbr (required indicator) but skip validation/help elements
+            if (el.tagName === 'ABBR' || el.tagName === 'SPAN') {
+              const text = el.textContent?.trim() || '';
+              // Skip asterisks - we'll clean them anyway
+              if (text !== '*') {
+                labelText += text;
+              }
+            }
+          }
+        }
+        
+        labelText = this.cleanLabelText(labelText.trim());
+        if (labelText) {
+          console.log(`[LabelFinder] Found SLDS label: "${labelText}" via ${selector}`);
+          return { label: labelText, confidence: 0.92, source: 'form-element-label' };
+        }
+      }
+    }
+
+    // Priority 2: Check shadow root of Lightning web components
+    if (sldsContainer.shadowRoot) {
+      for (const selector of sldsLabelSelectors) {
+        const labelElement = sldsContainer.shadowRoot.querySelector(selector);
+        if (labelElement) {
+          const text = this.cleanLabelText(labelElement.textContent);
+          if (text) {
+            console.log(`[LabelFinder] Found SLDS shadow label: "${text}"`);
+            return { label: text, confidence: 0.9, source: 'shadow-dom' };
+          }
+        }
+      }
+    }
+
+    // Priority 3: Check label attribute on Lightning component
+    const lightningLabel = sldsContainer.getAttribute('label') || 
+                          sldsContainer.getAttribute('field-label');
+    if (lightningLabel) {
+      const text = this.cleanLabelText(lightningLabel);
+      if (text) {
+        console.log(`[LabelFinder] Found Lightning component label attribute: "${text}"`);
+        return { label: text, confidence: 0.88, source: 'custom-component' };
+      }
     }
 
     return null;
@@ -628,11 +714,18 @@ export class LabelFinder {
 
   /**
    * Clean and normalize label text
+   * 
+   * Handles:
+   * - Whitespace normalization
+   * - Required field indicators (*, required)
+   * - Validation messages (Complete this field, Required, Invalid, etc.)
+   * - Duplicated label text (e.g., "Account NameAccount Name")
+   * - Trailing colons and dashes
    */
   private static cleanLabelText(text: string | null | undefined): string {
     if (!text) return '';
     
-    return text
+    let cleaned = text
       .trim()
       .replace(/\s+/g, ' ')           // Normalize whitespace
       .replace(/^\*\s*/, '')          // Remove leading asterisk (required indicator)
@@ -640,6 +733,47 @@ export class LabelFinder {
       .replace(/:\s*$/, '')           // Remove trailing colon
       .replace(/^\s*-\s*/, '')        // Remove leading dash
       .trim();
+    
+    // Remove common validation messages (case-insensitive)
+    const validationPatterns = [
+      /Complete this field\.?/gi,
+      /This field is required\.?/gi,
+      /Required field\.?/gi,
+      /Please fill out this field\.?/gi,
+      /Invalid value\.?/gi,
+      /Enter a valid value\.?/gi,
+      /Error:?\s*/gi,
+      /\(required\)/gi,
+      /\*\s*required/gi,
+    ];
+    
+    for (const pattern of validationPatterns) {
+      cleaned = cleaned.replace(pattern, '').trim();
+    }
+    
+    // Handle duplicated text (e.g., "Account NameAccount Name" -> "Account Name")
+    // Look for a pattern where text is repeated immediately
+    const dedupeMatch = cleaned.match(/^(.{3,})\1+$/);
+    if (dedupeMatch) {
+      cleaned = dedupeMatch[1].trim();
+    }
+    
+    // Also check for partial duplicates (e.g., "*Account NameAccount Name")
+    // where the second occurrence starts without the asterisk
+    const halfLength = Math.floor(cleaned.length / 2);
+    if (halfLength >= 3) {
+      const firstHalf = cleaned.substring(0, halfLength);
+      const secondHalf = cleaned.substring(halfLength);
+      // Check if they're similar (accounting for small differences)
+      if (firstHalf.trim().toLowerCase() === secondHalf.trim().toLowerCase()) {
+        cleaned = firstHalf.trim();
+      }
+    }
+    
+    // Final cleanup
+    cleaned = cleaned.replace(/\s+/g, ' ').trim();
+    
+    return cleaned;
   }
 
   /**

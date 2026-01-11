@@ -249,8 +249,14 @@ interface DOMAgentResponse {
   rowOffset?: number;         // 1 (first row after header)
   
   // For recovery mode
-  strategy?: 'RETRY_WITH_VISION' | 'RETRY_LOOSER' | 'SCROLL_AND_RETRY' | 'DISMISS_POPUP' | 'GIVE_UP';
+  strategy?: 'RETRY_WITH_VISION' | 'RETRY_LOOSER' | 'SCROLL_AND_RETRY' | 'DISMISS_POPUP' | 'GIVE_UP' | 'CLICK_BY_COORDINATES';
   refinedTarget?: SemanticTarget;
+  
+  // Visual fallback coordinates (optional, used when DOM resolution may fail)
+  coordinates?: {
+    x: number;
+    y: number;
+  };
 }
 
 // ============================================================================
@@ -332,6 +338,21 @@ serve(async (req) => {
           }
         });
         console.log('📷 Including reference screenshot in request (', mimeType, ', ', base64Data.length, 'chars)');
+      }
+    }
+    
+    // Add CURRENT page screenshot if available (live visual context)
+    if (payload.screenshot) {
+      const base64Data = extractBase64Data(payload.screenshot);
+      if (base64Data) {
+        const mimeType = detectMimeType(payload.screenshot);
+        parts.push({
+          inline_data: {
+            mime_type: mimeType,
+            data: base64Data
+          }
+        });
+        console.log('👁️ Including CURRENT screenshot in request (', mimeType, ', ', base64Data.length, 'chars)');
       }
     }
     
@@ -561,6 +582,24 @@ USE THIS VISUAL to help identify the correct element:
 - Match the visual appearance with elements in the DOM map below
 - If the DOM map has multiple similar elements, use the visual to pick the right one
 - The screenshot shows the EXACT element or dropdown that needs to be interacted with
+` : ''}
+${payload.screenshot ? `
+## 👁️ CURRENT PAGE SCREENSHOT (LIVE STATE)
+A screenshot of the CURRENT page is attached showing what the page looks like RIGHT NOW.
+Use this to:
+- Identify elements that may be poorly labeled in the DOM
+- Verify the page state matches what you expect
+- See the visual layout when DOM-based finding may be difficult
+- Understand context (modals, overlays, form sections)
+
+FALLBACK OPTION - When DOM resolution is likely to fail:
+- If you're VERY confident about an element's location in the screenshot
+- AND the element lacks good DOM identifiers (no role/name/testId)
+- You MAY include "coordinates": {"x": <number>, "y": <number>} in your response
+- Coordinates are in pixels from top-left of viewport
+- This will be used as a LAST RESORT fallback if DOM-based finding fails
+
+However, ALWAYS prefer semantic targets (role, name, text) when possible!
 ` : ''}
 ## Current Goal
 ${goal}
@@ -937,17 +976,18 @@ ${attemptNumber || 1} of 3
 2. **RETRY_LOOSER**: Loosen match criteria, add nearby text, broaden scope (use when AMBIGUOUS or NOT_FOUND)
 3. **SCROLL_AND_RETRY**: Scroll page and retry (use when element might be off-screen)
 4. **DISMISS_POPUP**: Dismiss popups/modals that might be blocking (use when modal is present)
-5. **GIVE_UP**: Cannot proceed (use on 3rd attempt or when fundamentally impossible)
+${payload.screenshot ? `5. **CLICK_BY_COORDINATES**: Click at exact pixel coordinates from screenshot (LAST RESORT - use when DOM has no good identifiers and screenshot is available)` : ''}
+${payload.screenshot ? '6' : '5'}. **GIVE_UP**: Cannot proceed (use on 3rd attempt or when fundamentally impossible)
 
 ## Decision Rules
 
 - NOT_FOUND on attempt 1: Try SCROLL_AND_RETRY or RETRY_LOOSER
-- NOT_FOUND on attempt 2: Try RETRY_WITH_VISION (if screenshot available)
-- NOT_FOUND on attempt 3: GIVE_UP
+- NOT_FOUND on attempt 2: Try RETRY_WITH_VISION (if screenshot available)${payload.screenshot ? ' or CLICK_BY_COORDINATES if element has no good DOM identifiers' : ''}
+- NOT_FOUND on attempt 3: ${payload.screenshot ? 'Try CLICK_BY_COORDINATES as last resort, or ' : ''}GIVE_UP
 - AMBIGUOUS: Always try RETRY_LOOSER with disambiguation hints
 - NOT_INTERACTABLE: Try DISMISS_POPUP or SCROLL_AND_RETRY
 - UNSAFE_ACTION: GIVE_UP immediately (safety)
-- SCOPE_FAILED: Try RETRY_LOOSER with broader scope
+- SCOPE_FAILED: Try RETRY_LOOSER with broader scope${payload.screenshot ? ', or CLICK_BY_COORDINATES if you can see the element in screenshot' : ''}
 
 Respond with JSON:
 
@@ -973,7 +1013,23 @@ FOR DISMISS_POPUP strategy:
   },
   "reasoning": "why this strategy will help"
 }
+${payload.screenshot ? `
+FOR CLICK_BY_COORDINATES strategy (LAST RESORT):
+{
+  "strategy": "CLICK_BY_COORDINATES",
+  "coordinates": {
+    "x": 450,
+    "y": 320
+  },
+  "reasoning": "Element visible in screenshot at these coordinates but has no good DOM identifiers"
+}
 
+IMPORTANT: Only use CLICK_BY_COORDINATES when:
+- You can clearly see the element in the screenshot
+- The element has no role, name, testId, or other good DOM identifiers
+- Other strategies have already failed
+- Coordinates are in pixels from top-left of viewport
+` : ''}
 FOR RETRY_LOOSER or RETRY_WITH_VISION:
 {
   "strategy": "RETRY_LOOSER" | "RETRY_WITH_VISION",
@@ -1027,12 +1083,23 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     
     // Check if this is a recovery response
     if (payload.mode === 'recover' && parsed.strategy) {
-      return {
+      const recoveryResponse: DOMAgentResponse = {
         strategy: parsed.strategy,
         refinedTarget: parsed.refinedTarget,
         reasoning: parsed.reasoning || 'No reasoning provided',
         confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
       };
+      
+      // Add coordinates if provided for CLICK_BY_COORDINATES strategy
+      if (parsed.coordinates && typeof parsed.coordinates.x === 'number' && typeof parsed.coordinates.y === 'number') {
+        recoveryResponse.coordinates = {
+          x: parsed.coordinates.x,
+          y: parsed.coordinates.y,
+        };
+        console.log('[parseGeminiResponse] Recovery coordinates provided:', recoveryResponse.coordinates);
+      }
+      
+      return recoveryResponse;
     }
     
     // CRITICAL: Enforce candidate selection when candidates were provided
@@ -1192,6 +1259,15 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     // Add fail reason
     if (parsed.reason) {
       response.reason = parsed.reason;
+    }
+    
+    // Add coordinates for visual fallback (if provided and valid)
+    if (parsed.coordinates && typeof parsed.coordinates.x === 'number' && typeof parsed.coordinates.y === 'number') {
+      response.coordinates = {
+        x: parsed.coordinates.x,
+        y: parsed.coordinates.y,
+      };
+      console.log('[parseGeminiResponse] Coordinates provided for visual fallback:', response.coordinates);
     }
     
     // Add read action params

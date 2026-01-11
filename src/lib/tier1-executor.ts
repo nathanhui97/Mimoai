@@ -18,6 +18,7 @@ import { Resolver, type ResolveResult } from '../content/resolver';
 import { StateWaitEngine } from '../content/state-wait-engine';
 import type { LocatorBundle, LocatorStrategy } from '../types/locator';
 import type { Intent } from '../types/intent';
+import { SelectorReliability } from './selector-reliability';
 
 // ============================================================================
 // Types
@@ -174,6 +175,13 @@ export class Tier1Executor {
     const resolveResult = await this.resolveElement(bundle, intent);
     
     if (resolveResult.status !== 'success') {
+      // Track selector failures (async, non-blocking)
+      if (target.recordedFallbackSelectors) {
+        const url = window.location.href;
+        for (const selector of target.recordedFallbackSelectors) {
+          SelectorReliability.trackResult(selector, url, false).catch(() => {});
+        }
+      }
       return resolveResult;
     }
     
@@ -290,6 +298,13 @@ export class Tier1Executor {
       }
     }
     
+    // Track selector reliability (async, non-blocking)
+    if (target.recordedFallbackSelectors && target.recordedFallbackSelectors.length > 0) {
+      const selector = target.recordedFallbackSelectors[0];
+      const url = window.location.href;
+      SelectorReliability.trackResult(selector, url, true).catch(() => {});
+    }
+    
     return {
       status: 'success',
       details: {
@@ -332,6 +347,13 @@ export class Tier1Executor {
       
       if (resolveResult.status !== 'success') {
         console.log('[Tier1] ❌ Failed to resolve fieldTarget, falling back to activeElement');
+        // Track selector failures (async, non-blocking)
+        if (fieldTarget.recordedFallbackSelectors) {
+          const url = window.location.href;
+          for (const selector of fieldTarget.recordedFallbackSelectors) {
+            SelectorReliability.trackResult(selector, url, false).catch(() => {});
+          }
+        }
         // Fall back to activeElement instead of failing
         element = document.activeElement as Element;
         if (!element || element === document.body) {
@@ -339,6 +361,12 @@ export class Tier1Executor {
         }
       } else {
         element = resolveResult.details.element!;
+        // Track selector success (async, non-blocking)
+        if (fieldTarget.recordedFallbackSelectors && fieldTarget.recordedFallbackSelectors.length > 0) {
+          const selector = fieldTarget.recordedFallbackSelectors[0];
+          const url = window.location.href;
+          SelectorReliability.trackResult(selector, url, true).catch(() => {});
+        }
       }
     } else {
       // Use focused element
@@ -495,13 +523,30 @@ export class Tier1Executor {
       if (resolveResult.status !== 'success') {
         console.error('[Tier1] ❌ Failed to find option:', option);
         console.error('[Tier1] Available options:', Array.from(allOptions).map(o => o.textContent?.trim()));
+        // Track selector failures (async, non-blocking)
+        if (optionTarget.recordedFallbackSelectors) {
+          const url = window.location.href;
+          for (const selector of optionTarget.recordedFallbackSelectors) {
+            SelectorReliability.trackResult(selector, url, false).catch(() => {});
+          }
+        }
+        // CLEANUP: Close dropdown before returning failure
+        await this.closeAnyOpenDropdown();
         return resolveResult;
       }
       
       matchedOption = resolveResult.details.element!;
+      // Track selector success (async, non-blocking)
+      if (optionTarget.recordedFallbackSelectors && optionTarget.recordedFallbackSelectors.length > 0) {
+        const selector = optionTarget.recordedFallbackSelectors[0];
+        const url = window.location.href;
+        SelectorReliability.trackResult(selector, url, true).catch(() => {});
+      }
     }
     
     if (!matchedOption) {
+      // CLEANUP: Close dropdown before returning failure
+      await this.closeAnyOpenDropdown();
       return {
         status: 'rejected',
         code: 'NOT_FOUND',
@@ -1171,9 +1216,17 @@ export class Tier1Executor {
     if (bundle.recordedFallbackSelectors && bundle.recordedFallbackSelectors.length > 0) {
       console.log(`[Tier1] 🎯 Trying ${bundle.recordedFallbackSelectors.length} recorded fallback selectors...`);
       
-      // 🎯 CRITICAL: Sort selectors by specificity (high to low)
-      // This ensures we try [aria-label="X"] BEFORE //section[contains(.,"Y")]//button
-      const sortedSelectors = [...bundle.recordedFallbackSelectors].sort((a, b) => {
+      // 🎯 HYBRID SORTING: First by reliability (learned success rate), then by specificity
+      // This ensures we try selectors that have worked before AND are specific
+      const url = window.location.href;
+      const selectorsWithScores = await Promise.all(
+        bundle.recordedFallbackSelectors.map(async (selector) => ({
+          selector,
+          reliabilityScore: await SelectorReliability.getReliabilityScore(selector, url),
+        }))
+      );
+      
+      const sortedSelectors = selectorsWithScores.sort((a, b) => {
         const scoreSelector = (sel: string): number => {
           // Highest priority: Shadow-piercing selectors with aria-label (very specific)
           // These target a specific element inside a specific shadow host
@@ -1204,10 +1257,16 @@ export class Tier1Executor {
           // Default: medium-low priority
           return 40;
         };
-        return scoreSelector(b) - scoreSelector(a); // Higher score first
-      });
+        
+        // Hybrid scoring: Reliability (0-1) * 100 + Specificity (0-110)
+        // This gives reliability slightly more weight than specificity
+        const scoreA = a.reliabilityScore * 100 + scoreSelector(a.selector);
+        const scoreB = b.reliabilityScore * 100 + scoreSelector(b.selector);
+        
+        return scoreB - scoreA; // Higher score first
+      }).map(s => s.selector); // Extract just the selector string
       
-      console.log(`[Tier1] 📊 Sorted selectors by specificity (first 3):`, sortedSelectors.slice(0, 3).map(s => s.substring(0, 50)));
+      console.log(`[Tier1] 📊 Sorted selectors by reliability + specificity (first 3):`, sortedSelectors.slice(0, 3).map(s => s.substring(0, 50)));
       
       // 🎯 CRITICAL: Get expected text from bundle for verification
       // Fallback selectors can match the wrong element (e.g., first button in a section)
@@ -2213,6 +2272,62 @@ export class Tier1Executor {
     }
     
     return { safe: true };
+  }
+
+  /**
+   * Close any open dropdown by pressing Escape and clicking body
+   * Called when select action fails to prevent blocking subsequent actions
+   */
+  private static async closeAnyOpenDropdown(): Promise<void> {
+    console.log('[Tier1] 🧹 Cleaning up: Closing any open dropdown...');
+    
+    // Method 1: Press Escape to close dropdown
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      keyCode: 27,
+      which: 27,
+      bubbles: true,
+      cancelable: true,
+    }));
+    
+    await new Promise(resolve => setTimeout(resolve, 50));
+    
+    // Method 2: Click on document body to dismiss
+    document.body.click();
+    
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Verify dropdown closed
+    const remainingOptions = document.querySelectorAll('[role="option"]');
+    const remainingMenus = document.querySelectorAll('[role="listbox"]:not([hidden]), [role="menu"]:not([hidden])');
+    
+    if (remainingOptions.length > 0 || remainingMenus.length > 0) {
+      console.log('[Tier1] ⚠️ Dropdown may still be open, trying harder...');
+      
+      // Method 3: Click outside any focused element
+      const activeEl = document.activeElement;
+      if (activeEl && activeEl !== document.body) {
+        (activeEl as HTMLElement).blur?.();
+      }
+      
+      // Method 4: Press Escape on active element
+      if (activeEl) {
+        activeEl.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Escape',
+          code: 'Escape',
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        }));
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    const finalCheck = document.querySelectorAll('[role="option"]').length;
+    console.log(`[Tier1] 🧹 Dropdown cleanup complete. Remaining options: ${finalCheck}`);
   }
 
   /**

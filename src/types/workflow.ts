@@ -151,11 +151,23 @@ export interface AIEvidence {
     timestamp: number; // When the copy occurred
   };
   
-  /** Semantic anchors for element identification */
+  /**
+   * Semantic anchors for element identification
+   * 
+   * IMPORTANT: When extracting labels, use the `getElementLabel()` utility
+   * from `src/lib/label-utils.ts` to ensure consistent priority handling.
+   * 
+   * Different element types populate different fields:
+   * - INPUT fields: typically have `textLabel` (from associated <label> element)
+   * - Buttons/combobox with aria-label: have `ariaLabel`
+   * - Some elements have both
+   * 
+   * Direct access to these fields can cause bugs if you only check one source.
+   */
   semanticAnchors?: {
-    textLabel?: string; // Human-readable label
-    nearbyText?: string[]; // Array of nearby text content
-    ariaLabel?: string; // ARIA label if present
+    textLabel?: string; // Human-readable label from associated <label> element
+    nearbyText?: string[]; // Array of nearby text content for disambiguation
+    ariaLabel?: string; // ARIA label attribute if present
   };
 }
 
@@ -467,5 +479,21 @@ export interface SavedWorkflow {
   // Navigation optimization
   optimizedSteps?: WorkflowStep[]; // Optimized version of workflow steps for playback
   optimizationMetadata?: OptimizationMetadata; // Metadata about the optimization process
+  // Enhanced Recording Intelligence: Intent inference
+  inferredIntent?: {
+    primaryGoal: string;
+    subGoals: string[];
+    suggestedName: string;
+    confidence: number;
+    analyzedAt: number;
+  };
+  // Enhanced Recording Intelligence: Execution statistics
+  executionStats?: {
+    totalRuns: number;
+    successfulRuns: number;
+    lastRun: number;
+    averageDurationMs: number;
+    commonFailurePoints: number[];  // Step indices that often fail
+  };
 }
 

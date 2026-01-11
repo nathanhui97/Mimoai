@@ -95,13 +95,23 @@ export class ElementContext {
     // 1. Text Label - multiple strategies
     let textLabel: string | undefined;
 
-    // For inputs, use LabelFinder
-    if (element.tagName === 'INPUT' || 
-        element.tagName === 'TEXTAREA' || 
-        element.tagName === 'SELECT') {
+    // For inputs and form-like elements, use LabelFinder
+    // This now includes comboboxes (Salesforce uses button[role="combobox"])
+    const isFormElement = 
+      element.tagName === 'INPUT' || 
+      element.tagName === 'TEXTAREA' || 
+      element.tagName === 'SELECT' ||
+      element.getAttribute('role') === 'combobox' ||
+      element.getAttribute('role') === 'listbox' ||
+      element.getAttribute('role') === 'textbox' ||
+      element.getAttribute('role') === 'spinbutton' ||
+      element.getAttribute('role') === 'searchbox';
+    
+    if (isFormElement) {
       const label = LabelFinder.findLabel(element);
       if (label) {
         textLabel = label;
+        console.log(`[ElementContext] Found label via LabelFinder for ${element.tagName}[role="${element.getAttribute('role')}"]: "${label}"`);
       }
     }
 
@@ -113,10 +123,69 @@ export class ElementContext {
     }
 
     // For other elements, use direct text content (first 100 chars)
+    // But clean it to remove validation messages and duplicates
     if (!textLabel) {
-      const text = element.textContent?.trim();
-      if (text && text.length > 0) {
-        textLabel = text.length > 100 ? text.substring(0, 100) + '...' : text;
+      // SALESFORCE/SLDS SPECIFIC: Try to find the label element directly
+      // This avoids capturing validation messages that are siblings
+      const sldsLabelElement = this.findSLDSLabelElement(element);
+      if (sldsLabelElement) {
+        const labelText = sldsLabelElement.textContent?.trim();
+        if (labelText) {
+          // Clean asterisks and normalize
+          textLabel = labelText
+            .replace(/^\*\s*/, '')
+            .replace(/\s*\*$/, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          console.log(`[ElementContext] Found SLDS label: "${textLabel}"`);
+        }
+      }
+      
+      // Fall back to cleaned textContent if no SLDS label found
+      if (!textLabel) {
+        // Get text but EXCLUDE validation/error containers
+        const text = this.getCleanTextContent(element);
+        if (text && text.length > 0) {
+          // Clean the text content to remove validation messages
+          let cleanedText = text;
+          
+          // Remove common validation messages
+          const validationPatterns = [
+            /Complete this field\.?/gi,
+            /This field is required\.?/gi,
+            /Required field\.?/gi,
+            /Please fill out this field\.?/gi,
+            /Invalid value\.?/gi,
+            /Enter a valid value\.?/gi,
+            /Error:?\s*/gi,
+            /\(required\)/gi,
+            /\*\s*required/gi,
+          ];
+          
+          for (const pattern of validationPatterns) {
+            cleanedText = cleanedText.replace(pattern, '').trim();
+          }
+          
+          // Handle duplicated text (e.g., "Account NameAccount Name")
+          const halfLength = Math.floor(cleanedText.length / 2);
+          if (halfLength >= 3) {
+            const firstHalf = cleanedText.substring(0, halfLength);
+            const secondHalf = cleanedText.substring(halfLength);
+            if (firstHalf.trim().toLowerCase() === secondHalf.trim().toLowerCase()) {
+              cleanedText = firstHalf.trim();
+            }
+          }
+          
+          // Remove asterisks (required field indicators)
+          cleanedText = cleanedText.replace(/^\*\s*/, '').replace(/\s*\*$/, '');
+          
+          // Normalize whitespace
+          cleanedText = cleanedText.replace(/\s+/g, ' ').trim();
+          
+          if (cleanedText && cleanedText.length > 0) {
+            textLabel = cleanedText.length > 100 ? cleanedText.substring(0, 100) + '...' : cleanedText;
+          }
+        }
       }
     }
 
@@ -173,6 +242,75 @@ export class ElementContext {
     }
 
     return anchors;
+  }
+
+  /**
+   * Find SLDS (Salesforce Lightning Design System) label element
+   * These have a specific structure where the label is in .slds-form-element__label
+   */
+  private static findSLDSLabelElement(element: HTMLElement): Element | null {
+    // Check if we're inside an SLDS form element
+    const sldsContainer = element.closest('.slds-form-element, lightning-input, lightning-combobox, lightning-textarea');
+    if (!sldsContainer) return null;
+    
+    // Look for the specific label element
+    const labelSelectors = [
+      '.slds-form-element__label',
+      'label.slds-form-element__label',
+      '[class*="form-element__label"]',
+    ];
+    
+    for (const selector of labelSelectors) {
+      const labelEl = sldsContainer.querySelector(selector);
+      if (labelEl) {
+        return labelEl;
+      }
+    }
+    
+    // Also check in Shadow DOM for Lightning web components
+    if (sldsContainer.shadowRoot) {
+      for (const selector of labelSelectors) {
+        const labelEl = sldsContainer.shadowRoot.querySelector(selector);
+        if (labelEl) {
+          return labelEl;
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Get text content excluding validation/error containers
+   * This prevents dirty text like "Complete this field" from being included
+   */
+  private static getCleanTextContent(element: HTMLElement): string {
+    // Clone the element to manipulate it without affecting the DOM
+    const clone = element.cloneNode(true) as HTMLElement;
+    
+    // Remove elements that typically contain validation messages
+    const validationSelectors = [
+      '.slds-form-element__help',
+      '.slds-form-element__static',
+      '[class*="error"]',
+      '[class*="validation"]',
+      '[class*="help-text"]',
+      '[class*="hint"]',
+      '[role="alert"]',
+      '.invalid-feedback',
+      '.form-text',
+      '.help-block',
+    ];
+    
+    for (const selector of validationSelectors) {
+      const elements = clone.querySelectorAll(selector);
+      elements.forEach(el => el.remove());
+    }
+    
+    // Get the cleaned text
+    const text = clone.textContent?.trim() || '';
+    
+    return text;
   }
 
   /**

@@ -281,14 +281,28 @@ export function VariableInputForm({
                 {variable.isDropdown && variable.options && variable.options.length > 0 ? (
                   <select
                     id={variable.variableName}
-                    value={values[variable.variableName] || variable.options[0]}
+                    value={values[variable.variableName] ?? variable.options[0]}
                     onChange={(e) => {
+                      const newValue = e.target.value;
                       console.log('[VariableInputForm] Dropdown changed:', {
                         variableName: variable.variableName,
-                        newValue: e.target.value,
-                        allValues: values,
+                        newValue,
+                        currentValues: { ...values },
                       });
-                      handleChange(variable.variableName, e.target.value);
+                      // Use functional update to ensure we preserve all other values
+                      setValues(currentValues => {
+                        const updated = { ...currentValues, [variable.variableName]: newValue };
+                        console.log('[VariableInputForm] State after update:', updated);
+                        return updated;
+                      });
+                      // Clear any error
+                      if (errors[variable.variableName]) {
+                        setErrors(prev => {
+                          const next = { ...prev };
+                          delete next[variable.variableName];
+                          return next;
+                        });
+                      }
                     }}
                     onBlur={() => handleBlur(variable)}
                     className={`w-full px-3 py-2 border rounded-md bg-background text-foreground ${

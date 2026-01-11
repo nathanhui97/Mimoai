@@ -22,7 +22,7 @@ export const FeatureFlags = {
    * Cost: High (screenshot + LLM call per attempt)
    * Risk: Misclicks, scary debugging
    */
-  VISION_CLICKER: false,
+  VISION_CLICKER: true,
   
   /**
    * AI-powered variable detection after recording

@@ -25,6 +25,8 @@ import { SpreadsheetHelpers } from './spreadsheet-helpers';
 import { VisionAssist } from './tier3-vision-assist';
 import { RecoveryEngine } from '../content/recovery-engine';
 import type { SavedWorkflow } from '../types/workflow';
+import { ExecutionTelemetry } from './execution-telemetry';
+import { StateWaitEngine } from '../content/state-wait-engine';
 
 // Extracted agent modules
 import { CandidateFinder } from './agent/candidate-finder';
@@ -1315,6 +1317,10 @@ export class AIAgent {
               console.warn(`[AIAgent] ⏭️ Skipping hint ${failedIndex} after ${hint.failureCount} failures: ${hint.description}`);
               hint.skipped = true;
               
+              // CRITICAL: Cleanup any open dropdown/modal before moving on
+              // This prevents stuck dropdowns from blocking subsequent actions
+              await this.cleanupUIState(hint);
+              
               // Find next incomplete hint
               let nextIndex = failedIndex + 1;
               while (nextIndex < this.state.hints.length && 
@@ -1367,6 +1373,46 @@ export class AIAgent {
     } catch (error) {
       console.error('[AIAgent] Error:', error);
       this.state.status = 'failed';
+    }
+
+    // Record execution telemetry (async, non-blocking)
+    if (this.state.workflowId) {
+      const success = this.state.status === 'completed';
+      const durationMs = Date.now() - this.state.startTime;
+      const stepsCompleted = this.state.history.filter(h => h.result === 'success').length;
+      const failedStepIndex = this.state.history.findIndex(h => h.result === 'failed');
+      
+      // Collect step results for learning
+      const stepResults = this.state.history
+        .filter(h => h.action?.type !== 'skip' && h.action?.type !== 'tab_switch')
+        .map((h, index) => ({
+          index,
+          selector: '', // Would need to extract from action params
+          success: h.result === 'success',
+          resolutionMs: 0, // Would need timing data
+          recoveryAttempts: 0,
+        }));
+      
+      const executionEvent = {
+        workflowId: this.state.workflowId,
+        timestamp: Date.now(),
+        success,
+        durationMs,
+        stepsCompleted,
+        totalSteps: this.state.hints.length,
+        failedStepIndex: failedStepIndex >= 0 ? failedStepIndex : undefined,
+        failureReason: success ? undefined : this.state.history[this.state.history.length - 1]?.error,
+        siteUrl: window.location.href,
+        stepResults,
+      };
+      
+      ExecutionTelemetry.recordExecution(executionEvent).catch(err => {
+        console.warn('Failed to record execution telemetry:', err);
+      });
+      
+      ExecutionTelemetry.updateWorkflowStats(this.state.workflowId, executionEvent).catch(err => {
+        console.warn('Failed to update workflow stats:', err);
+      });
     }
 
     return {
@@ -3048,6 +3094,39 @@ export class AIAgent {
         continue;
       }
       
+      if (recoveryDecision.strategy === 'CLICK_BY_COORDINATES') {
+        // Tier 3: Visual coordinate-based clicking as last resort
+        if (!recoveryDecision.coordinates || !FeatureFlags.VISION_CLICKER) {
+          console.warn('[AIAgent] Coordinate click requested but not available');
+          continue;
+        }
+        
+        const { VisionClicker } = await import('./vision-clicker');
+        const { x, y } = recoveryDecision.coordinates;
+        
+        console.log(`[AIAgent] 👁️ Attempting coordinate click at (${x}, ${y})`);
+        
+        // Validate coordinates are within viewport
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        if (x < 0 || x > viewportWidth || y < 0 || y > viewportHeight) {
+          console.warn(`[AIAgent] ⚠️ Coordinates (${x}, ${y}) outside viewport (${viewportWidth}x${viewportHeight})`);
+          continue;
+        }
+        
+        const clickResult = await VisionClicker.clickAt(x, y, currentAction.reasoning);
+        
+        if (clickResult.success) {
+          console.log('[AIAgent] ✅ Coordinate click succeeded');
+          // Wait for stability after click
+          await StateWaitEngine.waitForStability({ maxWaitMs: 2000 });
+          return { success: true };
+        }
+        
+        console.warn('[AIAgent] ❌ Coordinate click failed:', clickResult.error);
+        continue;
+      }
+      
       // Unknown strategy - retry as-is
       console.warn('[AIAgent] Unknown recovery strategy, retrying...');
     }
@@ -3068,8 +3147,9 @@ export class AIAgent {
     observation: AgentObservation,
     attemptNumber: number
   ): Promise<{
-    strategy: 'RETRY_WITH_VISION' | 'RETRY_LOOSER' | 'SCROLL_AND_RETRY' | 'DISMISS_POPUP' | 'GIVE_UP';
+    strategy: 'RETRY_WITH_VISION' | 'RETRY_LOOSER' | 'SCROLL_AND_RETRY' | 'DISMISS_POPUP' | 'GIVE_UP' | 'CLICK_BY_COORDINATES';
     refinedTarget?: SemanticTarget;
+    coordinates?: { x: number; y: number };
     reasoning: string;
   }> {
     console.log('[AIAgent] 🧠 Thinking about recovery...');
@@ -3384,6 +3464,86 @@ export class AIAgent {
     
     // Default: Assume action achieved the goal
     return false;
+  }
+
+  /**
+   * Cleanup UI state after a failed hint is skipped
+   * Closes any open dropdowns, modals, or menus that might block subsequent actions
+   */
+  private async cleanupUIState(failedHint: AgentHint): Promise<void> {
+    console.log(`[AIAgent] 🧹 Cleaning up UI state after failed ${failedHint.actionType} action...`);
+    
+    try {
+      // Check if there's an open dropdown
+      const openDropdownOptions = document.querySelectorAll('[role="option"]');
+      const openListboxes = document.querySelectorAll('[role="listbox"]:not([hidden])');
+      const openMenus = document.querySelectorAll('[role="menu"]:not([hidden])');
+      
+      const hasOpenDropdown = openDropdownOptions.length > 0 || openListboxes.length > 0 || openMenus.length > 0;
+      
+      if (hasOpenDropdown) {
+        console.log(`[AIAgent] 🔽 Detected open dropdown (${openDropdownOptions.length} options, ${openListboxes.length} listboxes, ${openMenus.length} menus) - closing...`);
+        
+        // Method 1: Press Escape key
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Escape',
+          code: 'Escape',
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        }));
+        
+        await this.sleep(50);
+        
+        // Method 2: Click on document body
+        document.body.click();
+        
+        await this.sleep(100);
+        
+        // Method 3: Blur active element
+        const activeEl = document.activeElement;
+        if (activeEl && activeEl !== document.body) {
+          (activeEl as HTMLElement).blur?.();
+          activeEl.dispatchEvent(new KeyboardEvent('keydown', {
+            key: 'Escape',
+            code: 'Escape',
+            keyCode: 27,
+            which: 27,
+            bubbles: true,
+            cancelable: true,
+          }));
+        }
+        
+        await this.sleep(100);
+        
+        // Verify cleanup
+        const remainingOptions = document.querySelectorAll('[role="option"]').length;
+        console.log(`[AIAgent] 🧹 Dropdown cleanup complete. Remaining options: ${remainingOptions}`);
+      }
+      
+      // Also check for stuck modals/dialogs
+      const openDialogs = document.querySelectorAll('[role="dialog"]:not([hidden]), [role="alertdialog"]:not([hidden])');
+      if (openDialogs.length > 0) {
+        console.log(`[AIAgent] 📦 Detected ${openDialogs.length} open dialogs - attempting to dismiss...`);
+        
+        // Try pressing Escape to close dialogs
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Escape',
+          code: 'Escape',
+          keyCode: 27,
+          which: 27,
+          bubbles: true,
+          cancelable: true,
+        }));
+        
+        await this.sleep(200);
+      }
+      
+    } catch (error) {
+      console.warn('[AIAgent] ⚠️ Error during UI cleanup:', error);
+      // Don't throw - cleanup failures shouldn't block execution
+    }
   }
 
   /**

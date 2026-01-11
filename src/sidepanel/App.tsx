@@ -6,6 +6,7 @@ import { CorrectionMemory } from '../lib/correction-memory';
 import { VariableDetector } from '../lib/variable-detector';
 // import { NavigationOptimizer } from '../lib/navigation-optimizer'; // DISABLED - breaks AI Agent workflows
 import { IntentAnalyzer } from '../lib/intent-analyzer';
+import { SiteKnowledgeBase } from '../lib/site-knowledge';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { SettingsPanel } from './SettingsPanel';
@@ -98,6 +99,13 @@ function App() {
   // Conversational interface state
   const [taskQuery, setTaskQuery] = useState('');
   const [suggestions, setSuggestions] = useState<SavedWorkflow[]>([]);
+  
+  // Real-time intent inference (during recording)
+  const [realtimeIntent, setRealtimeIntent] = useState<{
+    likelyGoal: string;
+    confidence: number;
+    suggestedName: string;
+  } | null>(null);
 
   // Ping content script on mount
   useEffect(() => {
@@ -147,6 +155,24 @@ function App() {
 
     performPing();
   }, [setState, setConnectionStatus, setError, setLastPingTime]);
+
+  // Real-time intent inference during recording
+  useEffect(() => {
+    if (isRecording && workflowSteps.length > 0) {
+      try {
+        const intent = IntentAnalyzer.analyzeIntentLocally(workflowSteps);
+        setRealtimeIntent({
+          likelyGoal: intent.primaryGoal,
+          confidence: intent.confidence,
+          suggestedName: intent.primaryGoal.split(' ').slice(0, 4).join(' '), // Simplified suggested name
+        });
+      } catch (error) {
+        console.warn('Failed to analyze intent in real-time:', error);
+      }
+    } else {
+      setRealtimeIntent(null);
+    }
+  }, [isRecording, workflowSteps]);
 
   // Load saved workflows on mount
   useEffect(() => {
@@ -829,6 +855,11 @@ function App() {
       setShowSaveDialog(false);
       setWorkflowName('');
       
+      // Extract site knowledge from workflow (async, non-blocking)
+      SiteKnowledgeBase.learnFromWorkflow(workflow).catch(err => {
+        console.warn('Failed to extract site knowledge:', err);
+      });
+      
       // Store variables for display (use the fresh detection result, not workflow.variables which might be undefined)
       console.log('[SaveWorkflow] Setting currentWorkflowVariables:', variables);
       console.log('[SaveWorkflow] Variables count:', variables.variables.length);
@@ -1452,6 +1483,24 @@ function App() {
           </div>
         )}
 
+        {/* Real-time Intent Display - Show during recording */}
+        {isRecording && realtimeIntent && (
+          <div className="mb-4 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-700">
+            <div className="flex items-center gap-2 mb-2">
+              <svg className="h-4 w-4 text-purple-600 dark:text-purple-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
+                <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd"/>
+              </svg>
+              <span className="text-sm font-medium text-purple-800 dark:text-purple-200">
+                I think you're trying to: <strong>{realtimeIntent.likelyGoal}</strong>
+              </span>
+            </div>
+            <div className="text-xs text-purple-600 dark:text-purple-300">
+              Confidence: {(realtimeIntent.confidence * 100).toFixed(0)}%
+            </div>
+          </div>
+        )}
+
         {/* Recorded Steps - Show during/after recording */}
         {workflowSteps.length > 0 && (
           <div className="mb-6 p-4 bg-card rounded-lg border border-border">
@@ -1554,6 +1603,7 @@ function App() {
         {/* Variable Input Form Modal */}
         {showVariableForm && pendingExecution.workflow?.variables && (
           <VariableInputForm
+            key={pendingExecution.workflow.id}
             variables={pendingExecution.workflow.variables}
             workflowName={pendingExecution.workflow.name}
             workflowDescription={pendingExecution.workflow.description}

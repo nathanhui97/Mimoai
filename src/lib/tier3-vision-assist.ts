@@ -96,14 +96,34 @@ export class VisionAssist {
         mode: 'hint', // Request hint, not coordinates
       };
       
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.supabaseAnonKey}`,
-        },
-        body: JSON.stringify(payload),
-      });
+      // Use AbortController with timeout to avoid hanging on CORS errors
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.supabaseAnonKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        // CORS or network error - this is expected if vision_hint function doesn't exist
+        console.warn('[Tier3] Vision hint fetch failed (function may not be deployed):', 
+          fetchError instanceof Error ? fetchError.message : 'Unknown error');
+        return {
+          description: 'Vision hint unavailable (edge function not deployed)',
+          refinedTarget: failedTarget,
+          confidence: 0,
+        };
+      }
+      
+      clearTimeout(timeoutId);
       
       if (!response.ok) {
         console.error('[Tier3] Vision hint API error:', response.status);
@@ -129,7 +149,7 @@ export class VisionAssist {
         } : undefined,
       };
     } catch (error) {
-      console.error('[Tier3] Error getting vision hint:', error);
+      console.warn('[Tier3] Error getting vision hint:', error);
       return {
         description: 'Vision hint error',
         refinedTarget: failedTarget,

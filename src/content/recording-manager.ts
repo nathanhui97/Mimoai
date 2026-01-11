@@ -2878,6 +2878,52 @@ export class RecordingManager {
         enhancedFallbacks = [...semanticSelectors, ...enhancedFallbacks];
         console.log('🔍 RecordingManager: Generated semantic fallback selectors for input cell', cellRef, ':', semanticSelectors.length, 'selectors');
       }
+      
+      // NEW: Generate semantic fallback selectors for labeled form fields (Salesforce, etc.)
+      // This enables faster element location by using the field's label
+      if (label && label.length > 0 && label.length < 50) {
+        const cleanLabel = label.replace(/\*/g, '').trim(); // Remove asterisks from required fields
+        const elementRole = element.getAttribute('role') || '';
+        
+        // Create semantic selectors based on the clean label
+        const labelBasedSelectors: string[] = [];
+        
+        // Primary strategies: aria-label based (most reliable)
+        if (cleanLabel.length >= 3) {
+          labelBasedSelectors.push(`[aria-label="${cleanLabel}"]`);           // Exact match
+          labelBasedSelectors.push(`[aria-label*="${cleanLabel}"]`);          // Contains
+          labelBasedSelectors.push(`[aria-label^="${cleanLabel}"]`);          // Starts with
+          
+          // Role-specific selectors (very reliable for Salesforce Lightning)
+          if (elementRole === 'textbox' || elementRole === 'combobox' || elementRole === 'spinbutton') {
+            labelBasedSelectors.push(`[role="${elementRole}"][aria-label*="${cleanLabel}"]`);
+          }
+          
+          // Custom element label attributes (Salesforce Lightning)
+          labelBasedSelectors.push(`[label="${cleanLabel}"]`);
+          labelBasedSelectors.push(`[field-label="${cleanLabel}"]`);
+          labelBasedSelectors.push(`[data-label="${cleanLabel}"]`);
+          
+          // Input with name containing label (snake_case conversion)
+          const snakeCase = cleanLabel.toLowerCase().replace(/\s+/g, '_');
+          labelBasedSelectors.push(`input[name*="${snakeCase}"]`);
+          labelBasedSelectors.push(`input[name*="${cleanLabel.toLowerCase().replace(/\s+/g, '')}"]`);
+          
+          // XPath selectors (safest, most flexible)
+          if (elementRole) {
+            labelBasedSelectors.push(`//*[@role="${elementRole}" and contains(@aria-label, "${cleanLabel}")]`);
+          }
+          labelBasedSelectors.push(`//input[contains(@aria-label, "${cleanLabel}")]`);
+          labelBasedSelectors.push(`//*[contains(@aria-label, "${cleanLabel}")][@contenteditable="true"]`);
+          
+          // SLDS-specific selectors (Salesforce Lightning Design System)
+          labelBasedSelectors.push(`.slds-form-element:has(.slds-form-element__label:contains("${cleanLabel}")) input`);
+        }
+        
+        // Add label-based selectors to front (higher priority)
+        enhancedFallbacks = [...labelBasedSelectors, ...enhancedFallbacks];
+        console.log('🔍 RecordingManager: Generated', labelBasedSelectors.length, 'semantic selectors for labeled input:', cleanLabel);
+      }
 
       // Capture context for input elements too (with error handling)
       let context: import('./element-context').ElementContextData | null = null;
@@ -3146,9 +3192,11 @@ export class RecordingManager {
       }
 
       // Build step payload first (without wait conditions)
+      // CRITICAL FIX: Use enhancedFallbacks (with semantic selectors) instead of raw selectors.fallbacks
+      // Also ensure fallbackSelectors is never empty (same safety check as CLICK handler)
       const stepPayload: WorkflowStep['payload'] = {
         selector: selectors.primary,
-        fallbackSelectors: selectors.fallbacks,
+        fallbackSelectors: enhancedFallbacks.length > 0 ? enhancedFallbacks : [selectors.primary],
         xpath: selectors.xpath,
         label: label || undefined,
         value: value,

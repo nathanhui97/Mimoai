@@ -9,6 +9,7 @@
 import type { WorkflowStep, NaturalLanguageContext } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import { aiConfig } from './ai-config';
+import { getElementLabel } from './label-utils';
 
 // Re-export for convenience
 export type { NaturalLanguageContext };
@@ -168,7 +169,13 @@ function createBasicTranslation(step: WorkflowStep, stepIndex: number): NaturalL
   // Get the ACTUAL element text from various sources
   const actualElementText = payload?.elementText || 
                            payload?.context?.parent?.text || 
-                           payload?.aiEvidence?.semanticAnchors?.textLabel;
+                           getElementLabel(
+                             payload?.aiEvidence, 
+                             payload?.label,
+                             payload?.context?.uniqueAttributes,
+                             payload?.context?.formCoordinates,
+                             payload?.context?.uniqueAttributes?.placeholder
+                           );
   
   let intent = 'Perform action';
   let precondition = 'Page must be loaded';

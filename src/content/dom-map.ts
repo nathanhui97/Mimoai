@@ -464,6 +464,67 @@ function findActiveModalWithStructuralDetection(): Element | null {
 // The new implementation uses universal structural signals instead of fragile heuristics
 
 /**
+ * Check if an element is a dual listbox (multi-select picklist)
+ * Dual listboxes have two sibling listboxes (Available/Chosen) and are permanent form fields,
+ * NOT temporary dropdowns that need immediate interaction.
+ * 
+ * Salesforce Lightning dual listboxes have structure like:
+ * - Parent container with "Available" and "Chosen" labels
+ * - Two [role="listbox"] elements side by side
+ * - Arrow buttons to move items between lists
+ */
+function isDualListbox(element: Element): boolean {
+  // Check 1: Is this inside a dueling-picklist or multi-select container?
+  const dualListboxSelectors = [
+    '[class*="dueling-picklist"]',
+    '[class*="dual-listbox"]',
+    '[class*="multi-select"]',
+    '[class*="picklist"]',
+    '.slds-dueling-list',
+    'lightning-dual-listbox',
+  ];
+  
+  for (const selector of dualListboxSelectors) {
+    if (element.closest(selector)) {
+      return true;
+    }
+  }
+  
+  // Check 2: Does this listbox have a sibling listbox? (Available + Chosen pattern)
+  const parent = element.parentElement;
+  if (parent) {
+    const siblingListboxes = parent.querySelectorAll('[role="listbox"]');
+    if (siblingListboxes.length >= 2) {
+      // Multiple listboxes in same parent = dual listbox pattern
+      return true;
+    }
+    
+    // Check grandparent too (Salesforce wraps things deeply)
+    const grandparent = parent.parentElement;
+    if (grandparent) {
+      const grandparentListboxes = grandparent.querySelectorAll('[role="listbox"]');
+      if (grandparentListboxes.length >= 2) {
+        return true;
+      }
+    }
+  }
+  
+  // Check 3: Look for "Available" and "Chosen" text nearby
+  const containerText = element.closest('div, fieldset, section')?.textContent || '';
+  if (containerText.includes('Available') && containerText.includes('Chosen')) {
+    return true;
+  }
+  
+  // Check 4: Has arrow buttons (move left/right) nearby - common in dual listboxes
+  const nearbyArrows = element.closest('div')?.querySelectorAll('button[class*="move"], [class*="arrow"], [title*="Move"]');
+  if (nearbyArrows && nearbyArrows.length >= 1) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
  * Find an active/open dropdown listbox
  * CRITICAL: When a dropdown is open, the AI MUST interact with it first
  * before doing any other action (like typing) which would close it
@@ -489,6 +550,14 @@ function findActiveDropdown(): { triggerName?: string; options: DOMMapElement[] 
       const elements = document.querySelectorAll(selector);
       for (const el of elements) {
         if (isVisible(el)) {
+          // CRITICAL: Skip dual listboxes (multi-select picklists)
+          // These are permanent form fields, NOT temporary dropdowns
+          // Dual listboxes have a parent container with two sibling listboxes (Available/Chosen)
+          if (isDualListbox(el)) {
+            console.log('[DOMMap] ⏭️ Skipping dual listbox (multi-select picklist) - not a temporary dropdown');
+            continue;
+          }
+          
           // Check if has options
           const hasOptions = el.querySelector('[role="menuitem"], [role="option"], li');
           if (hasOptions) {

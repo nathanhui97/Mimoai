@@ -8,6 +8,7 @@
 import type { SavedWorkflow, WorkflowStepPayload } from '../../types/workflow';
 import { isWorkflowStepPayload } from '../../types/workflow';
 import type { AgentHint, AgentObservation } from './types';
+import { getCleanLabelForMatching } from '../label-utils';
 
 /**
  * HintExtractor converts workflow steps into agent hints with variable substitution
@@ -381,8 +382,30 @@ export class HintExtractor {
     const recordedFallbackSelectors = payload.fallbackSelectors || [];
     const recordedTestId = payload.context?.uniqueAttributes?.['data-testid'] || 
                           payload.context?.uniqueAttributes?.['data-test-id'];
-    const recordedAriaLabel = payload.aiEvidence?.semanticAnchors?.ariaLabel ||
-                              payload.context?.uniqueAttributes?.['aria-label'];
+    
+    // Use the dedicated clean label function for AI element matching
+    // This ONLY returns clean sources (ariaLabel, uniqueAttributes['aria-label'], payloadLabel)
+    // It NEVER returns dirty textLabel which can contain validation messages
+    const recordedAriaLabel = getCleanLabelForMatching(
+      payload.aiEvidence,
+      payload.label,
+      payload.context?.uniqueAttributes
+    );
+    
+    // Debug logging for label extraction
+    if (!recordedAriaLabel) {
+      console.warn(`[HintExtractor] ⚠️ No clean label found for element. Available sources:`, {
+        aiEvidenceAriaLabel: payload.aiEvidence?.semanticAnchors?.ariaLabel,
+        aiEvidenceTextLabel: payload.aiEvidence?.semanticAnchors?.textLabel?.substring(0, 50),
+        payloadLabel: payload.label,
+        uniqueAriaLabel: payload.context?.uniqueAttributes?.['aria-label'],
+        formLabel: payload.context?.formCoordinates?.label,
+        placeholder: payload.context?.uniqueAttributes?.placeholder,
+        elementRole: payload.elementRole,
+      });
+    } else {
+      console.log(`[HintExtractor] ✅ Found clean label: "${recordedAriaLabel}" (role: ${payload.elementRole})`);
+    }
     
     // Extract scope hint
     let recordedScopeHint: string | undefined;
