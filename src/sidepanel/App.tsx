@@ -11,8 +11,6 @@ import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { SettingsPanel } from './SettingsPanel';
 import { ThinkingPanel } from './ThinkingPanel';
-import { TaskInput } from './TaskInput';
-import { TaskSuggestions } from './TaskSuggestions';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
@@ -95,10 +93,7 @@ function App() {
   // Chain of thought state
   const [thinkingEvents, setThinkingEvents] = useState<ThinkingEvent[]>([]);
   const [currentStep, setCurrentStep] = useState<{index: number; total: number}>({index: 0, total: 0});
-  
-  // Conversational interface state
-  const [taskQuery, setTaskQuery] = useState('');
-  const [suggestions, setSuggestions] = useState<SavedWorkflow[]>([]);
+  const [stoppedAgentState, setStoppedAgentState] = useState<any>(null);
   
   // Real-time intent inference (during recording)
   const [realtimeIntent, setRealtimeIntent] = useState<{
@@ -214,6 +209,7 @@ function App() {
         setIsExecuting(false);
         setState('IDLE');
         setAgentProgress(null);
+        setStoppedAgentState(null); // Clear any stopped state
         
         setAgentLog(prev => [...prev, {
           time: new Date().toLocaleTimeString(),
@@ -1077,11 +1073,51 @@ function App() {
       console.error('AI Agent execution error:', err);
       addLog(err instanceof Error ? err.message : 'Unknown error', 'failed');
       setError(err instanceof Error ? err.message : 'Failed to execute workflow');
-    } finally {
+      // Only reset state on error - normal completion is handled by AGENT_EXECUTION_COMPLETED
       setIsAgentRunning(false);
       setIsExecuting(false);
       setState('IDLE');
       setAgentProgress(null);
+    }
+  };
+
+  /**
+   * Stop agent execution and save state for resume
+   */
+  const handleStopExecution = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        const response = await runtimeBridge.sendMessage({ type: 'STOP_AGENT' }, tab.id);
+        if (response.success && response.state) {
+          setStoppedAgentState(response.state);
+        }
+      }
+      setIsAgentRunning(false);
+      setLearningFeedback('Execution paused - click Resume to continue');
+    } catch (err) {
+      console.error('Failed to stop execution:', err);
+      setError(err instanceof Error ? err.message : 'Failed to stop execution');
+    }
+  };
+
+  /**
+   * Resume agent execution from saved state
+   */
+  const handleResumeExecution = async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) {
+        const response = await runtimeBridge.sendMessage({ type: 'RESUME_AGENT' }, tab.id);
+        if (response.success) {
+          setIsAgentRunning(true);
+          setStoppedAgentState(null);
+          setLearningFeedback(null);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to resume execution:', err);
+      setError(err instanceof Error ? err.message : 'Failed to resume execution');
     }
   };
 
@@ -1203,27 +1239,8 @@ function App() {
     }
   };
 
-  // Conversational interface handlers
-  const handleSearch = async (query: string) => {
-    setTaskQuery(query);
-    if (query.trim()) {
-      const results = await WorkflowStorage.searchWorkflows(query);
-      setSuggestions(results);
-    } else {
-      setSuggestions([]);
-    }
-  };
-
-  const handleTaskSubmit = async (_query: string) => {
-    // Run the best match if available
-    if (suggestions.length > 0) {
-      await handleExecuteWorkflow(suggestions[0]);
-    }
-  };
-
+  // Task selection handler
   const handleTaskSelect = async (workflow: SavedWorkflow) => {
-    setTaskQuery(''); // Clear search
-    setSuggestions([]);
     await handleExecuteWorkflow(workflow);
   };
 
@@ -1318,7 +1335,7 @@ function App() {
           )}
           
           {/* Greeting - Only show when not recording and no steps */}
-          {!isRecording && workflowSteps.length === 0 && !isAgentRunning && (
+          {!isRecording && workflowSteps.length === 0 && !isAgentRunning && !stoppedAgentState && thinkingEvents.length === 0 && (
             <div className="mb-6">
               <h2 className="text-2xl font-semibold text-foreground mb-2">
                 How can I help you?
@@ -1387,34 +1404,6 @@ function App() {
                     className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
                   >
                     Show me how to do something
-                  </button>
-                </div>
-              )}
-              
-              {/* Search Results - Show when typing */}
-              {taskQuery.trim() && suggestions.length > 0 && (
-                <div className="mb-4">
-                  <p className="text-xs text-muted-foreground mb-2">Search results:</p>
-                  <TaskSuggestions
-                    query={taskQuery}
-                    suggestions={suggestions}
-                    onSelect={handleTaskSelect}
-                    onShowMeHow={handleStartRecording}
-                    isExecuting={isExecuting}
-                  />
-                </div>
-              )}
-              
-              {/* No matches state */}
-              {taskQuery.trim() && suggestions.length === 0 && (
-                <div className="mb-4 p-4 bg-muted rounded-lg border border-border text-center">
-                  <p className="text-foreground mb-2">I don't know how to do that yet.</p>
-                  <p className="text-sm text-muted-foreground mb-3">Would you like to teach me?</p>
-                  <button
-                    onClick={handleStartRecording}
-                    className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
-                  >
-                    Show me how
                   </button>
                 </div>
               )}
@@ -1523,13 +1512,16 @@ function App() {
         )}
 
         {/* AI Agent Chain of Thought */}
-        {(isAgentRunning || thinkingEvents.length > 0) && (
+        {(isAgentRunning || stoppedAgentState || thinkingEvents.length > 0) && (
           <ThinkingPanel
             events={thinkingEvents}
             currentStep={currentStep}
             hints={pendingExecution.workflow?.steps || []}
             isRunning={isAgentRunning}
+            isStopped={!!stoppedAgentState}
             workflowName={pendingExecution.workflow?.name}
+            onStop={handleStopExecution}
+            onResume={handleResumeExecution}
           />
         )}
 
@@ -1665,22 +1657,6 @@ function App() {
         )}
         </div>
       </div>
-
-      {/* Input Bar - Fixed at Bottom (Chat-like) */}
-      {!isRecording && workflowSteps.length === 0 && !isAgentRunning && (
-        <div className="border-t border-border bg-background p-4">
-          <div className="max-w-2xl mx-auto">
-            <TaskInput
-              onSearch={handleSearch}
-              onSubmit={handleTaskSubmit}
-              onShowMeHow={handleStartRecording}
-              isRecording={isRecording}
-              disabled={state === 'CONNECTING'}
-              placeholder="Message mimoai"
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -39,6 +39,10 @@ let isReady = false;
 let recordingManager: any = null;
 let currentFrameId: number = 0; // Will be set after initialization
 
+// Agent execution state
+let currentAgent: any = null; // AIAgent instance
+let savedAgentState: any = null; // AgentState for resume
+
 // Export getCurrentFrameId for use by other modules
 export function getCurrentFrameId(): number {
   return currentFrameId;
@@ -587,6 +591,64 @@ function handleFullMessage(
         return false;
       }
 
+      case 'STOP_AGENT': {
+        // Stop running AI agent
+        console.log('GhostWriter: Stop agent requested');
+        if (currentAgent) {
+          savedAgentState = currentAgent.stop();
+          sendResponse({ success: true, state: savedAgentState });
+          currentAgent = null;
+        } else {
+          sendResponse({ success: false, error: 'No agent running' });
+        }
+        return false;
+      }
+
+      case 'RESUME_AGENT': {
+        // Resume stopped AI agent
+        console.log('GhostWriter: Resume agent requested');
+        if (savedAgentState) {
+          // Create new agent and resume from saved state
+          (async () => {
+            try {
+              const { AIAgent } = await import('../lib/ai-agent');
+              currentAgent = new AIAgent({
+                maxSteps: 50,
+                stepTimeout: 30000,
+                onThinkingEvent: (event) => {
+                  chrome.runtime.sendMessage({
+                    type: 'AGENT_THINKING',
+                    payload: event,
+                  });
+                },
+              });
+              const result = await currentAgent.resume(savedAgentState!);
+              savedAgentState = null;
+              currentAgent = null;
+              
+              // Send completion message
+              chrome.runtime.sendMessage({
+                type: 'AGENT_EXECUTION_COMPLETED',
+                payload: result,
+              });
+            } catch (error) {
+              console.error('GhostWriter: Error resuming agent:', error);
+              chrome.runtime.sendMessage({
+                type: 'AGENT_EXECUTION_COMPLETED',
+                payload: {
+                  success: false,
+                  error: error instanceof Error ? error.message : 'Unknown error',
+                },
+              });
+            }
+          })();
+          sendResponse({ success: true });
+        } else {
+          sendResponse({ success: false, error: 'No saved state to resume' });
+        }
+        return false;
+      }
+
       case 'EXECUTE_WORKFLOW_AGENT': {
         // AI Agent execution - observe-act loop
         // ⚠️ CRITICAL: Only run agent in the MAIN FRAME (frameId === 0)
@@ -631,7 +693,7 @@ function handleFullMessage(
             const { AIAgent } = await import('../lib/ai-agent');
             
             // Create agent instance with progress callback
-            const agent = new AIAgent({
+            currentAgent = new AIAgent({
               maxSteps: 50,
               stepTimeout: 30000,
               onProgress: (stepNumber, action, status) => {
@@ -647,7 +709,11 @@ function handleFullMessage(
             });
             
             // Run the agent
-            const result = await agent.run(workflow, variableValues);
+            const result = await currentAgent.run(workflow, variableValues);
+            
+            // Clear agent and saved state on completion
+            currentAgent = null;
+            savedAgentState = null;
             
             console.log('GhostWriter: Agent execution completed:', result);
             

@@ -7,7 +7,10 @@ interface ThinkingPanelProps {
   currentStep: { index: number; total: number };
   hints: WorkflowStep[];
   isRunning: boolean;
+  isStopped?: boolean;
   workflowName?: string;
+  onStop?: () => void;
+  onResume?: () => void;
 }
 
 export function ThinkingPanel({
@@ -15,7 +18,10 @@ export function ThinkingPanel({
   currentStep,
   hints,
   isRunning,
+  isStopped,
   workflowName,
+  onStop,
+  onResume,
 }: ThinkingPanelProps) {
   const [isExpanded, setIsExpanded] = useState(true);
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -55,6 +61,24 @@ export function ThinkingPanel({
               </span>
             )}
           </h2>
+          <div className="flex items-center gap-2">
+            {isRunning && onStop && (
+              <button
+                onClick={onStop}
+                className="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors"
+              >
+                Stop
+              </button>
+            )}
+            {isStopped && onResume && (
+              <button
+                onClick={onResume}
+                className="px-3 py-1 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200 transition-colors"
+              >
+                Resume
+              </button>
+            )}
+          </div>
         </div>
         
         {/* Progress bar */}

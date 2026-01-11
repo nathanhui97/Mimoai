@@ -324,7 +324,7 @@ export interface AgentState {
   hints: AgentHint[];
   history: ActionHistoryEntry[];
   currentHintIndex: number;
-  status: 'running' | 'completed' | 'failed' | 'paused';
+  status: 'running' | 'completed' | 'failed' | 'paused' | 'stopped';
   startTime: number;
   variableValues?: Record<string, string>;
   memory?: Record<string, string | boolean | number>; // NEW: Store values read during execution
@@ -361,6 +361,7 @@ export class AIAgent {
   private stepTimeout: number;
   private onProgress?: AgentProgressCallback;
   private onThinkingEvent?: ThinkingEventCallback;
+  private aborted: boolean = false;
   
   // Extracted modules
   private readonly candidateFinder: CandidateFinder;
@@ -457,6 +458,7 @@ export class AIAgent {
    */
   async resume(savedState: AgentState): Promise<AgentResult> {
     console.log('[AIAgent] Resuming from saved state');
+    this.aborted = false; // Reset abort flag
     this.state = savedState;
     this.state.status = 'running';
     
@@ -475,6 +477,16 @@ export class AIAgent {
     }
     
     return this.continueExecution();
+  }
+  
+  /**
+   * Stop execution and return current state for resume
+   */
+  stop(): AgentState {
+    console.log('[AIAgent] Stop requested by user');
+    this.aborted = true;
+    this.state.status = 'stopped';
+    return { ...this.state };
   }
   
   /**
@@ -499,6 +511,13 @@ export class AIAgent {
 
       // Main observe-act loop
       while (this.state.status === 'running') {
+        // Check for user-requested stop
+        if (this.aborted) {
+          console.log('[AIAgent] Execution stopped by user');
+          this.state.status = 'stopped';
+          break;
+        }
+        
         // Safety check
         if (this.state.history.length >= this.maxSteps) {
           console.warn('[AIAgent] Max steps reached');

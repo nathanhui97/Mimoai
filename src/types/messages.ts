@@ -23,6 +23,8 @@ export type MessageType =
   | 'AGENT_PROGRESS'
   | 'AGENT_THINKING'
   | 'AGENT_EXECUTION_COMPLETED'
+  | 'STOP_AGENT'   // Stop running AI agent execution
+  | 'RESUME_AGENT' // Resume stopped AI agent execution
   // Execution progress and control messages
   | 'VERIFIED_EXECUTION_CANCEL'
   | 'VERIFIED_EXECUTION_STARTED'
@@ -81,6 +83,7 @@ export interface MessageResponse {
   data?: any;
   error?: string;
   frameId?: number; // For GET_FRAME_ID response
+  state?: any; // For STOP_AGENT response (AgentState)
 }
 
 /**
