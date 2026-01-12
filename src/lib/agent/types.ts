@@ -119,6 +119,12 @@ export interface AgentActionParams {
   
   // For select (dropdown)
   option?: string;          // Option text to select
+  decisionSpace?: {         // Available options from recording time (for validation/fallback)
+    type?: string;
+    selectedText?: string;
+    selectedIndex?: number;
+    options?: string[];
+  };
   
   // For scroll
   direction?: 'up' | 'down' | 'left' | 'right';
@@ -248,6 +254,19 @@ export interface AgentHint {
   // TAB_SWITCH context
   stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION';
   recordedPayload?: any; // Full recorded payload for TAB_SWITCH steps
+  
+  // Decision space from recording (for dropdown validation/fallback)
+  // Contains all options that were available when the dropdown was recorded
+  decisionSpace?: {
+    type?: string;
+    selectedText?: string;
+    selectedIndex?: number;
+    options?: string[];
+  };
+  
+  // Pre-scroll optimization: recorded scroll position
+  recordedScrollY?: number;
+  recordedScrollX?: number;
 }
 
 // ============================================================================

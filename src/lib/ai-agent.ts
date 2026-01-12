@@ -31,6 +31,7 @@ import { StateWaitEngine } from '../content/state-wait-engine';
 // Extracted agent modules
 import { CandidateFinder } from './agent/candidate-finder';
 import { HintExtractor } from './agent/hint-extractor';
+import { StuckDetector, type StuckContext } from './stuck-detector';
 
 // ============================================================================
 // Types
@@ -134,6 +135,12 @@ export interface AgentActionParams {
   
   // For select (dropdown)
   option?: string;          // Option text to select
+  decisionSpace?: {         // Available options from recording time (for validation/fallback)
+    type?: string;
+    selectedText?: string;
+    selectedIndex?: number;
+    options?: string[];
+  };
   
   // For scroll
   direction?: 'up' | 'down' | 'left' | 'right';
@@ -264,6 +271,14 @@ export interface AgentHint {
   // TAB_SWITCH context
   stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION';
   recordedPayload?: any; // Full recorded payload for TAB_SWITCH steps
+  
+  // Decision space from recording (for dropdown validation/fallback)
+  decisionSpace?: {
+    type?: string;
+    selectedText?: string;
+    selectedIndex?: number;
+    options?: string[];
+  };
 }
 
 /** Current observation of the page (DOM-first, screenshot optional) */
@@ -379,6 +394,7 @@ export class AIAgent {
   // Extracted modules
   private readonly candidateFinder: CandidateFinder;
   private readonly hintExtractor: HintExtractor;
+  private readonly stuckDetector: StuckDetector;
 
   constructor(options: {
     maxSteps?: number;
@@ -394,6 +410,11 @@ export class AIAgent {
     // Initialize extracted modules
     this.candidateFinder = new CandidateFinder();
     this.hintExtractor = new HintExtractor();
+    this.stuckDetector = new StuckDetector({
+      maxAttempts: 3,
+      delayBetweenAttempts: 300,  // Reduced from 1500ms to keep scrolling fast
+      onStuck: (context: StuckContext) => this.handleStuck(context),
+    });
     
     this.state = {
       goal: '',
@@ -533,6 +554,106 @@ export class AIAgent {
   }
   
   /**
+   * Handle stuck detection callback from StuckDetector
+   */
+  private handleStuck(context: StuckContext): void {
+    console.log('[AIAgent] 🚨 Agent stuck - requesting human help');
+    console.log('[AIAgent] Stuck context:', {
+      stepIndex: context.stepIndex,
+      stepDescription: context.stepDescription,
+      attemptsMade: context.attemptsMade,
+      lastError: context.lastError,
+    });
+    
+    const hint = this.state.hints[context.stepIndex];
+    if (!hint) {
+      console.error('[AIAgent] Cannot request help - hint not found');
+      return;
+    }
+    
+    // Build help context
+    const helpContext: HumanHelpContext = {
+      stepDescription: context.stepDescription,
+      whatAgentTried: context.whatAgentTried.join('\n'),
+      whatHumanShouldDo: this.generateHelpGuidance(hint),
+      errorDetails: context.lastError,
+    };
+    
+    console.log('[AIAgent] Help context created:', helpContext);
+    this.requestHumanHelp(helpContext);
+  }
+  
+  /**
+   * Generate guidance for what the user should do manually
+   */
+  private generateHelpGuidance(hint: AgentHint): string {
+    const actionType = hint.actionType || 'action';
+    const target = hint.targetText || hint.targetRole || 'the element';
+    
+    switch (actionType) {
+      case 'click':
+        return `Please click on "${target}" manually, then click Continue.`;
+      case 'type':
+        const value = hint.value || '[value]';
+        return `Please type "${value}" into the "${target}" field manually, then click Continue.`;
+      case 'select':
+        return `Please select an option from the "${target}" dropdown manually, then click Continue.`;
+      case 'scroll':
+        return `Please scroll the page to find "${target}", then click Continue.`;
+      default:
+        return `Please complete this step manually: ${hint.description}, then click Continue.`;
+    }
+  }
+  
+  /**
+   * Handle user's choice after manual intervention
+   * Called when user clicks Continue, Skip, or Retry
+   * PUBLIC: Called from content script when resuming after human help
+   */
+  async handleResumeWithChoice(choice: 'completed' | 'skipped' | 'retry'): Promise<void> {
+    const currentHint = this.state.hints[this.state.currentHintIndex];
+    if (!currentHint) {
+      console.warn('[AIAgent] Cannot handle resume choice - no current hint');
+      return;
+    }
+    
+    console.log(`[AIAgent] User chose: ${choice} for step ${this.state.currentHintIndex}`);
+    
+    switch (choice) {
+      case 'completed':
+        // User manually completed the step
+        currentHint.completed = true;
+        currentHint.failureCount = 0;
+        this.state.currentHintIndex++;
+        console.log(`[AIAgent] ✅ Step marked complete, advancing to ${this.state.currentHintIndex}`);
+        break;
+        
+      case 'skipped':
+        // User chose to skip this step
+        currentHint.skipped = true;
+        currentHint.failureCount = 0;
+        this.state.currentHintIndex++;
+        console.log(`[AIAgent] ⏭️ Step marked skipped, advancing to ${this.state.currentHintIndex}`);
+        break;
+        
+      case 'retry':
+        // User wants agent to try again
+        currentHint.failureCount = 0;
+        this.stuckDetector.reset();
+        console.log(`[AIAgent] 🔄 Resetting failure count, will retry step ${this.state.currentHintIndex}`);
+        break;
+    }
+    
+    // Clear pause state
+    this.state.pauseRequested = false;
+    this.state.pauseReason = undefined;
+    this.state.helpContext = undefined;
+    
+    // Notify progress
+    this.notifyProgress();
+  }
+  
+  /**
    * Check if pause has been requested (by user or agent itself)
    * Returns true if execution should pause
    */
@@ -569,13 +690,19 @@ export class AIAgent {
    * Create a paused result when execution is interrupted
    */
   private createPausedResult(): AgentResult {
+    // Use appropriate status based on why we paused
+    let finalStatus: AgentState['status'] = 'stopped';
+    if (this.state.pauseReason === 'agent_needs_help') {
+      finalStatus = 'paused'; // Mark as paused, not stopped, so UI shows help panel
+    }
+    
     return {
       success: false,
       stepsCompleted: this.state.currentHintIndex,
       totalSteps: this.state.hints.length,
       history: this.state.history,
       elapsedMs: Date.now() - this.state.startTime,
-      finalStatus: 'stopped',
+      finalStatus,
     };
   }
   
@@ -686,58 +813,67 @@ export class AIAgent {
           }
         }
         
-        // FAST PATH DISABLED FOR AI AGENT
-        // The agent needs to observe state at each step and make decisions
-        // Fast-type would skip observation and blindly execute based on recorded selectors
-        // This causes issues like:
-        // - Typing in field that closes an open dropdown before clicking the option
-        // - Not adapting to current page state
-        // 
-        // Fast-type is only useful for "replay mode" (selector-based execution)
-        // For AI Agent mode, we always observe → decide → act
-
-        // 1. Observe
-        const observation = await this.observe();
-        console.log(`[AIAgent] Observed: ${observation.url}`);
+        // ============================================================================
+        // 🚀 FAST DETERMINISTIC ACTIONS (NO OBSERVE NEEDED)
+        // SCROLL and TAB_SWITCH don't need DOM observation - execute immediately!
+        // This makes scrolling fast again by skipping the expensive observe() call.
+        // ============================================================================
         
-        // Emit observation event
-        this.onThinkingEvent?.({
-          type: 'observe',
-          timestamp: Date.now(),
-          stepIndex: this.state.currentHintIndex,
-          stepTotal: this.state.hints.length,
-          observation: {
-            url: observation.url,
-            pageTitle: observation.title,
-            hasModal: observation.hasModal,
-            hasDropdown: observation.hasOpenDropdown,
-            elementsFound: observation.buttonCount + observation.linkCount + observation.inputCount,
-          },
-        });
-        
-        // 1.5 Check if current hint's expected outcome is already satisfied
-        if (currentHint?.naturalLanguage?.expectedOutcome) {
-          const skipReason = this.checkIfOutcomeAlreadySatisfied(currentHint, observation);
-          if (skipReason) {
-            console.log(`[AIAgent] ⏭️ SKIPPING STEP: ${skipReason}`);
+        // 1.0 Handle SCROLL hints FIRST (before observe) - FAST PATH!
+        if (currentHint?.actionType === 'scroll') {
+          console.log(`[AIAgent] 📜 FAST SCROLL: Executing deterministically (no observe needed)`);
+          
+          const direction = currentHint.scrollDirection || 'down';
+          const amount = currentHint.scrollAmount || 300;
+          const containerSelector = currentHint.scrollContainer;
+          
+          if (containerSelector) {
+            console.log(`[AIAgent] 📜 Scroll: ${direction} by ${amount}px in "${containerSelector}"`);
+          } else {
+            console.log(`[AIAgent] 📜 Scroll: ${direction} by ${amount}px on window`);
+          }
+          
+          const scrollAction: AgentAction = {
+            type: 'scroll',
+            params: {
+              direction,
+              amount,
+              scrollContainerSelector: containerSelector,
+              description: currentHint.description,
+            },
+            reasoning: `Fast scroll: ${direction} ${amount}px`,
+            confidence: 1.0,
+            hintStepIndex: this.state.currentHintIndex,
+          };
+          
+          this.onProgress?.(this.state.currentHintIndex, scrollAction, 'acting');
+          const scrollResult = await this.act(scrollAction);
+          
+          if (scrollResult.success) {
             this.state.hints[this.state.currentHintIndex].completed = true;
+            this.state.hints[this.state.currentHintIndex].failureCount = 0;
             this.state.currentHintIndex++;
             this.notifyProgress();
-            // Log the skip
-            this.state.history.push({
-              stepNumber: currentHint.stepNumber,
-              action: { type: 'skip', params: { reason: skipReason }, reasoning: 'Outcome already satisfied', confidence: 1.0 },
-              observation,
-              result: 'success',
-              timestamp: Date.now(),
-            });
-            continue; // Move to next iteration of the loop
+            console.log(`[AIAgent] ✅ Fast scroll completed, advanced to hint ${this.state.currentHintIndex}`);
+            
+            // Brief stability wait (reduced from complex widget waiting)
+            await this.sleep(100);
+          } else {
+            this.state.hints[this.state.currentHintIndex].failureCount = 
+              (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
+            if (this.state.hints[this.state.currentHintIndex].failureCount! >= 3) {
+              console.warn(`[AIAgent] Scroll failed 3 times, skipping...`);
+              this.state.hints[this.state.currentHintIndex].skipped = true;
+              this.state.currentHintIndex++;
+            }
           }
+          
+          continue; // Next iteration - fast!
         }
 
-        // 1.5 Handle TAB_SWITCH hints deterministically (bypass LLM)
+        // 1.1 Handle TAB_SWITCH hints BEFORE observe - FAST PATH!
         if (currentHint?.stepType === 'TAB_SWITCH') {
-          console.log(`[AIAgent] 🔄 Executing TAB_SWITCH hint deterministically`);
+          console.log(`[AIAgent] 🔄 FAST TAB_SWITCH: Executing deterministically (no observe needed)`);
           
           const tabSwitchPayload = currentHint.recordedPayload;
           const toTabIndex = tabSwitchPayload?.toTabIndex;
@@ -813,11 +949,11 @@ export class AIAgent {
           this.onProgress?.(this.state.currentHintIndex - 1, tabSwitchAction, 'acting');
           const tabSwitchResult = await this.act(tabSwitchAction);
           
-          // Record result
+          // Record result (no observation for fast-path TAB_SWITCH)
           this.state.history.push({
             stepNumber: currentHint.stepNumber,
             action: tabSwitchAction,
-            observation,
+            observation: { url: window.location.href, title: document.title } as any,
             result: tabSwitchResult.success ? 'success' : 'failed',
             error: tabSwitchResult.error,
             timestamp: Date.now(),
@@ -840,188 +976,45 @@ export class AIAgent {
           }
         }
 
-        // 1.6 Handle SCROLL hints deterministically (bypass LLM)
-        if (currentHint?.actionType === 'scroll') {
-          console.log(`[AIAgent] 📜 Executing SCROLL hint deterministically`);
-          
-          // Use recorded scroll amount, direction, and container (critical for lazy-loaded widgets!)
-          const direction = currentHint.scrollDirection || 'down';
-          const amount = currentHint.scrollAmount || 300;
-          const containerSelector = currentHint.scrollContainer;
-          
-          if (containerSelector) {
-            console.log(`[AIAgent] 📜 Scroll: ${direction} by ${amount}px in "${containerSelector}" (recorded)`);
-          } else {
-            console.log(`[AIAgent] 📜 Scroll: ${direction} by ${amount}px on window (${currentHint.scrollAmount ? 'recorded' : 'default'})`);
-          }
-          
-          const scrollAction: AgentAction = {
-            type: 'scroll',
-            params: {
-              direction,
-              amount,
-              scrollContainerSelector: containerSelector,
-              description: currentHint.description,
-            },
-            reasoning: `Executing recorded scroll action: ${direction} ${amount}px${containerSelector ? ` in ${containerSelector}` : ''}`,
-            confidence: 1.0,
-            hintStepIndex: this.state.currentHintIndex,
-          };
-          
-          // Execute scroll
-          this.onProgress?.(this.state.currentHintIndex, scrollAction, 'acting');
-          const scrollResult = await this.act(scrollAction);
-          
-          // Record result
-          this.state.history.push({
-            stepNumber: currentHint.stepNumber,
-            action: scrollAction,
-            observation,
-            result: scrollResult.success ? 'success' : 'failed',
-            error: scrollResult.error,
-            timestamp: Date.now(),
-          });
-          
-          if (scrollResult.success) {
-            // Mark as completed and advance
+        // ============================================================================
+        // 2. OBSERVE (for all non-fast-path hints)
+        // SCROLL and TAB_SWITCH skip this via continue above
+        // ============================================================================
+        const observation = await this.observe();
+        console.log(`[AIAgent] Observed: ${observation.url}`);
+        
+        // Emit observation event
+        this.onThinkingEvent?.({
+          type: 'observe',
+          timestamp: Date.now(),
+          stepIndex: this.state.currentHintIndex,
+          stepTotal: this.state.hints.length,
+          observation: {
+            url: observation.url,
+            pageTitle: observation.title,
+            hasModal: observation.hasModal,
+            hasDropdown: observation.hasOpenDropdown,
+            elementsFound: observation.buttonCount + observation.linkCount + observation.inputCount,
+          },
+        });
+        
+        // 2.5 Check if current hint's expected outcome is already satisfied
+        if (currentHint?.naturalLanguage?.expectedOutcome) {
+          const skipReason = this.checkIfOutcomeAlreadySatisfied(currentHint, observation);
+          if (skipReason) {
+            console.log(`[AIAgent] ⏭️ SKIPPING STEP: ${skipReason}`);
             this.state.hints[this.state.currentHintIndex].completed = true;
-            this.state.hints[this.state.currentHintIndex].failureCount = 0;
             this.state.currentHintIndex++;
             this.notifyProgress();
-            console.log(`[AIAgent] ✅ Scroll completed, advanced to hint ${this.state.currentHintIndex}`);
-            
-            // 🎯 CRITICAL: Wait for lazy-loaded content to render after scroll
-            // Check if the NEXT hint requires a specific widget/container
-            const nextHint = this.state.hints[this.state.currentHintIndex];
-            
-            // 🔍 DIAGNOSTIC: Always log what widgets are visible after scroll
-            console.log(`[AIAgent] 🔍 Checking what widgets are visible after scroll...`);
-            const { findAllWidgetTitles } = await import('../types/scope');
-            const visibleWidgets = findAllWidgetTitles(document);
-            console.log(`[AIAgent] 🔍 Found ${visibleWidgets.length} widgets: ${visibleWidgets.slice(0, 10).join(', ')}`);
-            
-            if (nextHint?.recordedScopeHint) {
-              console.log(`[AIAgent] ⏳ Waiting for widget "${nextHint.recordedScopeHint}" to become visible...`);
-              
-              const maxWaitMs = 5000; // Wait up to 5 seconds
-              const checkIntervalMs = 500;
-              const startWait = Date.now();
-              let widgetFound = false;
-              
-              while (Date.now() - startWait < maxWaitMs) {
-                // Check if the widget is now visible in the DOM
-                const { resolveScopeContainer } = await import('../types/scope');
-                const widgetElement = resolveScopeContainer({
-                  kind: 'WIDGET',
-                  title: nextHint.recordedScopeHint,
-                }, document);
-                
-                if (widgetElement) {
-                  console.log(`[AIAgent] ✅ Widget "${nextHint.recordedScopeHint}" is now visible (waited ${Date.now() - startWait}ms)`);
-                  widgetFound = true;
-                  break;
-                }
-                
-                await this.sleep(checkIntervalMs);
-              }
-              
-              if (!widgetFound) {
-                console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found after ${maxWaitMs}ms`);
-                console.warn(`[AIAgent] 🔍 Available widgets: ${visibleWidgets.join(', ')}`);
-                
-                // 🎯 CRITICAL: Try to find the widget in DOM (even if not visible) and scroll to it
-                console.log(`[AIAgent] 🔍 Attempting to find widget in DOM and scroll to it...`);
-                const { resolveScopeContainer } = await import('../types/scope');
-                const widgetElement = resolveScopeContainer({
-                  kind: 'WIDGET',
-                  title: nextHint.recordedScopeHint,
-                }, document);
-                
-                if (widgetElement) {
-                  const rect = widgetElement.getBoundingClientRect();
-                  const isInViewport = rect.top >= 0 && rect.left >= 0 &&
-                                       rect.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
-                                       rect.right <= (window.innerWidth || document.documentElement.clientWidth);
-                  
-                  if (!isInViewport) {
-                    console.log(`[AIAgent] 📜 Widget found but not in viewport (top: ${Math.round(rect.top)}px) - scrolling to it...`);
-                    try {
-                      widgetElement.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
-                      // Wait for scroll animation to complete (OPTIMIZED from 800ms)
-                      await this.sleep(300);
-                      
-                      // Wait for lazy-loaded content after scroll (OPTIMIZED)
-                      const { StateWaitEngine } = await import('../content/state-wait-engine');
-                      await StateWaitEngine.waitForStability({
-                        domQuietMs: 200,
-                        networkQuietMs: 300,
-                        maxWaitMs: 2000,
-                        checkSpinners: true,
-                      });
-                      
-                      // Check again if widget is now visible
-                      const widgetElementAfterScroll = resolveScopeContainer({
-                        kind: 'WIDGET',
-                        title: nextHint.recordedScopeHint,
-                      }, document);
-                      
-                      if (widgetElementAfterScroll) {
-                        const rectAfter = widgetElementAfterScroll.getBoundingClientRect();
-                        const isInViewportAfter = rectAfter.top >= 0 && rectAfter.left >= 0 &&
-                                                  rectAfter.bottom <= (window.innerHeight || document.documentElement.clientHeight) &&
-                                                  rectAfter.right <= (window.innerWidth || document.documentElement.clientWidth);
-                        if (isInViewportAfter) {
-                          console.log(`[AIAgent] ✅ Widget "${nextHint.recordedScopeHint}" is now visible after scroll!`);
-                          widgetFound = true;
-                        } else {
-                          console.warn(`[AIAgent] ⚠️ Widget still not in viewport after scroll (top: ${Math.round(rectAfter.top)}px)`);
-                        }
-                      }
-                    } catch (scrollError) {
-                      console.error(`[AIAgent] ❌ Error scrolling to widget:`, scrollError);
-                    }
-                  } else {
-                    console.log(`[AIAgent] ℹ️ Widget is already in viewport`);
-                  }
-                } else {
-                  console.warn(`[AIAgent] ⚠️ Widget "${nextHint.recordedScopeHint}" not found in DOM at all`);
-                }
-                
-                // #region agent log
-                // Get ALL gs-report-widget-element tags and their text content
-                const gsWidgets = document.querySelectorAll('gs-report-widget-element');
-                const gsWidgetInfo = Array.from(gsWidgets).slice(0, 20).map((w, i) => {
-                  const rect = w.getBoundingClientRect();
-                  const isVisible = rect.width > 0 && rect.height > 0;
-                  const hasShadow = !!w.shadowRoot;
-                  let shadowText = '';
-                  if (w.shadowRoot) {
-                    const titleEl = w.shadowRoot.querySelector('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"]');
-                    shadowText = titleEl?.textContent?.trim()?.substring(0, 60) || '';
-                  }
-                  return { idx: i, isVisible, hasShadow, shadowText, top: Math.round(rect.top) };
-                });
-                fetch('http://127.0.0.1:7243/ingest/b7c604f8-b184-4e55-ac51-a3e1794329f3',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai-agent.ts:733',message:'SCROLL_WIDGET_NOT_FOUND',data:{searchedFor:nextHint.recordedScopeHint,waitedMs:maxWaitMs,gsWidgetCount:gsWidgets.length,gsWidgetInfo,visibleWidgets:visibleWidgets.slice(0,15),widgetFoundAfterScroll:widgetFound},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B3'})}).catch(()=>{});
-                // #endregion
-              }
-            } else {
-              console.log(`[AIAgent] ℹ️ Next hint has no scope requirement - available widgets: ${visibleWidgets.slice(0, 5).join(', ')}`);
-              // No specific widget required, just wait for general page stability (OPTIMIZED from 200ms)
-              await this.sleep(100);
-            }
-          } else {
-            // Scroll failed - increment failure count
-            this.state.hints[this.state.currentHintIndex].failureCount = 
-              (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
-            
-            if (this.state.hints[this.state.currentHintIndex].failureCount! >= 3) {
-              console.warn(`[AIAgent] Scroll failed 3 times, skipping...`);
-              this.state.hints[this.state.currentHintIndex].skipped = true;
-              this.state.currentHintIndex++;
-            }
+            this.state.history.push({
+              stepNumber: currentHint.stepNumber,
+              action: { type: 'skip', params: { reason: skipReason }, reasoning: 'Outcome already satisfied', confidence: 1.0 },
+              observation,
+              result: 'success',
+              timestamp: Date.now(),
+            });
+            continue;
           }
-          
-          continue; // Move to next iteration of the loop
         }
         
         // ============================================================================
@@ -1394,6 +1387,7 @@ export class AIAgent {
               // ✅ Action achieved the hint's goal - mark complete and advance
               this.state.hints[completedIndex].completed = true;
               this.state.hints[completedIndex].failureCount = 0;  // Reset failure count
+              this.stuckDetector.recordSuccess(completedIndex);  // Reset stuck detector
               
               // Find next incomplete hint (skip over already completed/skipped ones)
               let nextIndex = completedIndex + 1;
@@ -1461,56 +1455,37 @@ export class AIAgent {
             }
           }
         } else if (!result.success) {
-          // Track failures for currentHintIndex - skip hint after 3 consecutive failures
+          // Track failures using StuckDetector
           const failedIndex = this.state.currentHintIndex;
           if (failedIndex >= 0 && failedIndex < this.state.hints.length) {
             const hint = this.state.hints[failedIndex];
             hint.failureCount = (hint.failureCount || 0) + 1;
             
-            if (hint.failureCount >= 3) {
-              console.warn(`[AIAgent] ⏭️ Skipping hint ${failedIndex} after ${hint.failureCount} failures: ${hint.description}`);
-              hint.skipped = true;
+            // Use StuckDetector to handle retries with delays
+            const shouldPauseForHelp = await this.stuckDetector.recordFailure(
+              failedIndex,
+              hint.description,
+              result.error || 'Unknown error'
+            );
+            
+            if (shouldPauseForHelp) {
+              // Agent is stuck - handleStuck was already called by StuckDetector
+              // which set pauseRequested, pauseReason, and helpContext
+              console.warn(`[AIAgent] 🚨 Agent stuck on step ${failedIndex} - pausing for help`);
+              console.log(`[AIAgent] Help context set:`, this.state.helpContext);
+              console.log(`[AIAgent] Pause reason:`, this.state.pauseReason);
               
-              // CRITICAL: Cleanup any open dropdown/modal before moving on
-              // This prevents stuck dropdowns from blocking subsequent actions
+              // CRITICAL: Cleanup any open dropdown/modal before pausing
               await this.cleanupUIState(hint);
               
-              // Find next incomplete hint
-              let nextIndex = failedIndex + 1;
-              while (nextIndex < this.state.hints.length && 
-                     (this.state.hints[nextIndex].completed || this.state.hints[nextIndex].skipped)) {
-                nextIndex++;
-              }
+              // Set status to paused (not stopped) so it can be resumed
+              this.state.status = 'paused';
               
-              if (nextIndex < this.state.hints.length) {
-                this.state.currentHintIndex = nextIndex;
-                console.log(`[AIAgent] 📍 Advanced to next incomplete hint: ${nextIndex}`);
-              } else {
-                // No more hints - check if we completed enough to consider it a success
-                const completedCount = this.state.hints.filter(h => h.completed).length;
-                const skippedCount = this.state.hints.filter(h => h.skipped).length;
-                const totalCount = this.state.hints.length;
-                
-                console.log(`[AIAgent] 📍 No more incomplete hints (${completedCount} completed, ${skippedCount} skipped, ${totalCount} total)`);
-                
-                // If we completed at least 70% of hints, consider it a success
-                if (completedCount >= totalCount * 0.7) {
-                  console.log(`[AIAgent] ✅ Completed ${completedCount}/${totalCount} hints (>70%), marking as success`);
-                  this.state.status = 'completed';
-                  
-                  // Verify workflow outcome if available
-                  if (this.state.analyzedIntent?.expectedOutcome) {
-                    const verification = await this.verifyWorkflowOutcome();
-                    console.log(`[AIAgent] Outcome verification: ${verification.achieved ? '✅' : '⚠️'} ${verification.reason}`);
-                  }
-                } else {
-                  console.log(`[AIAgent] ❌ Only completed ${completedCount}/${totalCount} hints (<70%), marking as failed`);
-                  this.state.status = 'failed';
-                }
-                break; // Exit the loop!
-              }
+              // Return paused result - user will resume via Continue/Skip/Retry
+              return this.createPausedResult();
             } else {
-              console.log(`[AIAgent] ⚠️ Hint ${failedIndex} failed (${hint.failureCount}/3 failures)`);
+              // StuckDetector will have applied delay, just continue to retry
+              console.log(`[AIAgent] ⚠️ Step ${failedIndex} failed, will retry after delay`);
             }
           }
         }
@@ -2734,11 +2709,18 @@ export class AIAgent {
       // Check if we overrode the action to 'select'
       const finalActionType = result.action || 'fail';
       
+      // Get decision space from hint for dropdown validation/fallback
+      const decisionSpaceFromHint = nextIncompleteHint?.decisionSpace;
+      if (decisionSpaceFromHint?.options?.length) {
+        console.log(`[AIAgent] 📋 Including decision space with ${decisionSpaceFromHint.options.length} options for dropdown validation`);
+      }
+      
       const action: AgentAction = {
         type: finalActionType,
         params: {
-          // For SELECT actions, include the option parameter
+          // For SELECT actions, include the option parameter and decision space
           ...(finalActionType === 'select' && result.option ? { option: result.option } : {}),
+          ...(finalActionType === 'select' && decisionSpaceFromHint ? { decisionSpace: decisionSpaceFromHint } : {}),
           // Semantic target for element identification
           target: resolvedTarget ? {
             role: resolvedTarget.role,
@@ -2764,6 +2746,7 @@ export class AIAgent {
           
           // For select actions
           option: result.option,
+          decisionSpace: decisionSpaceFromHint,
           
           // Expected outcome for verification
           expectedOutcome: result.expectedOutcome,

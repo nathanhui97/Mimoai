@@ -306,8 +306,23 @@ export class ElementAnalyzer {
       reasons.push('✓ native interactive element (+15)');
     }
     if (signals.elementType.isListItem) {
-      score -= 25;
-      reasons.push('✗ list item (often dynamic) (-25)');
+      // REDUCED PENALTY: List items with stable text are actually quite reliable
+      // when we have proper container scoping. The old -25 was too harsh.
+      // Items with role="option" or role="menuitem" are well-structured
+      // and can be reliably identified by text within their container.
+      if (signals.textStability.hasStableText && signals.textStability.textIsUnique) {
+        // List item with unique, stable text - actually fairly reliable
+        score -= 5;
+        reasons.push('⚠ list item with unique text (-5)');
+      } else if (signals.textStability.hasStableText) {
+        // List item with stable text but not unique - needs container scoping
+        score -= 10;
+        reasons.push('⚠ list item with stable text (-10)');
+      } else {
+        // List item without stable text - less reliable
+        score -= 15;
+        reasons.push('✗ list item without stable text (-15)');
+      }
     }
     if (signals.elementType.isCustomComponent) {
       score -= 10;

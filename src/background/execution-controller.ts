@@ -159,8 +159,9 @@ export class ExecutionController {
 
   /**
    * Request resume of paused/stopped execution
+   * @param userChoice - What the user did: completed (default), skipped, or retry
    */
-  async requestResume(): Promise<boolean> {
+  async requestResume(userChoice?: 'completed' | 'skipped' | 'retry'): Promise<boolean> {
     const session = await this.getSession();
     if (!session) {
       console.warn('[ExecutionController] No session to resume');
@@ -174,7 +175,9 @@ export class ExecutionController {
     }
 
     // Update session status
-    console.log('[ExecutionController] Resuming session, changing status from', session.status, 'to running');
+    const choice = userChoice || 'completed'; // Default: assume user completed the step
+    console.log('[ExecutionController] Resuming session with user choice:', choice);
+    console.log('[ExecutionController] Changing status from', session.status, 'to running');
     session.status = 'running';
     session.pauseReason = undefined;
     session.pausedAt = undefined;
@@ -185,13 +188,14 @@ export class ExecutionController {
     console.log('[ExecutionController] Session saved with status: running, broadcasting...');
     this.broadcastStatus(session);
 
-    // Notify content script to resume agent
+    // Notify content script to resume agent with user's choice
     try {
-      console.log('[ExecutionController] Sending EXECUTION_CONTROL resume to tab:', session.tabId);
+      console.log('[ExecutionController] Sending EXECUTION_CONTROL resume to tab:', session.tabId, 'with choice:', choice);
       await chrome.tabs.sendMessage(session.tabId, {
         type: 'EXECUTION_CONTROL',
         payload: {
           action: 'resume',
+          userChoice: choice,
         },
       });
       console.log('[ExecutionController] Resume message sent successfully');

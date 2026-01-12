@@ -446,13 +446,19 @@ export class Tier1Executor {
 
   /**
    * Execute select (dropdown)
+   * 
+   * ENHANCED: This function now properly handles the two-step dropdown selection:
+   * 1. First, ensure the dropdown is open (click trigger if needed)
+   * 2. Wait for the dropdown menu to appear with retry logic
+   * 3. Search for the option using multiple strategies including decision space
    */
   private static async executeSelect(action: AgentAction): Promise<Tier1ExecutionResult> {
-    const { target, option } = action.params;
+    const { target, option, decisionSpace } = action.params;
     
     console.log('[Tier1] 🎯 Executing SELECT for dropdown');
     console.log('[Tier1] Option to select:', option);
     console.log('[Tier1] Target:', target);
+    console.log('[Tier1] Decision space available:', !!decisionSpace);
     
     if (!option) {
       return {
@@ -463,25 +469,151 @@ export class Tier1Executor {
       };
     }
     
-    // Check if dropdown is already open
-    const dropdownAlreadyOpen = document.querySelectorAll('[role="option"]').length > 0;
-    console.log('[Tier1] Dropdown already open:', dropdownAlreadyOpen);
-    
-    // Open dropdown if not already open
-    if (!dropdownAlreadyOpen && target) {
-      console.log('[Tier1] Opening dropdown first...');
-      const clickResult = await this.executeClick({
-        ...action,
-        type: 'click',
-        params: { target, description: 'Open dropdown' },
-      });
+    // ENHANCED: Use MenuDetector to properly check for visible dropdown
+    const { MenuDetector } = await import('../content/menu-detector');
+
+    // Check if dropdown is already open using proper menu detection
+    let visibleMenu = MenuDetector.findVisibleMenu();
+    let dropdownAlreadyOpen = !!visibleMenu;
+
+    // UNIVERSAL: Distinguish between actual dropdowns and always-visible listboxes
+    // Key insight: Real dropdown menus are POSITIONED (absolute/fixed) overlays
+    // Always-visible listboxes (dual-pickers, multi-selects) are positioned normally (static/relative)
+    if (!dropdownAlreadyOpen) {
+      // Search for positioned overlay elements that contain options
+      // This works across all frameworks: React, Angular, Vue, vanilla HTML, etc.
+      const allOptionContainers = document.querySelectorAll(
+        '[role="listbox"], [role="menu"], [role="presentation"]'
+      );
       
-      if (clickResult.status !== 'success') {
-        return clickResult;
+      for (const container of allOptionContainers) {
+        const rect = container.getBoundingClientRect();
+        const style = window.getComputedStyle(container as HTMLElement);
+        
+        // UNIVERSAL PATTERN: Real dropdown overlays are absolutely/fixed positioned
+        // This distinguishes them from inline listboxes that are part of the page flow
+        const isOverlay = style.position === 'absolute' || style.position === 'fixed';
+        const isVisible = rect.width > 0 && rect.height > 0 && 
+                         style.display !== 'none' && 
+                         style.visibility !== 'hidden' &&
+                         style.opacity !== '0';
+        
+        if (isOverlay && isVisible) {
+          const options = container.querySelectorAll('[role="option"], [role="menuitem"], li');
+          if (options.length > 0) {
+            console.log(`[Tier1] 🔍 Found overlay dropdown (${style.position}) with ${options.length} options`);
+            dropdownAlreadyOpen = true;
+            visibleMenu = container as HTMLElement;
+            break;
+          }
+        }
+      }
+    }
+    
+    // UNIVERSAL: Check if the TARGET's dropdown is open (not just any dropdown)
+    // Uses standard ARIA attributes that work across all accessible web applications
+    if (target?.name) {
+      const triggerLabel = target.name;
+      
+      // Find trigger using universal ARIA patterns
+      // These patterns work on any ARIA-compliant website
+      let targetTrigger: Element | null = null;
+      
+      // Try multiple universal selector patterns
+      const triggerSelectors = [
+        `[aria-label="${triggerLabel}"]`,
+        `[aria-label*="${triggerLabel}"]`,
+        `[role="combobox"][aria-label*="${triggerLabel}"]`,
+        `button[aria-label*="${triggerLabel}"]`,
+      ];
+      
+      for (const selector of triggerSelectors) {
+        try {
+          targetTrigger = document.querySelector(selector);
+          if (targetTrigger) break;
+        } catch (e) {
+          // Invalid selector, try next
+        }
       }
       
-      // Wait for dropdown to open
-      await new Promise(resolve => setTimeout(resolve, 150));
+      if (targetTrigger) {
+        // UNIVERSAL: Check aria-expanded attribute (standard ARIA pattern)
+        const ariaExpanded = targetTrigger.getAttribute('aria-expanded');
+        const ariaControls = targetTrigger.getAttribute('aria-controls');
+        
+        if (ariaExpanded === 'true') {
+          // Trigger says it's expanded - verify the controlled element has content
+          if (ariaControls) {
+            const controlledDropdown = document.getElementById(ariaControls);
+            if (controlledDropdown) {
+              const controlledOptions = controlledDropdown.querySelectorAll('[role="option"], [role="menuitem"], li');
+              if (controlledOptions.length === 0) {
+                console.log(`[Tier1] 🔍 Target says expanded but controlled element ${ariaControls} is empty - will open`);
+                dropdownAlreadyOpen = false;
+              } else {
+                console.log(`[Tier1] ✅ Target dropdown ${ariaControls} is expanded with ${controlledOptions.length} options`);
+                dropdownAlreadyOpen = true;
+                visibleMenu = controlledDropdown as HTMLElement;
+              }
+            }
+          }
+        } else if (ariaExpanded === 'false' || ariaExpanded === null) {
+          // Trigger is NOT expanded - we need to open it
+          // Even if another dropdown is open, we need OUR target's dropdown
+          console.log(`[Tier1] 🔍 Target trigger "${triggerLabel}" is NOT expanded (aria-expanded=${ariaExpanded}) - need to open it`);
+          dropdownAlreadyOpen = false;
+        }
+      } else {
+        console.log(`[Tier1] 🔍 Could not find trigger for "${triggerLabel}" - will attempt to open dropdown`);
+      }
+    }
+
+    console.log('[Tier1] Dropdown already open:', dropdownAlreadyOpen);
+    
+    // ENHANCED: Open dropdown with retry logic if not already open
+    if (!dropdownAlreadyOpen && target) {
+      console.log('[Tier1] Opening dropdown first...');
+      
+      // Try up to 2 times to open the dropdown
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        console.log(`[Tier1] Opening dropdown attempt ${attempt}/2...`);
+        
+        const clickResult = await this.executeClick({
+          ...action,
+          type: 'click',
+          params: { target, description: 'Open dropdown' },
+        });
+        
+        if (clickResult.status !== 'success') {
+          if (attempt === 2) {
+            return clickResult;
+          }
+          console.log('[Tier1] Click failed, retrying...');
+          await this.sleep(200);
+          continue;
+        }
+        
+        // Wait for dropdown to open using MenuDetector
+        console.log('[Tier1] Waiting for dropdown menu to appear...');
+        const menuResult = await MenuDetector.waitForMenu(2000);
+        
+        if (menuResult.menu) {
+          visibleMenu = menuResult.menu;
+          console.log(`[Tier1] ✅ Dropdown opened via ${menuResult.method} (${menuResult.confidence} confidence) in ${menuResult.elapsedMs}ms`);
+          break;
+        } else if (attempt === 2) {
+          // Last attempt - check if options are visible even if menu wasn't detected
+          const postClickOptions = document.querySelectorAll('[role="option"]');
+          if (postClickOptions.length > 0) {
+            console.log(`[Tier1] ⚠️ Menu not detected but ${postClickOptions.length} options found - continuing`);
+            break;
+          }
+          console.warn('[Tier1] ❌ Dropdown menu never appeared after 2 attempts');
+        } else {
+          console.log('[Tier1] Menu not detected, retrying dropdown open...');
+          await this.sleep(200);
+        }
+      }
     } else if (dropdownAlreadyOpen) {
       console.log('[Tier1] ✅ Dropdown already open, skipping trigger click');
     }
@@ -697,31 +829,101 @@ export class Tier1Executor {
       const intent: Intent = { kind: 'SELECT_DROPDOWN_OPTION', optionVar: 'option' };
       const resolveResult = await this.resolveElement(bundle, intent);
       
-      if (resolveResult.status !== 'success') {
-        console.error('[Tier1] ❌ Failed to find option:', option);
-        console.error('[Tier1] Available options:', Array.from(allOptions).map(o => o.textContent?.trim()));
-        // Track selector failures (async, non-blocking)
-        if (optionTarget.recordedFallbackSelectors) {
+      if (resolveResult.status === 'success') {
+        matchedOption = resolveResult.details.element!;
+        // Track selector success (async, non-blocking)
+        if (optionTarget.recordedFallbackSelectors && optionTarget.recordedFallbackSelectors.length > 0) {
+          const selector = optionTarget.recordedFallbackSelectors[0];
           const url = window.location.href;
-          for (const selector of optionTarget.recordedFallbackSelectors) {
-            SelectorReliability.trackResult(selector, url, false).catch(() => {});
+          SelectorReliability.trackResult(selector, url, true).catch(() => {});
+        }
+      } else {
+        console.log('[Tier1] ⚠️ Resolver failed to find option, trying decision space...');
+      }
+    }
+    
+    // STRATEGY 3: Use decision space as fallback
+    // The decision space contains all options that were available when the step was recorded
+    // This helps validate we're looking at the right dropdown and can find the option by index
+    if (!matchedOption && decisionSpace?.options && decisionSpace.options.length > 0) {
+      console.log('[Tier1] Strategy 3: Using decision space fallback...');
+      console.log('[Tier1] Decision space has', decisionSpace.options.length, 'recorded options');
+      
+      // First, verify we're looking at the right dropdown by checking overlap with available options
+      const availableTexts = allOptions.map(opt => normalizeText(opt.textContent)).filter(Boolean);
+      const recordedTexts = decisionSpace.options.map((opt: string) => normalizeText(opt));
+      
+      // Count how many recorded options match available options
+      const matchCount = recordedTexts.filter((rt: string) => availableTexts.includes(rt)).length;
+      const matchRatio = matchCount / recordedTexts.length;
+      
+      console.log(`[Tier1] Decision space overlap: ${matchCount}/${recordedTexts.length} (${(matchRatio * 100).toFixed(0)}%)`);
+      
+      if (matchRatio >= 0.5) {
+        // Good overlap - this is likely the correct dropdown
+        console.log('[Tier1] ✅ Decision space validates this is the correct dropdown');
+        
+        // Try to find the option by recorded index if available
+        if (decisionSpace.selectedIndex !== undefined && decisionSpace.selectedIndex >= 0) {
+          const recordedOptionText = decisionSpace.options[decisionSpace.selectedIndex];
+          console.log(`[Tier1] Trying recorded index ${decisionSpace.selectedIndex}: "${recordedOptionText}"`);
+          
+          // Search for this option in allOptions
+          for (const opt of allOptions) {
+            const optText = normalizeText(opt.textContent);
+            if (optText === normalizeText(recordedOptionText)) {
+              matchedOption = opt;
+              matchType = 'decision-space-index';
+              console.log('[Tier1] ✅ Found option via decision space index');
+              break;
+            }
           }
         }
-        // CLEANUP: Close dropdown before returning failure
-        await this.closeAnyOpenDropdown();
-        return resolveResult;
+        
+        // If index didn't work, try fuzzy matching with all decision space options
+        if (!matchedOption) {
+          for (const recordedOpt of decisionSpace.options) {
+            const normalizedRecorded = normalizeText(recordedOpt);
+            if (normalizedRecorded.includes(normalizedSearchText) || normalizedSearchText.includes(normalizedRecorded)) {
+              // Found a fuzzy match - now find this in the DOM
+              for (const opt of allOptions) {
+                const optText = normalizeText(opt.textContent);
+                if (optText === normalizedRecorded) {
+                  matchedOption = opt;
+                  matchType = 'decision-space-fuzzy';
+                  console.log(`[Tier1] ✅ Found option via decision space fuzzy match: "${recordedOpt}"`);
+                  break;
+                }
+              }
+              if (matchedOption) break;
+            }
+          }
+        }
+      } else {
+        console.log('[Tier1] ⚠️ Low decision space overlap - may be wrong dropdown');
       }
+    }
+    
+    // STRATEGY 4: Last resort - click by position in the visible menu
+    if (!matchedOption && visibleMenu) {
+      console.log('[Tier1] Strategy 4: Trying to click by text in visible menu...');
+      const menuItems = MenuDetector.extractMenuItems(visibleMenu);
+      console.log(`[Tier1] Visible menu has ${menuItems.length} items`);
       
-      matchedOption = resolveResult.details.element!;
-      // Track selector success (async, non-blocking)
-      if (optionTarget.recordedFallbackSelectors && optionTarget.recordedFallbackSelectors.length > 0) {
-        const selector = optionTarget.recordedFallbackSelectors[0];
-        const url = window.location.href;
-        SelectorReliability.trackResult(selector, url, true).catch(() => {});
+      for (const item of menuItems) {
+        const itemText = normalizeText(item.textContent);
+        if (itemText === normalizedSearchText || itemText.includes(normalizedSearchText)) {
+          matchedOption = item;
+          matchType = 'menu-item-text';
+          console.log(`[Tier1] ✅ Found option in visible menu: "${item.textContent?.trim()}"`);
+          break;
+        }
       }
     }
     
     if (!matchedOption) {
+      console.error('[Tier1] ❌ Failed to find option after all strategies:', option);
+      console.error('[Tier1] Available options:', Array.from(allOptions).map(o => o.textContent?.trim()));
       // CLEANUP: Close dropdown before returning failure
       await this.closeAnyOpenDropdown();
       return {
@@ -1879,13 +2081,76 @@ export class Tier1Executor {
         return false;
       };
       
+      // TOP-DOWN APPROACH: First, find ALL elements that contain the scope text
+      // This is more reliable than bottom-up walking for complex frameworks like Salesforce
+      const scopeContainers: Element[] = [];
+      
+      // Search for elements whose text content matches the scope hint
+      // Use TreeWalker for efficiency
+      const treeWalker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_ELEMENT,
+        {
+          acceptNode: (node) => {
+            const el = node as Element;
+            const text = el.textContent?.trim() || '';
+            // Look for elements with short text that matches scope hint
+            if (text.length > 5 && text.length < 200 && fuzzyTitleMatch(bundle.scopeHint!, text)) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            return NodeFilter.FILTER_SKIP;
+          }
+        }
+      );
+      
+      let scopeEl: Element | null;
+      while ((scopeEl = treeWalker.nextNode() as Element | null)) {
+        // Find the container that holds this scope text element
+        // Walk up to find a reasonable container (section, card, panel, etc.)
+        let container = scopeEl.parentElement;
+        let levelsUp = 0;
+        while (container && levelsUp < 10) {
+          const tagLower = container.tagName?.toLowerCase() || '';
+          const classLower = container.className?.toString()?.toLowerCase() || '';
+          
+          // Stop at section-like containers
+          if (tagLower.includes('section') || tagLower.includes('card') || 
+              tagLower.includes('panel') || tagLower.includes('flexipage') ||
+              classLower.includes('section') || classLower.includes('card') ||
+              classLower.includes('panel') || classLower.includes('form') ||
+              container.getAttribute('role') === 'region' ||
+              container.getAttribute('role') === 'group') {
+            if (!scopeContainers.includes(container)) {
+              scopeContainers.push(container);
+              console.log(`[Tier1] 🔍 Found scope container: ${container.tagName} with class "${container.className?.toString()?.substring(0, 50)}"`);
+            }
+            break;
+          }
+          container = container.parentElement;
+          levelsUp++;
+        }
+      }
+      
+      console.log(`[Tier1] 🔍 Found ${scopeContainers.length} containers for scope "${bundle.scopeHint}"`);
+      
       const inScope = visibleCandidates.filter((c, idx) => {
-        // Walk up the DOM tree AND shadow DOM to find a container that matches the scope hint
+        const isFirstCandidate = idx === 0;
+        
+        // TOP-DOWN: Check if candidate is inside any of the scope containers we found
+        if (scopeContainers.length > 0) {
+          for (const container of scopeContainers) {
+            if (container.contains(c.element)) {
+              console.log(`[Tier1] ✅ Candidate ${idx} is inside scope container (top-down match)`);
+              return true;
+            }
+          }
+        }
+        
+        // BOTTOM-UP: Walk up the DOM tree to find a container that matches the scope hint
         let current: Element | null = c.element;
-        const maxLevels = 20; // Increased for shadow DOM depth
+        const maxLevels = 20;
         let level = 0;
         const scopeHint = bundle.scopeHint!;
-        const isFirstCandidate = idx === 0; // Only log detailed debug for first candidate
         
         while (current && level < maxLevels) {
           // Check headers in this element (light DOM)
@@ -1898,7 +2163,19 @@ export class Tier1Executor {
             }
           }
           
-          // Check shadow DOM for titles - ALSO check text content directly!
+          // UNIVERSAL: Check direct children for text matching scope
+          for (const child of Array.from(current.children || [])) {
+            const childText = child.textContent?.trim() || '';
+            if (childText.length > 5 && childText.length < 150) {
+              // Check if child's text matches scope
+              if (fuzzyTitleMatch(scopeHint, childText)) {
+                console.log(`[Tier1] ✅ Candidate matched scope via child text: "${childText.substring(0, 50)}"`);
+                return true;
+              }
+            }
+          }
+          
+          // Check shadow DOM for titles
           if (current.shadowRoot) {
             // Method 1: Check headers
             const shadowHeaders = current.shadowRoot.querySelectorAll('h1, h2, h3, h4, h5, h6, [class*="title"], [class*="header"], [role="heading"]');

@@ -957,10 +957,11 @@ chrome.runtime.onMessage.addListener(
     if (message.type === 'EXECUTION_CONTROL') {
       (async () => {
         try {
-          const { action, reason, helpContext } = message.payload as {
+          const { action, reason, helpContext, userChoice } = message.payload as {
             action: 'pause' | 'resume' | 'stop';
             reason?: PauseReason;
             helpContext?: HumanHelpContext;
+            userChoice?: 'completed' | 'skipped' | 'retry';
           };
 
           let result: boolean;
@@ -971,9 +972,23 @@ chrome.runtime.onMessage.addListener(
                 reason || 'user_requested',
                 helpContext
               );
+              
+              // If pause was due to agent needing help, send browser notification
+              if (result && reason === 'agent_needs_help') {
+                const session = await executionController.getSession();
+                if (session) {
+                  const stepDescription = helpContext?.stepDescription || 'Agent needs help';
+                  await notificationService.notifyTaskStuck(
+                    session.workflowName,
+                    stepDescription,
+                    session.tabId
+                  );
+                  console.log('[ServiceWorker] Sent stuck notification for:', session.workflowName);
+                }
+              }
               break;
             case 'resume':
-              result = await executionController.requestResume();
+              result = await executionController.requestResume(userChoice);
               break;
             case 'stop':
               result = await executionController.requestStop();
@@ -1085,9 +1100,26 @@ chrome.runtime.onMessage.addListener(
             console.log('[ServiceWorker] Execution stopped/paused - keeping session for resume');
             const session = await executionController.getSession();
             if (session) {
-              session.status = finalStatus;
+              session.status = finalStatus === 'paused' ? 'waiting_for_human' : finalStatus;
               session.currentStepIndex = stepsCompleted || session.currentStepIndex;
               session.pausedAt = Date.now();
+              
+              // Extract helpContext from agent state if available
+              if (session.agentState?.pauseReason === 'agent_needs_help' && session.agentState?.helpContext) {
+                session.pauseReason = 'agent_needs_help';
+                session.humanHelpContext = session.agentState.helpContext;
+                console.log('[ServiceWorker] Agent needs help - setting help context:', session.humanHelpContext);
+                
+                // Send browser notification
+                const stepDescription = session.humanHelpContext?.stepDescription || 'Agent needs help';
+                await notificationService.notifyTaskStuck(
+                  session.workflowName,
+                  stepDescription,
+                  session.tabId
+                );
+                console.log('[ServiceWorker] Sent stuck notification');
+              }
+              
               await executionController.saveSession(session);
               executionController.broadcastStatus(session);
             }

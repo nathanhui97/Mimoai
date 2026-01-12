@@ -996,7 +996,28 @@ export class RecordingManager {
         let elementState: import('../types/workflow').ElementState | null = null;
 
         try {
-          elementState = ElementStateCapture.captureElementState(target);
+          // CRITICAL FIX: For dropdown options, wait a moment for dropdown to stabilize
+          // Portal elements and dynamically rendered options may still be animating/rendering
+          // This micro-delay ensures we capture accurate visibility state
+          if (finalIsListItemOrOption) {
+            console.log('GhostWriter: Dropdown option detected - waiting for dropdown to stabilize...');
+            await new Promise(resolve => setTimeout(resolve, 50));
+            console.log('GhostWriter: Dropdown stabilization wait complete, capturing element state');
+          }
+          
+          // For dropdown options, use the permissive visibility check
+          if (finalIsListItemOrOption) {
+            const isVisiblePermissive = ElementStateCapture.isElementVisiblePermissive(target);
+            elementState = {
+              visible: isVisiblePermissive, // Use permissive check for dropdown options
+              enabled: ElementStateCapture.captureElementState(target).enabled,
+              readonly: ElementStateCapture.captureElementState(target).readonly,
+              checked: ElementStateCapture.captureElementState(target).checked,
+            };
+            console.log('GhostWriter: Dropdown option visibility (permissive):', isVisiblePermissive);
+          } else {
+            elementState = ElementStateCapture.captureElementState(target);
+          }
           // elementText already captured earlier for deduplication
         } catch (stateError) {
           console.warn('GhostWriter: Error capturing element state:', stateError);
@@ -1152,6 +1173,138 @@ export class RecordingManager {
           // Generate semantic fallback selectors for grid cells
           const semanticContext = ContextScanner.scan(target);
           let enhancedFallbacks = [...selectors.fallbacks];
+          
+          // CRITICAL FIX: Generate container-scoped selectors for dropdown options
+          // This ensures we can find the option within its specific dropdown, not globally
+          if (finalIsListItemOrOption && context?.dropdownContainer) {
+            console.log('🔍 GhostWriter: Generating container-scoped selectors for dropdown option');
+            const dropdownInfo = context.dropdownContainer;
+            const optionText = elementText || target.textContent?.trim() || '';
+            const escapedText = optionText.replace(/'/g, "\\'").replace(/"/g, '\\"');
+            
+            // Generate highly specific container-scoped selectors
+            const containerScopedSelectors: string[] = [];
+            
+            // Strategy 1: If dropdown has trigger label, use it for scoping
+            // e.g., [aria-label="Merchant Category"] + [role="listbox"] [role="option"]:contains("Value")
+            if (dropdownInfo.triggerLabel) {
+              const escapedTriggerLabel = dropdownInfo.triggerLabel.replace(/'/g, "\\'").replace(/"/g, '\\"');
+              // XPath: Find listbox associated with the trigger, then find option by text
+              containerScopedSelectors.push(
+                `//*[@aria-label='${escapedTriggerLabel}']//ancestor::*[contains(@class,'combobox') or @role='combobox']/following-sibling::*[@role='listbox']//*[@role='option'][contains(normalize-space(.),'${escapedText}')]`
+              );
+              // Simpler: Just find option with text in any visible listbox (most common pattern)
+              containerScopedSelectors.push(
+                `//*[@role='listbox']//*[@role='option'][contains(normalize-space(.),'${escapedText}')]`
+              );
+            }
+            
+            // Strategy 2: If dropdown container has aria-label, use it
+            if (dropdownInfo.label) {
+              const escapedLabel = dropdownInfo.label.replace(/'/g, "\\'").replace(/"/g, '\\"');
+              containerScopedSelectors.push(
+                `//*[@aria-label='${escapedLabel}']//*[@role='option'][contains(normalize-space(.),'${escapedText}')]`
+              );
+              containerScopedSelectors.push(
+                `//*[@aria-label='${escapedLabel}']//li[contains(normalize-space(.),'${escapedText}')]`
+              );
+            }
+            
+            // Strategy 3: If dropdown container has ID, use it for precise scoping
+            if (dropdownInfo.id) {
+              containerScopedSelectors.push(
+                `//*[@id='${dropdownInfo.id}']//*[@role='option'][contains(normalize-space(.),'${escapedText}')]`
+              );
+              containerScopedSelectors.push(
+                `//*[@id='${dropdownInfo.id}']//li[contains(normalize-space(.),'${escapedText}')]`
+              );
+            }
+            
+            // Strategy 4: Use role-based container scoping (most reliable fallback)
+            if (dropdownInfo.role === 'listbox' || dropdownInfo.role === 'menu') {
+              containerScopedSelectors.push(
+                `//*[@role='${dropdownInfo.role}']//*[@role='option'][contains(normalize-space(.),'${escapedText}')]`
+              );
+              containerScopedSelectors.push(
+                `//*[@role='${dropdownInfo.role}']//li[contains(normalize-space(.),'${escapedText}')]`
+              );
+            }
+            
+            // Strategy 5: Generic option selector by text (last resort, but within visible menu)
+            containerScopedSelectors.push(
+              `//*[@role='option'][contains(normalize-space(.),'${escapedText}')]`
+            );
+            containerScopedSelectors.push(
+              `//*[@role='menuitem'][contains(normalize-space(.),'${escapedText}')]`
+            );
+            
+            // Prepend container-scoped selectors to fallbacks (highest priority)
+            console.log(`🔍 GhostWriter: Generated ${containerScopedSelectors.length} container-scoped selectors for dropdown option "${optionText.substring(0, 30)}"`);
+            enhancedFallbacks = [...containerScopedSelectors, ...enhancedFallbacks];
+          }
+          
+          // CRITICAL FIX: Generate section-scoped selectors for ALL elements with a scope hint
+          // This ensures we can disambiguate between identical elements in different sections
+          // Works universally across all web frameworks (React, Angular, Vue, Salesforce, etc.)
+          const sectionTitle = selectors.anchorText || finalContainerContext?.text;
+          if (sectionTitle && !finalIsListItemOrOption) {
+            console.log(`🔍 GhostWriter: Generating section-scoped selectors for section "${sectionTitle}"`);
+            const escapedSectionTitle = sectionTitle.replace(/'/g, "\\'").replace(/"/g, '\\"');
+            const sectionScopedSelectors: string[] = [];
+            
+            // Get element identifiers for scoping
+            const ariaLabel = target.getAttribute('aria-label');
+            const role = target.getAttribute('role');
+            
+            // Strategy 1: Section container + aria-label (most reliable, works universally)
+            if (ariaLabel) {
+              const escapedAriaLabel = ariaLabel.replace(/'/g, "\\'").replace(/"/g, '\\"');
+              
+              // Priority 1: Find section/card/panel containing the title, then find element by aria-label
+              // This is the most robust pattern that works across frameworks
+              sectionScopedSelectors.push(
+                `//*[contains(normalize-space(.), '${escapedSectionTitle}')]/ancestor-or-self::*[contains(@class, 'section') or contains(@class, 'card') or contains(@class, 'panel') or contains(@class, 'form') or @role='region' or @role='group' or @role='form']//*[@aria-label='${escapedAriaLabel}']`
+              );
+              
+              // Priority 2: Simpler - find any div containing the title, then find element
+              // Works when section classes aren't present
+              sectionScopedSelectors.push(
+                `//div[descendant::*[contains(normalize-space(.), '${escapedSectionTitle}')]]//*[@aria-label='${escapedAriaLabel}']`
+              );
+              
+              // Priority 3: Even simpler - any element containing title as ancestor
+              sectionScopedSelectors.push(
+                `//*[contains(normalize-space(.), '${escapedSectionTitle}')]//*[@aria-label='${escapedAriaLabel}']`
+              );
+            }
+            
+            // Strategy 2: Section header + role + aria-label (for comboboxes, buttons, etc.)
+            if (role && ariaLabel) {
+              const escapedAriaLabel = ariaLabel.replace(/'/g, "\\'").replace(/"/g, '\\"');
+              sectionScopedSelectors.push(
+                `//div[descendant::*[contains(normalize-space(.), '${escapedSectionTitle}')]]//*[@role='${role}'][@aria-label='${escapedAriaLabel}']`
+              );
+              // Also try with just role in case aria-label varies
+              sectionScopedSelectors.push(
+                `//*[contains(normalize-space(.), '${escapedSectionTitle}')]//*[@role='${role}'][contains(@aria-label, '${escapedAriaLabel.split(' ')[0]}')]`
+              );
+            }
+            
+            // Strategy 3: Section header + element text (fallback for elements without aria-label)
+            const elementTextContent = elementText || target.textContent?.trim();
+            if (elementTextContent && elementTextContent.length > 0 && elementTextContent.length < 50) {
+              const escapedElementText = elementTextContent.replace(/'/g, "\\'").replace(/"/g, '\\"');
+              sectionScopedSelectors.push(
+                `//div[descendant::*[contains(normalize-space(.), '${escapedSectionTitle}')]]//*[contains(normalize-space(.), '${escapedElementText}')]`
+              );
+            }
+            
+            if (sectionScopedSelectors.length > 0) {
+              console.log(`🔍 GhostWriter: Generated ${sectionScopedSelectors.length} section-scoped selectors for "${sectionTitle}"`);
+              // Prepend section-scoped selectors (high priority, but after any dropdown-specific ones)
+              enhancedFallbacks = [...sectionScopedSelectors, ...enhancedFallbacks];
+            }
+          }
           
           // NEW: For spreadsheets, capture full sheet state for AI comprehension
           let spreadsheetContext: any = null;

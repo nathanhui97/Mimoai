@@ -139,6 +139,18 @@ export class HintExtractor {
       const recordedScrollY = payload.viewport?.scrollY;
       const recordedScrollX = payload.viewport?.scrollX;
       
+      // Extract decision space for dropdown validation/fallback
+      const decisionSpace = payload.context?.decisionSpace ? {
+        type: payload.context.decisionSpace.type,
+        selectedText: payload.context.decisionSpace.selectedText,
+        selectedIndex: payload.context.decisionSpace.selectedIndex,
+        options: payload.context.decisionSpace.options,
+      } : undefined;
+      
+      if (decisionSpace?.options?.length) {
+        console.log(`[HintExtractor] 📋 Extracted decision space with ${decisionSpace.options.length} options for dropdown`);
+      }
+      
       return {
         stepNumber: index + 1,
         description,
@@ -159,6 +171,8 @@ export class HintExtractor {
         // 🚀 Pre-scroll optimization: store recorded scroll position
         recordedScrollY,
         recordedScrollX,
+        // 📋 Decision space for dropdown validation/fallback
+        decisionSpace,
       };
     });
   }

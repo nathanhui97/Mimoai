@@ -20,8 +20,7 @@ interface ThinkingPanelProps {
   pauseReason?: 'user_requested' | 'agent_needs_help' | 'error_recovery' | 'confirmation_needed';
   helpContext?: HumanHelpContext;
   onStop?: () => void;
-  onResume?: () => void;
-  onHumanComplete?: () => void;
+  onResume?: (choice?: 'completed' | 'skipped' | 'retry') => void;
   onDismiss?: () => void;
 }
 
@@ -36,7 +35,6 @@ export function ThinkingPanel({
   helpContext,
   onStop,
   onResume,
-  onHumanComplete,
   onDismiss,
 }: ThinkingPanelProps) {
   const [isExpanded, setIsExpanded] = useState(true);
@@ -90,10 +88,10 @@ export function ThinkingPanel({
                 Stop
               </button>
             )}
-            {/* Show Resume button when stopped */}
-            {isStopped && onResume && (
+            {/* Show Resume button when stopped (but not waiting for help) */}
+            {isStopped && onResume && pauseReason !== 'agent_needs_help' && (
               <button
-                onClick={onResume}
+                onClick={() => onResume()}
                 className="px-3 py-1 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200 transition-colors"
                 title="Resume execution from where it stopped"
               >
@@ -159,14 +157,26 @@ export function ThinkingPanel({
                   </div>
                 )}
               </div>
-              {onHumanComplete && (
+              <div className="flex gap-2 mt-3">
                 <button
-                  onClick={onHumanComplete}
-                  className="mt-3 w-full px-4 py-2 bg-yellow-600 text-white rounded hover:bg-yellow-700 transition-colors"
+                  onClick={() => onResume?.('completed')}
+                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition-colors font-medium"
                 >
-                  I Did It - Continue
+                  ✓ I Did It - Continue
                 </button>
-              )}
+                <button
+                  onClick={() => onResume?.('skipped')}
+                  className="flex-1 px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
+                >
+                  Skip This Step
+                </button>
+                <button
+                  onClick={() => onResume?.('retry')}
+                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+                >
+                  🔄 Try Again
+                </button>
+              </div>
             </div>
           </div>
         </div>

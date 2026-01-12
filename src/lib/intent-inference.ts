@@ -33,13 +33,22 @@ export function inferClickIntent(element: Element): Intent {
   const ariaHaspopup = element.getAttribute('aria-haspopup');
   const type = (element as HTMLButtonElement).type;
   
-  // Dropdown trigger
+  // CRITICAL FIX: Distinguish between dropdown option selection vs. trigger click
+  // Check if this is an OPTION being selected (not the trigger)
+  if (role === 'option' || role === 'menuitem') {
+    const optionText = element.textContent?.trim() || '';
+    console.log('[IntentInference] Detected dropdown OPTION selection:', optionText);
+    return createSelectDropdownIntent(optionText);
+  }
+  
+  // Dropdown trigger (combobox) - this just opens the dropdown, not a selection
+  // Return regular CLICK intent (the subsequent option click will have the selection intent)
   if (ariaHaspopup === 'true' || 
       ariaHaspopup === 'listbox' || 
       ariaHaspopup === 'menu' ||
       role === 'combobox') {
-    const optionText = element.textContent?.trim() || '';
-    return createSelectDropdownIntent(optionText);
+    console.log('[IntentInference] Detected dropdown TRIGGER (will open menu)');
+    return createClickIntent();
   }
   
   // Row actions button
@@ -95,10 +104,11 @@ export function inferSuccessCondition(
 ): SuggestedCondition {
   switch (intent.kind) {
     case 'SELECT_DROPDOWN_OPTION':
+      // When selecting an option, wait for DOM to stabilize (dropdown may close)
       return {
-        condition: conditionTemplates.dropdownOpened(),
+        condition: domStable(500),
         confidence: 'high',
-        reason: 'Clicking dropdown trigger should open menu',
+        reason: 'Selecting dropdown option should stabilize DOM',
       };
       
     case 'OPEN_ROW_ACTIONS':
@@ -145,6 +155,21 @@ export function inferSuccessCondition(
       
     case 'CLICK':
     default:
+      // Check if this is a dropdown trigger (combobox)
+      const role = element.getAttribute('role');
+      const ariaHaspopup = element.getAttribute('aria-haspopup');
+      
+      if (ariaHaspopup === 'true' || 
+          ariaHaspopup === 'listbox' || 
+          ariaHaspopup === 'menu' ||
+          role === 'combobox') {
+        return {
+          condition: conditionTemplates.dropdownOpened(),
+          confidence: 'high',
+          reason: 'Clicking dropdown trigger should open menu',
+        };
+      }
+      
       // Analyze context for better condition
       if (isInModal(element)) {
         return {

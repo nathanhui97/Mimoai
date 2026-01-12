@@ -594,8 +594,12 @@ function handleFullMessage(
 
       // Execution control - routed through service worker now
       case 'EXECUTION_CONTROL': {
-        const { action } = message.payload as { action: 'pause' | 'resume' | 'stop'; reason?: string };
-        console.log(`[Content] EXECUTION_CONTROL received: ${action}`);
+        const { action, userChoice } = message.payload as { 
+          action: 'pause' | 'resume' | 'stop'; 
+          reason?: string;
+          userChoice?: 'completed' | 'skipped' | 'retry';
+        };
+        console.log(`[Content] EXECUTION_CONTROL received: ${action}`, userChoice ? `with choice: ${userChoice}` : '');
         
         if (action === 'pause' || action === 'stop') {
           // Pause or stop the current agent
@@ -652,6 +656,12 @@ function handleFullMessage(
                   });
                 },
               });
+              
+              // If user provided a choice (completed/skipped/retry), handle it before resuming
+              if (userChoice) {
+                console.log(`[Content] Handling user choice: ${userChoice}`);
+                await currentAgent.handleResumeWithChoice(userChoice);
+              }
               
               const result = await currentAgent.resume(savedState);
               currentAgent = null;
@@ -786,6 +796,27 @@ function handleFullMessage(
             
             // Wait for agent to complete
             const result = await runPromise;
+            
+            // If agent paused (including for help), save its state first
+            if (result.finalStatus === 'paused' || result.finalStatus === 'stopped') {
+              const agentState = currentAgent?.getState();
+              if (agentState) {
+                console.log('[Content] Agent paused/stopped - saving state:', {
+                  status: agentState.status,
+                  pauseReason: agentState.pauseReason,
+                  hasHelpContext: !!agentState.helpContext,
+                });
+                
+                // Update session with agent state including helpContext
+                await chrome.runtime.sendMessage({
+                  type: 'EXECUTION_PROGRESS',
+                  payload: {
+                    stepIndex: result.stepsCompleted,
+                    agentState,
+                  },
+                });
+              }
+            }
             
             // Clear agent instance
             currentAgent = null;

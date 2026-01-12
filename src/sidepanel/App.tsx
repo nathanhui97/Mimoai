@@ -1295,17 +1295,19 @@ function App() {
 
   /**
    * Resume agent execution via centralized controller
+   * @param choice - User's choice: completed (default), skipped, or retry
    */
-  const handleResumeExecution = async () => {
+  const handleResumeExecution = async (choice?: 'completed' | 'skipped' | 'retry') => {
     try {
       const response = await runtimeBridge.sendMessage({
         type: 'EXECUTION_CONTROL',
         payload: {
           action: 'resume',
+          userChoice: choice,
         },
       });
       
-      console.log('[App] Resume execution response:', response);
+      console.log('[App] Resume execution response:', response, 'with choice:', choice);
       
       if (response.success) {
         // Update local state optimistically
