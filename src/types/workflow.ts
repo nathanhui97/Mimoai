@@ -468,6 +468,7 @@ export interface SavedWorkflow {
   id: string; // Unique identifier (timestamp or UUID)
   name: string; // User-provided name
   description?: string; // AI-generated task summary explaining what the workflow does
+  additionalInstructions?: string; // User tips, edge cases - surfaced to AI as system context
   createdAt: number; // Timestamp
   updatedAt: number; // Timestamp
   steps: WorkflowStep[]; // Array of recorded steps
@@ -494,6 +495,79 @@ export interface SavedWorkflow {
     lastRun: number;
     averageDurationMs: number;
     commonFailurePoints: number[];  // Step indices that often fail
+  };
+  // Teaching Conversation: Knowledge learned through dialogue
+  learnedSkill?: LearnedSkill;
+}
+
+// ============================================================================
+// Teaching Conversation Types
+// ============================================================================
+
+/** Intent captured BEFORE recording starts */
+export interface TeachingIntent {
+  /** What user said they want to teach */
+  userDescription: string;
+  
+  /** AI's understanding of what to watch for */
+  expectedAction: {
+    verb: string;              // "download"
+    object: string;            // "dashboard"
+    isGeneric: boolean;        // true = "a dashboard", false = "this dashboard"
+  };
+  
+  /** Variables AI expects to see (from user description) */
+  expectedVariables: string[];
+  
+  /** Timestamp */
+  capturedAt: number;
+}
+
+/** Knowledge learned through teaching conversation */
+export interface LearnedSkill {
+  /** Original intent from pre-recording */
+  originalIntent: TeachingIntent;
+  
+  /** What the workflow does in one sentence */
+  whatItDoes: string;
+  
+  /** Canonical action - the core verb+object */
+  canonicalAction: {
+    verb: string;              // "download", "create", "update"
+    verbSynonyms: string[];    // ["export", "get", "fetch"]
+    object: string;            // "dashboard", "account"
+    objectSynonyms: string[];  // ["report", "data"]
+  };
+  
+  /** Example ways users might request this */
+  exampleQueries: string[];
+  
+  /** Variables that can be filled from user request */
+  extractableVariables: Array<{
+    name: string;              // "Dashboard Name"
+    patterns: string[];        // ["the {X} dashboard", "{X} report"]
+    examples: string[];        // ["Q4 Sales", "Pipeline"]
+  }>;
+  
+  /** Constants learned (always use this value) */
+  constants: Array<{
+    name: string;              // "Export Format"
+    value: string;             // "CSV"
+    overridable: boolean;      // true if user said "unless I say otherwise"
+    overridePatterns?: string[]; // ["as PDF", "in Excel"]
+  }>;
+  
+  /** Domain context */
+  domain: {
+    application: string;       // "Gainsight", "Salesforce"
+    category: string;          // "reporting", "data-entry"
+  };
+  
+  /** Teaching metadata */
+  teachingMetadata: {
+    taughtAt: number;
+    questionsAsked: number;
+    userConfirmed: boolean;
   };
 }
 

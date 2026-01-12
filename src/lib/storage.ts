@@ -155,6 +155,50 @@ export class WorkflowStorage {
     );
     score += matchingWords.length * 10;
     
+    // Enhanced matching using learned skill data
+    if (w.learnedSkill) {
+      const skill = w.learnedSkill;
+      
+      // Check verb synonyms (e.g., "download" matches "export", "get", "fetch")
+      const verbMatch = skill.canonicalAction.verb.toLowerCase() === query ||
+        skill.canonicalAction.verbSynonyms.some(v => query.includes(v.toLowerCase()));
+      if (verbMatch) {
+        score += 40;
+      }
+      
+      // Check object synonyms (e.g., "dashboard" matches "report", "data")
+      const objectMatch = skill.canonicalAction.object.toLowerCase() === query ||
+        query.includes(skill.canonicalAction.object.toLowerCase()) ||
+        skill.canonicalAction.objectSynonyms.some(o => query.includes(o.toLowerCase()));
+      if (objectMatch) {
+        score += 40;
+      }
+      
+      // Check example queries (highest priority - direct match with how user might ask)
+      for (const example of skill.exampleQueries) {
+        const exampleLower = example.toLowerCase();
+        // Fuzzy match - check if query words appear in example
+        const queryWordsInExample = queryWords.filter(qw => exampleLower.includes(qw));
+        if (queryWordsInExample.length >= Math.min(2, queryWords.length)) {
+          score += 60;
+          break;
+        }
+        // Also check if example words appear in query
+        const exampleWords = exampleLower.split(/\s+/);
+        const exampleWordsInQuery = exampleWords.filter(ew => query.includes(ew));
+        if (exampleWordsInQuery.length >= Math.min(2, exampleWords.length)) {
+          score += 50;
+          break;
+        }
+      }
+      
+      // Check original user description
+      const originalDescLower = skill.originalIntent.userDescription.toLowerCase();
+      if (query.includes(originalDescLower) || originalDescLower.includes(query)) {
+        score += 35;
+      }
+    }
+    
     return score;
   }
 }

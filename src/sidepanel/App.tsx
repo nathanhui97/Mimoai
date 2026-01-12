@@ -12,9 +12,12 @@ import { ScreenshotModal } from './ScreenshotModal';
 import { SettingsPanel } from './SettingsPanel';
 import { ThinkingPanel } from './ThinkingPanel';
 import { OpenWorkWindowButton } from './OpenWorkWindowButton';
+import { PreRecordingChat } from './PreRecordingChat';
+import { PostRecordingChat } from './PostRecordingChat';
+import { WorkflowDetails } from './WorkflowDetails';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
-import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
+import type { WorkflowStep, SavedWorkflow, TeachingIntent, LearnedSkill } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import type { AgentAction } from '../lib/ai-agent';
 import type { 
@@ -104,6 +107,16 @@ function App() {
     confidence: number;
     suggestedName: string;
   } | null>(null);
+
+  // Teaching conversation state
+  const [teachingMode, setTeachingMode] = useState<
+    'idle' | 'pre_recording' | 'recording_with_intent' | 'post_recording' | 'quick_recording'
+  >('idle');
+  const [teachingIntent, setTeachingIntent] = useState<TeachingIntent | null>(null);
+  const [_pendingLearnedSkill, setPendingLearnedSkill] = useState<LearnedSkill | null>(null);
+
+  // Workflow details view state
+  const [selectedWorkflow, setSelectedWorkflow] = useState<SavedWorkflow | null>(null);
 
   // Ping content script on mount
   useEffect(() => {
@@ -701,13 +714,20 @@ function App() {
         // This reduces API calls from N+1 to just 1
         console.log('[App] ✅ Recording stopped - translations will happen on save');
         
-        // Auto-suggest a task name and show save dialog
-        setTimeout(() => {
-          const suggestedName = generateTaskName(currentSteps);
-          setWorkflowName(suggestedName);
-          setShowSaveDialog(true);
-          console.log('[App] 💡 Auto-generated task name:', suggestedName);
-        }, 500); // Small delay to let UI update
+        // Check if we're in teaching mode (with pre-recorded intent)
+        if (teachingMode === 'recording_with_intent' && teachingIntent) {
+          console.log('[App] 🎓 Teaching mode: Moving to post-recording chat');
+          setTeachingMode('post_recording');
+          // Don't show save dialog - the PostRecordingChat will handle it
+        } else {
+          // Quick recording mode - use existing flow
+          setTimeout(() => {
+            const suggestedName = generateTaskName(currentSteps);
+            setWorkflowName(suggestedName);
+            setShowSaveDialog(true);
+            console.log('[App] 💡 Auto-generated task name:', suggestedName);
+          }, 500); // Small delay to let UI update
+        }
       } else {
         console.log('[App] ⚠️ No workflow steps to analyze for variables (workflowSteps.length =', workflowSteps.length, ')');
         // Still set empty variables so UI shows the section
@@ -723,6 +743,142 @@ function App() {
       setIsDetectingVariables(false);
       setIsFinalizingRecording(false);
     }
+  };
+
+  // ============================================================================
+  // Teaching Conversation Handlers
+  // ============================================================================
+
+  /**
+   * Start the "Teach Me" flow - shows pre-recording chat
+   */
+  const handleTeachMeClick = () => {
+    console.log('[App] 🎓 Starting Teach Me flow');
+    setTeachingMode('pre_recording');
+    setTeachingIntent(null);
+    setPendingLearnedSkill(null);
+  };
+
+  /**
+   * Start quick recording without teaching conversation
+   */
+  const handleQuickRecordClick = async () => {
+    console.log('[App] ⚡ Starting quick recording');
+    setTeachingMode('quick_recording');
+    setTeachingIntent(null);
+    await handleStartRecording();
+  };
+
+  /**
+   * Called when pre-recording chat captures the user's intent
+   */
+  const handleIntentCaptured = async (
+    intent: TeachingIntent,
+    suggestedName: string,
+    _aiResponse: string
+  ) => {
+    console.log('[App] 🎓 Intent captured:', intent.userDescription);
+    setTeachingIntent(intent);
+    setTeachingMode('recording_with_intent');
+    setWorkflowName(suggestedName);
+    
+    // Start recording
+    await handleStartRecording();
+  };
+
+  /**
+   * Called when user skips pre-recording chat
+   */
+  const handleSkipPreRecording = async () => {
+    console.log('[App] 🎓 Skipping pre-recording chat');
+    setTeachingMode('quick_recording');
+    await handleStartRecording();
+  };
+
+  /**
+   * Called when post-recording conversation completes with learned skill
+   */
+  const handleTeachingComplete = async (learnedSkill: LearnedSkill) => {
+    console.log('[App] 🎓 Teaching complete:', learnedSkill.whatItDoes);
+    setPendingLearnedSkill(learnedSkill);
+    
+    // Use the learned skill's description as the workflow name
+    setWorkflowName(learnedSkill.whatItDoes);
+    
+    // Save the workflow with the learned skill
+    await handleSaveWorkflowWithTeaching(learnedSkill);
+  };
+
+  /**
+   * Called when user skips post-recording chat
+   */
+  const handleSkipPostRecording = () => {
+    console.log('[App] 🎓 Skipping post-recording chat');
+    setTeachingMode('idle');
+    setTeachingIntent(null);
+    
+    // Fall back to regular save dialog
+    const suggestedName = generateTaskName(workflowSteps);
+    setWorkflowName(suggestedName);
+    setShowSaveDialog(true);
+  };
+
+  /**
+   * Save workflow with learned skill attached
+   */
+  const handleSaveWorkflowWithTeaching = async (learnedSkill: LearnedSkill) => {
+    console.log('[App] 🎓 Saving workflow with learned skill');
+    
+    try {
+      setIsDetectingVariables(true);
+      setLearningFeedback('💾 Saving with learned knowledge...');
+      
+      // Use existing variable detection
+      const variables = await VariableDetector.detectVariables(workflowSteps);
+      
+      // Create the workflow with learned skill
+      const workflow: SavedWorkflow = {
+        id: `workflow-${Date.now()}`,
+        name: learnedSkill.whatItDoes,
+        description: `I can ${learnedSkill.whatItDoes.toLowerCase()}. Try saying: "${learnedSkill.exampleQueries[0] || learnedSkill.whatItDoes}"`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        steps: workflowSteps,
+        variables: variables,
+        learnedSkill: learnedSkill,
+      };
+      
+      // Save to storage
+      await WorkflowStorage.saveWorkflow(workflow);
+      addSavedWorkflow(workflow);
+      
+      // Reset state
+      clearWorkflowSteps();
+      setTeachingMode('idle');
+      setTeachingIntent(null);
+      setPendingLearnedSkill(null);
+      setCurrentWorkflowVariables(null);
+      setIsDetectingVariables(false);
+      
+      setLearningFeedback(`✅ Got it! I learned how to ${learnedSkill.whatItDoes.toLowerCase()}.`);
+      setTimeout(() => setLearningFeedback(null), 3000);
+      
+    } catch (err) {
+      console.error('[App] Error saving with teaching:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save workflow');
+      setIsDetectingVariables(false);
+    }
+  };
+
+  /**
+   * Cancel teaching flow and return to idle
+   */
+  const handleCancelTeaching = () => {
+    console.log('[App] 🎓 Canceling teaching flow');
+    setTeachingMode('idle');
+    setTeachingIntent(null);
+    setPendingLearnedSkill(null);
+    clearWorkflowSteps();
   };
 
   /**
@@ -1450,9 +1606,31 @@ function App() {
     }
   };
 
-  // Task selection handler
-  const handleTaskSelect = async (workflow: SavedWorkflow) => {
-    await handleExecuteWorkflow(workflow);
+  // Task selection handler - now shows details instead of executing
+  const handleTaskSelect = (workflow: SavedWorkflow) => {
+    setSelectedWorkflow(workflow);
+  };
+
+  // Close workflow details and return to home
+  const handleCloseWorkflowDetails = () => {
+    setSelectedWorkflow(null);
+  };
+
+  // Save workflow edits
+  const handleSaveWorkflowEdits = async (updatedWorkflow: SavedWorkflow) => {
+    try {
+      await WorkflowStorage.saveWorkflow(updatedWorkflow);
+      // Reload workflows to get updated list
+      const workflows = await WorkflowStorage.loadWorkflows();
+      setSavedWorkflows(workflows);
+      setSelectedWorkflow(updatedWorkflow);
+      
+      setLearningFeedback('✓ Workflow updated successfully');
+      setTimeout(() => setLearningFeedback(null), 2000);
+    } catch (err) {
+      console.error('Error saving workflow edits:', err);
+      setError(err instanceof Error ? err.message : 'Failed to save workflow');
+    }
   };
 
   const getHumanDescription = (step: WorkflowStep): string => {
@@ -1533,6 +1711,53 @@ function App() {
             </div>
           </div>
 
+          {/* Pre-Recording Teaching Chat */}
+          {teachingMode === 'pre_recording' && (
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-foreground">Teach me something new</h2>
+                <button
+                  onClick={handleCancelTeaching}
+                  className="text-sm text-muted-foreground hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-4 min-h-[300px]">
+                <PreRecordingChat
+                  onIntentCaptured={handleIntentCaptured}
+                  onSkip={handleSkipPreRecording}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Post-Recording Teaching Chat */}
+          {teachingMode === 'post_recording' && teachingIntent && workflowSteps.length > 0 && (
+            <div className="mb-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-semibold text-foreground">Let me confirm what I learned</h2>
+                <button
+                  onClick={handleCancelTeaching}
+                  className="text-sm text-muted-foreground hover:text-foreground"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className="bg-card border border-border rounded-lg p-4 min-h-[300px]">
+                <PostRecordingChat
+                  teachingIntent={teachingIntent}
+                  workflow={{
+                    name: workflowName || 'New Task',
+                    steps: workflowSteps,
+                  }}
+                  onComplete={handleTeachingComplete}
+                  onSkip={handleSkipPostRecording}
+                />
+              </div>
+            </div>
+          )}
+
           {/* Recording Indicator */}
           {isRecording && (
             <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2">
@@ -1548,8 +1773,24 @@ function App() {
             </div>
           )}
           
-          {/* Greeting - Only show when not recording and no steps */}
-          {!isRecording && workflowSteps.length === 0 && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
+          {/* Workflow Details View */}
+          {selectedWorkflow && !isRecording && workflowSteps.length === 0 && teachingMode === 'idle' && (
+            <WorkflowDetails
+              workflow={selectedWorkflow}
+              onExecute={() => handleExecuteWorkflow(selectedWorkflow)}
+              onBack={handleCloseWorkflowDetails}
+              onExport={() => handleExportWorkflowJSON(selectedWorkflow)}
+              onDelete={async () => {
+                await handleDeleteWorkflow(selectedWorkflow.id);
+                setSelectedWorkflow(null);
+              }}
+              onSave={handleSaveWorkflowEdits}
+              isExecuting={isExecuting}
+            />
+          )}
+
+          {/* Greeting - Only show when not recording, no steps, not in teaching mode, and no workflow selected */}
+          {!selectedWorkflow && !isRecording && workflowSteps.length === 0 && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && teachingMode === 'idle' && (
             <div className="mb-6">
               <h2 className="text-2xl font-semibold text-foreground mb-2">
                 How can I help you?
@@ -1563,49 +1804,55 @@ function App() {
                 <div className="mb-4">
                   <div className="space-y-2 mb-2">
                     {savedWorkflows.map((workflow) => (
-                      <div
+                      <button
                         key={workflow.id}
-                        className="flex items-center gap-2 p-3 bg-card border border-border rounded-md hover:border-primary/50 transition-colors"
+                        onClick={() => handleTaskSelect(workflow)}
+                        disabled={isExecuting}
+                        className="w-full text-left p-4 bg-card border border-border rounded-lg hover:border-primary/50 hover:bg-card/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed group"
                       >
-                        <button
-                          onClick={() => handleTaskSelect(workflow)}
-                          disabled={isExecuting}
-                          className="flex-1 text-left px-3 py-2 bg-muted border border-border rounded-md text-sm text-foreground hover:bg-primary/10 hover:border-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                          {workflow.name}
-                        </button>
-                        <button
-                          onClick={() => handleExportWorkflowJSON(workflow)}
-                          disabled={isExecuting}
-                          className="px-3 py-2 bg-secondary text-secondary-foreground rounded-md hover:bg-secondary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          title="Export as JSON"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <h3 className="font-medium text-foreground mb-1 group-hover:text-primary transition-colors">
+                              {workflow.name}
+                            </h3>
+                            {workflow.description && (
+                              <p className="text-sm text-muted-foreground line-clamp-2">
+                                {workflow.description}
+                              </p>
+                            )}
+                            <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                              <span>{workflow.steps.length} steps</span>
+                              {workflow.variables && workflow.variables.variables.length > 0 && (
+                                <span>• {workflow.variables.variables.length} variables</span>
+                              )}
+                            </div>
+                          </div>
+                          <svg className="w-5 h-5 text-muted-foreground group-hover:text-primary transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                           </svg>
-                        </button>
-                        <button
-                          onClick={() => handleDeleteWorkflow(workflow.id)}
-                          disabled={isExecuting}
-                          className="px-3 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                          title="Delete task"
-                        >
-                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
+                        </div>
+                      </button>
                     ))}
                   </div>
                   
-                  {/* Teach New Task Button */}
-                  <button
-                    onClick={handleStartRecording}
-                    disabled={state === 'CONNECTING'}
-                    className="w-full px-4 py-2 bg-background border border-dashed border-border rounded-md text-sm text-muted-foreground hover:text-foreground hover:border-primary transition-colors disabled:opacity-50"
-                  >
-                    + Teach me something new
-                  </button>
+                  {/* Teach New Task Buttons */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleTeachMeClick}
+                      disabled={state === 'CONNECTING'}
+                      className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
+                    >
+                      Teach me something new
+                    </button>
+                    <button
+                      onClick={handleQuickRecordClick}
+                      disabled={state === 'CONNECTING'}
+                      className="px-4 py-2 bg-background border border-border rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                      title="Quick record without conversation"
+                    >
+                      Quick
+                    </button>
+                  </div>
                 </div>
               )}
               
@@ -1613,12 +1860,20 @@ function App() {
               {savedWorkflows.length === 0 && (
                 <div className="p-6 text-center text-sm text-muted-foreground border-2 border-dashed border-border rounded-lg mb-4">
                   <p className="mb-3">You haven't taught me any tasks yet.</p>
-                  <button
-                    onClick={handleStartRecording}
-                    className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
-                  >
-                    Show me how to do something
-                  </button>
+                  <div className="flex flex-col gap-2">
+                    <button
+                      onClick={handleTeachMeClick}
+                      className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                    >
+                      Teach me something new
+                    </button>
+                    <button
+                      onClick={handleQuickRecordClick}
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                    >
+                      or quick record
+                    </button>
+                  </div>
                 </div>
               )}
             </div>

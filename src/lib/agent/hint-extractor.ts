@@ -18,27 +18,34 @@ export class HintExtractor {
    * Infer the goal from workflow
    */
   inferGoal(workflow: SavedWorkflow): string {
+    let goal = '';
+    
     // Prefer workflow name + description for richer context
     if (workflow.name && workflow.description) {
-      return `${workflow.name} - ${workflow.description}`;
+      goal = `${workflow.name} - ${workflow.description}`;
+    } else if (workflow.name) {
+      // Use workflow name as primary goal
+      goal = workflow.name;
+    } else {
+      // Try to infer from step descriptions
+      const descriptions = workflow.steps
+        .map(s => s.description)
+        .filter(Boolean)
+        .join(' → ');
+      
+      if (descriptions) {
+        goal = `Complete workflow: ${descriptions}`;
+      } else {
+        goal = 'Complete the recorded workflow';
+      }
     }
     
-    // Use workflow name as primary goal
-    if (workflow.name) {
-      return workflow.name;
+    // Surface additional instructions as system context
+    if (workflow.additionalInstructions) {
+      goal += `\n\nIMPORTANT USER INSTRUCTIONS:\n${workflow.additionalInstructions}`;
     }
-
-    // Try to infer from step descriptions
-    const descriptions = workflow.steps
-      .map(s => s.description)
-      .filter(Boolean)
-      .join(' → ');
     
-    if (descriptions) {
-      return `Complete workflow: ${descriptions}`;
-    }
-
-    return 'Complete the recorded workflow';
+    return goal;
   }
 
   /**
