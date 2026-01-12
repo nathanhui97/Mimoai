@@ -317,6 +317,14 @@ export interface ActionHistoryEntry {
 }
 
 /** Agent state during execution */
+/** Context for when agent needs human help */
+export interface HumanHelpContext {
+  stepDescription: string;
+  whatAgentTried: string;
+  whatHumanShouldDo: string;
+  errorDetails?: string;
+}
+
 export interface AgentState {
   workflowId?: string;
   goal: string;
@@ -328,6 +336,11 @@ export interface AgentState {
   startTime: number;
   variableValues?: Record<string, string>;
   memory?: Record<string, string | boolean | number>; // NEW: Store values read during execution
+  // Cooperative pausing support
+  pauseRequested?: boolean;
+  pauseReason?: 'user' | 'agent_needs_help' | 'confirmation_needed';
+  helpContext?: HumanHelpContext;
+  userStopped?: boolean; // Flag to indicate user-initiated stop (prevents hint index increment on resume)
 }
 
 /** Result of agent execution */
@@ -464,10 +477,16 @@ export class AIAgent {
     
     // Check if this is a tab transfer (not a navigation)
     const isTabTransfer = (savedState as any).transferredToTab !== undefined;
+    const isUserStopped = (savedState as any).userStopped === true;
     
-    if (isTabTransfer) {
-      console.log('[AIAgent] 🔄 Resuming after tab switch - NOT incrementing hint index');
+    if (isTabTransfer || isUserStopped) {
+      // Don't increment - continue from current hint
+      console.log('[AIAgent] 🔄 Resuming from current hint (tab transfer or user stop)');
       console.log(`[AIAgent] Will continue from hint ${this.state.currentHintIndex}`);
+      // Clear the userStopped flag after resuming
+      if (isUserStopped) {
+        delete (this.state as any).userStopped;
+      }
     } else {
       // Move to next hint after navigation (page reload)
       console.log('[AIAgent] 🔄 Resuming after navigation - incrementing hint index');
@@ -486,7 +505,94 @@ export class AIAgent {
     console.log('[AIAgent] Stop requested by user');
     this.aborted = true;
     this.state.status = 'stopped';
+    this.state.userStopped = true; // Mark as user-stopped to prevent hint index increment on resume
     return { ...this.state };
+  }
+  
+  /**
+   * Request human help and pause execution
+   * This allows the agent to ask for manual intervention when it gets stuck
+   */
+  requestHumanHelp(context: HumanHelpContext): void {
+    console.log('[AIAgent] Requesting human help:', context.stepDescription);
+    this.state.pauseRequested = true;
+    this.state.pauseReason = 'agent_needs_help';
+    this.state.helpContext = context;
+    
+    // Notify service worker to update session state
+    chrome.runtime.sendMessage({
+      type: 'EXECUTION_CONTROL',
+      payload: {
+        action: 'pause',
+        reason: 'agent_needs_help',
+        helpContext: context,
+      },
+    }).catch(err => {
+      console.error('[AIAgent] Failed to notify service worker of help request:', err);
+    });
+  }
+  
+  /**
+   * Check if pause has been requested (by user or agent itself)
+   * Returns true if execution should pause
+   */
+  private async checkPauseRequested(): Promise<boolean> {
+    // Check local flags first (fast)
+    if (this.aborted || this.state.pauseRequested) {
+      return true;
+    }
+    
+    // Check with service worker for external pause requests
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'GET_EXECUTION_STATE',
+      });
+      
+      if (response.success && response.data?.session) {
+        const session = response.data.session;
+        // Check if service worker requested pause
+        if (session.status === 'paused' || session.status === 'stopped' || session.status === 'waiting_for_human') {
+          console.log('[AIAgent] Pause requested by service worker, status:', session.status);
+          this.state.pauseRequested = true;
+          return true;
+        }
+      }
+    } catch (error) {
+      // Service worker might not be available, continue
+      console.warn('[AIAgent] Failed to check pause status with service worker:', error);
+    }
+    
+    return false;
+  }
+  
+  /**
+   * Create a paused result when execution is interrupted
+   */
+  private createPausedResult(): AgentResult {
+    return {
+      success: false,
+      stepsCompleted: this.state.currentHintIndex,
+      totalSteps: this.state.hints.length,
+      history: this.state.history,
+      elapsedMs: Date.now() - this.state.startTime,
+      finalStatus: 'stopped',
+    };
+  }
+  
+  /**
+   * Notify service worker of execution progress
+   * Fire-and-forget to avoid blocking execution
+   */
+  private notifyProgress(): void {
+    chrome.runtime.sendMessage({
+      type: 'EXECUTION_PROGRESS',
+      payload: {
+        stepIndex: this.state.currentHintIndex,
+        agentState: { ...this.state },
+      },
+    }).catch(() => {
+      // Silently ignore failures - this is just for UI updates
+    });
   }
   
   /**
@@ -511,7 +617,14 @@ export class AIAgent {
 
       // Main observe-act loop
       while (this.state.status === 'running') {
-        // Check for user-requested stop
+        // Check for pause requests (user or agent-initiated)
+        if (await this.checkPauseRequested()) {
+          console.log('[AIAgent] Pause requested, stopping execution');
+          this.state.status = 'stopped';
+          return this.createPausedResult();
+        }
+        
+        // Check for user-requested stop (backward compatibility)
         if (this.aborted) {
           console.log('[AIAgent] Execution stopped by user');
           this.state.status = 'stopped';
@@ -609,6 +722,7 @@ export class AIAgent {
             console.log(`[AIAgent] ⏭️ SKIPPING STEP: ${skipReason}`);
             this.state.hints[this.state.currentHintIndex].completed = true;
             this.state.currentHintIndex++;
+            this.notifyProgress();
             // Log the skip
             this.state.history.push({
               stepNumber: currentHint.stepNumber,
@@ -659,6 +773,7 @@ export class AIAgent {
           this.state.hints[this.state.currentHintIndex].completed = true;
           this.state.hints[this.state.currentHintIndex].failureCount = 0;
           this.state.currentHintIndex++;
+          this.notifyProgress();
           console.log(`[AIAgent] ✅ TAB_SWITCH marked complete, advanced to hint ${this.state.currentHintIndex}`);
           
           // STEP 1.5: Clear spreadsheet cache when switching tabs
@@ -772,6 +887,7 @@ export class AIAgent {
             this.state.hints[this.state.currentHintIndex].completed = true;
             this.state.hints[this.state.currentHintIndex].failureCount = 0;
             this.state.currentHintIndex++;
+            this.notifyProgress();
             console.log(`[AIAgent] ✅ Scroll completed, advanced to hint ${this.state.currentHintIndex}`);
             
             // 🎯 CRITICAL: Wait for lazy-loaded content to render after scroll
@@ -985,6 +1101,7 @@ export class AIAgent {
                 console.log(`[AIAgent] ✅ Spreadsheet type completed: ${actualCellRef} = "${currentHint.value}"`);
                 this.state.hints[this.state.currentHintIndex].completed = true;
                 this.state.currentHintIndex++;
+                this.notifyProgress();
                 this.onProgress?.(this.state.currentHintIndex - 1, spreadsheetAction, 'completed');
               } else {
                 console.error(`[AIAgent] ❌ Spreadsheet type failed: ${result.error}`);
@@ -1039,6 +1156,7 @@ export class AIAgent {
                 console.log(`[AIAgent] ✅ Spreadsheet click completed: ${cellRef}`);
                 this.state.hints[this.state.currentHintIndex].completed = true;
                 this.state.currentHintIndex++;
+                this.notifyProgress();
                 this.onProgress?.(this.state.currentHintIndex - 1, spreadsheetAction, 'completed');
               } else {
                 console.error(`[AIAgent] ❌ Spreadsheet click failed: ${result.error}`);
@@ -1074,6 +1192,7 @@ export class AIAgent {
             // Mark as completed and advance
             this.state.hints[this.state.currentHintIndex].completed = true;
             this.state.currentHintIndex++;
+            this.notifyProgress();
             
             // Log to history
             this.state.history.push({
@@ -1210,6 +1329,13 @@ export class AIAgent {
         };
         this.state.history.push(historyEntry);
 
+        // 5.5 Check for pause request after action (allows pausing between steps)
+        if (await this.checkPauseRequested()) {
+          console.log('[AIAgent] Pause requested after action, stopping execution');
+          this.state.status = 'stopped';
+          return this.createPausedResult();
+        }
+
         // 6. Update hint progress
         // ALWAYS mark currentHintIndex as completed, not hintStepIndex from LLM
         // (LLM might get confused about step numbers, but we know which step we're on)
@@ -1280,6 +1406,9 @@ export class AIAgent {
               
               console.log(`[AIAgent] ✅ Marked hint ${completedIndex} as completed, advanced to hint ${this.state.currentHintIndex}`);
               console.log(`[AIAgent] Completed hints: ${this.state.hints.filter(h => h.completed).length}/${this.state.hints.length}`);
+              
+              // Notify UI of progress
+              this.notifyProgress();
             }
             
             // 🎯 CRITICAL: If we just clicked something that likely navigated/changed the page,
@@ -3489,14 +3618,24 @@ export class AIAgent {
       
       // Additional check: If dropdown just opened (observation shows it)
       // AND hint target text doesn't match action target
+      // AND action didn't click an option
       // THEN it's intermediate
-      if (observation.hasOpenDropdown && hintMentionsSpecificOption && !actionMatchesHintTarget) {
+      const actionClickedOption = actionTargetRole === 'option' || actionTargetRole === 'menuitem';
+      
+      if (observation.hasOpenDropdown && hintMentionsSpecificOption && !actionMatchesHintTarget && !actionClickedOption) {
         console.log(`[AIAgent] 🔍 Intermediate action detected:`);
         console.log(`  - Hint target: "${hintTargetText}"`);
         console.log(`  - Dropdown opened: YES`);
         console.log(`  - Options available:`, observation.dropdownOptions);
         console.log(`  - Reason: Dropdown opened but option not selected yet`);
         return true;
+      }
+      
+      // CRITICAL: If we clicked an option/menuitem, it's NEVER intermediate
+      // (Even if dropdown is still open, the selection action completes the goal)
+      if (actionClickedOption) {
+        console.log(`[AIAgent] ✅ Option/menuitem clicked - this completes the goal, not intermediate`);
+        return false;
       }
     }
     

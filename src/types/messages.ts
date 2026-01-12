@@ -25,6 +25,13 @@ export type MessageType =
   | 'AGENT_EXECUTION_COMPLETED'
   | 'STOP_AGENT'   // Stop running AI agent execution
   | 'RESUME_AGENT' // Resume stopped AI agent execution
+  // Centralized execution control
+  | 'EXECUTION_CONTROL'  // Control execution (pause/resume/stop) via service worker
+  | 'GET_EXECUTION_STATE' // Get current execution state
+  | 'EXECUTION_STATE_CHANGED' // Broadcast when execution state changes
+  | 'EXECUTION_STARTED' // Notify when execution starts
+  | 'EXECUTION_PROGRESS' // Update execution progress
+  | 'EXECUTION_COMPLETED' // Mark execution as completed
   // Execution progress and control messages
   | 'VERIFIED_EXECUTION_CANCEL'
   | 'VERIFIED_EXECUTION_STARTED'

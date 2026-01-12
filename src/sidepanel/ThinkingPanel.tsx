@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import type { ThinkingEvent } from '../types/messages';
 import type { WorkflowStep } from '../types/workflow';
+import { OpenWorkWindowButton } from './OpenWorkWindowButton';
+
+interface HumanHelpContext {
+  stepDescription: string;
+  whatAgentTried: string;
+  whatHumanShouldDo: string;
+  errorDetails?: string;
+}
 
 interface ThinkingPanelProps {
   events: ThinkingEvent[];
@@ -9,8 +17,12 @@ interface ThinkingPanelProps {
   isRunning: boolean;
   isStopped?: boolean;
   workflowName?: string;
+  pauseReason?: 'user_requested' | 'agent_needs_help' | 'error_recovery' | 'confirmation_needed';
+  helpContext?: HumanHelpContext;
   onStop?: () => void;
   onResume?: () => void;
+  onHumanComplete?: () => void;
+  onDismiss?: () => void;
 }
 
 export function ThinkingPanel({
@@ -20,8 +32,12 @@ export function ThinkingPanel({
   isRunning,
   isStopped,
   workflowName,
+  pauseReason,
+  helpContext,
   onStop,
   onResume,
+  onHumanComplete,
+  onDismiss,
 }: ThinkingPanelProps) {
   const [isExpanded, setIsExpanded] = useState(true);
   const thinkingRef = useRef<HTMLDivElement>(null);
@@ -62,20 +78,36 @@ export function ThinkingPanel({
             )}
           </h2>
           <div className="flex items-center gap-2">
+            {/* Open Work Window button - always visible during execution */}
+            <OpenWorkWindowButton variant="text" />
+            {/* Show Stop button when running */}
             {isRunning && onStop && (
               <button
                 onClick={onStop}
                 className="px-3 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 transition-colors"
+                title="Stop execution"
               >
                 Stop
               </button>
             )}
+            {/* Show Resume button when stopped */}
             {isStopped && onResume && (
               <button
                 onClick={onResume}
                 className="px-3 py-1 text-sm bg-green-100 text-green-700 rounded hover:bg-green-200 transition-colors"
+                title="Resume execution from where it stopped"
               >
                 Resume
+              </button>
+            )}
+            {/* Show Back to Home button when execution is complete/orphaned */}
+            {!isRunning && !isStopped && onDismiss && (
+              <button
+                onClick={onDismiss}
+                className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors"
+                title="Back to home"
+              >
+                ← Back to Home
               </button>
             )}
           </div>
@@ -95,6 +127,50 @@ export function ThinkingPanel({
           </div>
         </div>
       </div>
+
+      {/* Human Help Request */}
+      {pauseReason === 'agent_needs_help' && helpContext && (
+        <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <div className="flex items-start gap-2 mb-2">
+            <svg className="h-5 w-5 text-yellow-600 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <div className="flex-1">
+              <h3 className="text-sm font-semibold text-yellow-800 mb-1">
+                I Need Your Help
+              </h3>
+              <div className="space-y-2 text-sm text-yellow-700">
+                <div>
+                  <span className="font-medium">What I'm trying to do:</span>
+                  <div className="mt-1">{helpContext.stepDescription}</div>
+                </div>
+                <div>
+                  <span className="font-medium">What I tried:</span>
+                  <div className="mt-1">{helpContext.whatAgentTried}</div>
+                </div>
+                <div>
+                  <span className="font-medium">What you should do:</span>
+                  <div className="mt-1">{helpContext.whatHumanShouldDo}</div>
+                </div>
+                {helpContext.errorDetails && (
+                  <div>
+                    <span className="font-medium">Error:</span>
+                    <div className="mt-1 text-xs font-mono">{helpContext.errorDetails}</div>
+                  </div>
+                )}
+              </div>
+              {onHumanComplete && (
+                <button
+                  onClick={onHumanComplete}
+                  className="mt-3 w-full px-4 py-2 bg-yellow-600 text-white rounded hover:bg-yellow-700 transition-colors"
+                >
+                  I Did It - Continue
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Step Checklist */}
       <div className="mb-3">
@@ -118,7 +194,7 @@ export function ThinkingPanel({
                   status === 'current' ? 'text-foreground font-medium' :
                   'text-muted-foreground'
                 }`}>
-                  {hint.naturalLanguage?.intent || hint.description || `Step ${index + 1}`}
+                  {(hint as any).description || hint.naturalLanguage?.intent || `Step ${index + 1}`}
                 </span>
               </div>
             );

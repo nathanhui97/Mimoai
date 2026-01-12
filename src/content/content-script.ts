@@ -39,9 +39,9 @@ let isReady = false;
 let recordingManager: any = null;
 let currentFrameId: number = 0; // Will be set after initialization
 
-// Agent execution state
+// Agent execution state (kept for active agent reference only)
 let currentAgent: any = null; // AIAgent instance
-let savedAgentState: any = null; // AgentState for resume
+// Note: savedAgentState is now managed by service worker's ExecutionController
 
 // Export getCurrentFrameId for use by other modules
 export function getCurrentFrameId(): number {
@@ -78,16 +78,16 @@ import type { WorkflowStep } from '../types/workflow';
 })();
 
 // ============================================================================
-// Agent Auto-Resume System
+// Agent Auto-Resume System - DISABLED
 // ============================================================================
+// This old auto-resume system used chrome.storage.local['agentState']
+// It's now replaced by the ExecutionController which uses chrome.storage.session
+// Kept here for reference but commented out to prevent conflicts
 
+/*
 // Track if agent is currently resuming to prevent duplicate resumptions
 let isResumingAgent = false;
 
-/**
- * Check for saved agent state and resume execution if needed
- * This is called both on page load AND when tab becomes visible
- */
 async function checkAndResumeAgent(trigger: 'page_load' | 'tab_visible'): Promise<void> {
   try {
     // Prevent duplicate resumptions
@@ -214,6 +214,7 @@ document.addEventListener('visibilitychange', async () => {
     await checkAndResumeAgent('tab_visible');
   }
 });
+*/
 
 // Full message handler with all message types
 function handleFullMessage(
@@ -591,27 +592,56 @@ function handleFullMessage(
         return false;
       }
 
-      case 'STOP_AGENT': {
-        // Stop running AI agent
-        console.log('GhostWriter: Stop agent requested');
-        if (currentAgent) {
-          savedAgentState = currentAgent.stop();
-          sendResponse({ success: true, state: savedAgentState });
-          currentAgent = null;
-        } else {
-          sendResponse({ success: false, error: 'No agent running' });
-        }
-        return false;
-      }
-
-      case 'RESUME_AGENT': {
-        // Resume stopped AI agent
-        console.log('GhostWriter: Resume agent requested');
-        if (savedAgentState) {
-          // Create new agent and resume from saved state
+      // Execution control - routed through service worker now
+      case 'EXECUTION_CONTROL': {
+        const { action } = message.payload as { action: 'pause' | 'resume' | 'stop'; reason?: string };
+        console.log(`[Content] EXECUTION_CONTROL received: ${action}`);
+        
+        if (action === 'pause' || action === 'stop') {
+          // Pause or stop the current agent
+          if (currentAgent) {
+            const state = currentAgent.stop();
+            console.log('[Content] Agent stopped, saving state to service worker');
+            
+            // AWAIT the state save to ensure it persists before responding
+            (async () => {
+              try {
+                await chrome.runtime.sendMessage({
+                  type: 'EXECUTION_PROGRESS',
+                  payload: {
+                    stepIndex: state.currentHintIndex,
+                    agentState: state,
+                  },
+                });
+                console.log('[Content] State saved successfully');
+                sendResponse({ success: true, state });
+              } catch (err) {
+                console.warn('[Content] Failed to save state to service worker:', err);
+                // Still respond with success since agent did stop
+                sendResponse({ success: true, state });
+              }
+            })();
+            return true; // Keep channel open for async
+          } else {
+            console.warn('[Content] No agent running to stop');
+            sendResponse({ success: false, error: 'No agent running' });
+          }
+        } else if (action === 'resume') {
+          // Get saved state from service worker and resume
           (async () => {
             try {
+              const sessionResponse = await chrome.runtime.sendMessage({
+                type: 'GET_EXECUTION_STATE',
+              });
+              
+              if (!sessionResponse.success || !sessionResponse.data?.session?.agentState) {
+                sendResponse({ success: false, error: 'No saved state to resume' });
+                return;
+              }
+              
+              const savedState = sessionResponse.data.session.agentState;
               const { AIAgent } = await import('../lib/ai-agent');
+              
               currentAgent = new AIAgent({
                 maxSteps: 50,
                 stepTimeout: 30000,
@@ -622,30 +652,56 @@ function handleFullMessage(
                   });
                 },
               });
-              const result = await currentAgent.resume(savedAgentState!);
-              savedAgentState = null;
+              
+              const result = await currentAgent.resume(savedState);
               currentAgent = null;
               
-              // Send completion message
+              // Notify service worker of completion
+              chrome.runtime.sendMessage({
+                type: 'EXECUTION_COMPLETED',
+                payload: { 
+                  success: result.success,
+                  finalStatus: result.finalStatus,
+                  stepsCompleted: result.stepsCompleted,
+                },
+              });
+              
+              // Send completion message to sidepanel
               chrome.runtime.sendMessage({
                 type: 'AGENT_EXECUTION_COMPLETED',
                 payload: result,
               });
+              
+              sendResponse({ success: true });
             } catch (error) {
-              console.error('GhostWriter: Error resuming agent:', error);
-              chrome.runtime.sendMessage({
-                type: 'AGENT_EXECUTION_COMPLETED',
-                payload: {
-                  success: false,
-                  error: error instanceof Error ? error.message : 'Unknown error',
-                },
+              console.error('[Content] Error resuming agent:', error);
+              sendResponse({
+                success: false,
+                error: error instanceof Error ? error.message : 'Unknown error',
               });
             }
           })();
-          sendResponse({ success: true });
-        } else {
-          sendResponse({ success: false, error: 'No saved state to resume' });
+          return true; // Keep channel open for async
         }
+        
+        return false;
+      }
+
+      // Legacy handlers - kept for backward compatibility but deprecated
+      case 'STOP_AGENT': {
+        console.warn('[Content] STOP_AGENT is deprecated, use EXECUTION_CONTROL instead');
+        if (currentAgent) {
+          const state = currentAgent.stop();
+          sendResponse({ success: true, state });
+        } else {
+          sendResponse({ success: false, error: 'No agent running' });
+        }
+        return false;
+      }
+
+      case 'RESUME_AGENT': {
+        console.warn('[Content] RESUME_AGENT is deprecated, use EXECUTION_CONTROL instead');
+        sendResponse({ success: false, error: 'Use EXECUTION_CONTROL message instead' });
         return false;
       }
 
@@ -708,12 +764,41 @@ function handleFullMessage(
               },
             });
             
-            // Run the agent
-            const result = await currentAgent.run(workflow, variableValues);
+            // Run the agent first to initialize state
+            const runPromise = currentAgent.run(workflow, variableValues);
             
-            // Clear agent and saved state on completion
+            // After a moment, notify service worker to create execution session
+            // (needs to happen after agent state is initialized)
+            setTimeout(() => {
+              chrome.runtime.sendMessage({
+                type: 'EXECUTION_STARTED',
+                payload: {
+                  workflowId: workflow.id,
+                  workflowName: workflow.name,
+                  workflowSteps: workflow.steps,
+                  totalSteps: workflow.steps.length,
+                  agentState: currentAgent?.getState(),
+                },
+              }).catch(err => {
+                console.warn('[Content] Failed to notify execution start:', err);
+              });
+            }, 100);
+            
+            // Wait for agent to complete
+            const result = await runPromise;
+            
+            // Clear agent instance
             currentAgent = null;
-            savedAgentState = null;
+            
+            // Notify service worker of completion with final status
+            chrome.runtime.sendMessage({
+              type: 'EXECUTION_COMPLETED',
+              payload: { 
+                success: result.success,
+                finalStatus: result.finalStatus,
+                stepsCompleted: result.stepsCompleted,
+              },
+            });
             
             console.log('GhostWriter: Agent execution completed:', result);
             

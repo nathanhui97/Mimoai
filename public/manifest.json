@@ -10,7 +10,8 @@
     "unlimitedStorage",
     "sidePanel",
     "tabs",
-    "debugger"
+    "debugger",
+    "notifications"
   ],
   "action": {},
   "side_panel": {

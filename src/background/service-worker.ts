@@ -6,12 +6,26 @@
 
 import { VersionChecker, EXTENSION_VERSION, BUILD_HASH } from '../lib/version-checker';
 import type { ExtensionMessage, MessageResponse, TabSwitchedMessage, StartRecordingInTabMessage, StopRecordingInTabMessage, ResumeRecordingMessage } from '../types/messages';
+import { getExecutionController, type PauseReason, type HumanHelpContext } from './execution-controller';
+import { notificationService } from './notification-service';
 
 // Check version on service worker startup
 console.log(`🚀 Service Worker loaded (${EXTENSION_VERSION}) [${BUILD_HASH}]`);
 VersionChecker.checkVersion('service-worker').catch(err => {
   console.error('Failed to check service worker version:', err);
 });
+
+// Initialize ExecutionController
+const executionController = getExecutionController();
+executionController.initialize().catch(err => {
+  console.error('Failed to initialize ExecutionController:', err);
+});
+
+// Initialize NotificationService
+notificationService.initialize();
+
+// Expose for debugging (can test in service worker console)
+(globalThis as any).notificationService = notificationService;
 
 // Tab tracking state (runtime only, not persisted)
 const activeRecordingTabs: Set<number> = new Set();
@@ -913,6 +927,199 @@ chrome.runtime.onMessage.addListener(
           });
         }
       });
+      return true; // Keep channel open for async
+    }
+
+    // ============================================================================
+    // Execution Control (Pause/Resume/Stop)
+    // ============================================================================
+
+    // Handle GET_EXECUTION_STATE - get current execution state
+    if (message.type === 'GET_EXECUTION_STATE') {
+      (async () => {
+        try {
+          const session = await executionController.getSession();
+          sendResponse({
+            success: true,
+            data: { session },
+          });
+        } catch (error) {
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to get execution state',
+          });
+        }
+      })();
+      return true; // Keep channel open for async
+    }
+
+    // Handle EXECUTION_CONTROL - pause/resume/stop from sidepanel
+    if (message.type === 'EXECUTION_CONTROL') {
+      (async () => {
+        try {
+          const { action, reason, helpContext } = message.payload as {
+            action: 'pause' | 'resume' | 'stop';
+            reason?: PauseReason;
+            helpContext?: HumanHelpContext;
+          };
+
+          let result: boolean;
+
+          switch (action) {
+            case 'pause':
+              result = await executionController.requestPause(
+                reason || 'user_requested',
+                helpContext
+              );
+              break;
+            case 'resume':
+              result = await executionController.requestResume();
+              break;
+            case 'stop':
+              result = await executionController.requestStop();
+              break;
+            default:
+              throw new Error(`Unknown action: ${action}`);
+          }
+
+          sendResponse({
+            success: result,
+            data: { action, result },
+          });
+        } catch (error) {
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Execution control failed',
+          });
+        }
+      })();
+      return true; // Keep channel open for async
+    }
+
+    // Handle EXECUTION_STARTED - create new execution session
+    if (message.type === 'EXECUTION_STARTED') {
+      (async () => {
+        try {
+          const { workflowId, workflowName, workflowSteps, totalSteps, agentState } = message.payload;
+          const tabId = sender.tab?.id;
+          
+          if (!tabId) {
+            console.error('[ServiceWorker] EXECUTION_STARTED: No tab ID');
+            sendResponse({
+              success: false,
+              error: 'No tab ID available',
+            });
+            return;
+          }
+
+          console.log('[ServiceWorker] Creating execution session:', {
+            workflowId,
+            workflowName,
+            totalSteps,
+            tabId,
+            hasSteps: !!workflowSteps,
+            stepsCount: workflowSteps?.length || 0,
+          });
+
+          const session = await executionController.createSession({
+            workflowId,
+            workflowName,
+            workflowSteps: workflowSteps || [],
+            totalSteps,
+            tabId,
+            agentState: agentState || {},
+          });
+
+          console.log('[ServiceWorker] Execution session created:', session.id);
+          
+          // Broadcast to sidepanel
+          executionController.broadcastStatus(session);
+
+          sendResponse({
+            success: true,
+            data: { sessionId: session.id },
+          });
+        } catch (error) {
+          console.error('[ServiceWorker] Failed to create execution session:', error);
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to create execution session',
+          });
+        }
+      })();
+      return true; // Keep channel open for async
+    }
+
+    // Handle EXECUTION_PROGRESS - update execution progress
+    if (message.type === 'EXECUTION_PROGRESS') {
+      (async () => {
+        try {
+          const { stepIndex, agentState } = message.payload;
+          await executionController.updateProgress(stepIndex, agentState);
+          
+          sendResponse({ success: true });
+        } catch (error) {
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to update progress',
+          });
+        }
+      })();
+      return true; // Keep channel open for async
+    }
+
+    // Handle EXECUTION_COMPLETED - mark execution as completed
+    if (message.type === 'EXECUTION_COMPLETED') {
+      (async () => {
+        try {
+          const { success, finalStatus, stepsCompleted } = message.payload;
+          
+          console.log('[ServiceWorker] EXECUTION_COMPLETED:', {
+            success,
+            finalStatus,
+            stepsCompleted,
+          });
+          
+          // Don't clear session if execution was stopped/paused - keep it for resume
+          if (finalStatus === 'stopped' || finalStatus === 'paused') {
+            console.log('[ServiceWorker] Execution stopped/paused - keeping session for resume');
+            const session = await executionController.getSession();
+            if (session) {
+              session.status = finalStatus;
+              session.currentStepIndex = stepsCompleted || session.currentStepIndex;
+              session.pausedAt = Date.now();
+              await executionController.saveSession(session);
+              executionController.broadcastStatus(session);
+            }
+          } else {
+            // Clear session for completed/failed executions
+            await executionController.markCompleted(success);
+            
+            // Show notification on successful completion
+            if (success) {
+              const session = await executionController.getSession();
+              console.log('[ServiceWorker] Triggering completion notification:', {
+                workflowName: session?.workflowName,
+                tabId: session?.tabId,
+              });
+              const tab = session?.tabId ? await chrome.tabs.get(session.tabId).catch(() => null) : null;
+              const notificationId = await notificationService.notifyTaskComplete(
+                session?.workflowName || 'Task', 
+                tab?.windowId
+              );
+              console.log('[ServiceWorker] Notification result:', notificationId);
+            }
+          }
+          
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error('[ServiceWorker] EXECUTION_COMPLETED error:', error);
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to mark completion',
+          });
+        }
+      })();
       return true; // Keep channel open for async
     }
 

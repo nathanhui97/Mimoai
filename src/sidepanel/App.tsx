@@ -11,6 +11,7 @@ import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { SettingsPanel } from './SettingsPanel';
 import { ThinkingPanel } from './ThinkingPanel';
+import { OpenWorkWindowButton } from './OpenWorkWindowButton';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
@@ -93,7 +94,9 @@ function App() {
   // Chain of thought state
   const [thinkingEvents, setThinkingEvents] = useState<ThinkingEvent[]>([]);
   const [currentStep, setCurrentStep] = useState<{index: number; total: number}>({index: 0, total: 0});
-  const [stoppedAgentState, setStoppedAgentState] = useState<any>(null);
+  
+  // Centralized execution state (from service worker)
+  const [executionSession, setExecutionSession] = useState<any>(null);
   
   // Real-time intent inference (during recording)
   const [realtimeIntent, setRealtimeIntent] = useState<{
@@ -192,6 +195,73 @@ function App() {
     }
   }, [currentWorkflowVariables]);
 
+  // Subscribe to centralized execution state from service worker
+  useEffect(() => {
+    const handleExecutionStateChange = (message: any) => {
+      if (message.type === 'EXECUTION_STATE_CHANGED') {
+        const session = message.session;
+        console.log('[App] 🔄 Execution state changed:', {
+          hasSession: !!session,
+          sessionId: session?.id,
+          status: session?.status,
+          workflowName: session?.workflowName,
+          currentStep: session?.currentStepIndex,
+          totalSteps: session?.totalSteps,
+          hasSteps: !!session?.workflowSteps,
+          stepsCount: session?.workflowSteps?.length,
+          pauseReason: session?.pauseReason,
+          hasHelpContext: !!session?.humanHelpContext,
+        });
+        
+        // CRITICAL: Always set the session, even if null (to clear old state)
+        setExecutionSession(session);
+        
+        // If session is paused/stopped, make sure we show it
+        if (session && (session.status === 'paused' || session.status === 'stopped' || session.status === 'waiting_for_human')) {
+          console.log('[App] 🎯 Session is paused/stopped - UI should show Resume button');
+          console.log('[App] 🎯 isStopped will be:', session.status === 'paused' || session.status === 'stopped' || session.status === 'waiting_for_human');
+        }
+      }
+    };
+    
+    chrome.runtime.onMessage.addListener(handleExecutionStateChange);
+    
+    // Fetch current execution state on mount (handles sidepanel reopen)
+    console.log('[App] 🔍 Fetching execution state on mount...');
+    chrome.runtime.sendMessage({ type: 'GET_EXECUTION_STATE' })
+      .then((response) => {
+        console.log('[App] 📥 GET_EXECUTION_STATE response:', {
+          success: response.success,
+          hasData: !!response.data,
+          hasSession: !!response.data?.session,
+          sessionStatus: response.data?.session?.status,
+          sessionId: response.data?.session?.id,
+        });
+        
+        if (response.success && response.data?.session) {
+          const session = response.data.session;
+          console.log('[App] ✅ Restored execution session:', {
+            id: session.id,
+            status: session.status,
+            workflowName: session.workflowName,
+            currentStep: session.currentStepIndex,
+            totalSteps: session.totalSteps,
+            stepsCount: session.workflowSteps?.length,
+            pauseReason: session.pauseReason,
+          });
+          setExecutionSession(session);
+        } else {
+          console.log('[App] ℹ️ No execution session to restore (response.data?.session is null)');
+          setExecutionSession(null);
+        }
+      })
+      .catch(err => console.warn('[App] ❌ Failed to fetch execution state:', err));
+    
+    return () => {
+      chrome.runtime.onMessage.removeListener(handleExecutionStateChange);
+    };
+  }, []);
+
   // Listen for RECORDED_STEP, UPDATE_STEP, AI validation, and agent messages from content script
   // Note: Empty dependency array ensures listener is only registered once on mount
   useEffect(() => {
@@ -203,13 +273,18 @@ function App() {
       if (message.type === 'AGENT_EXECUTION_COMPLETED' && message.payload) {
         // AI Agent finished executing
         const result = message.payload;
-        console.log('[App] Agent execution completed:', result);
+        console.log('[App] Agent execution completed:', {
+          finalStatus: result.finalStatus,
+          success: result.success,
+          stepsCompleted: result.stepsCompleted,
+          totalSteps: result.totalSteps,
+        });
         
+        // Update UI state only - execution session is managed by service worker
         setIsAgentRunning(false);
         setIsExecuting(false);
         setState('IDLE');
         setAgentProgress(null);
-        setStoppedAgentState(null); // Clear any stopped state
         
         setAgentLog(prev => [...prev, {
           time: new Date().toLocaleTimeString(),
@@ -218,18 +293,26 @@ function App() {
           reasoning: result.error,
         }]);
         
-        if (result.success) {
+        // Set appropriate feedback based on final status
+        if (result.finalStatus === 'stopped' || result.finalStatus === 'paused') {
+          setLearningFeedback('⏸️ Execution paused - click Resume to continue');
+        } else if (result.success) {
           setLearningFeedback('✓ AI Agent completed workflow successfully');
+          // Clear thinking events after successful completion
+          setTimeout(() => {
+            setThinkingEvents([]);
+            setCurrentStep({index: 0, total: 0});
+          }, 3000);
         } else {
           setLearningFeedback(`⚠️ AI Agent: ${result.stepsCompleted}/${result.totalSteps} steps completed`);
+          // Clear thinking events after failure
+          setTimeout(() => {
+            setThinkingEvents([]);
+            setCurrentStep({index: 0, total: 0});
+          }, 3000);
         }
-        setTimeout(() => setLearningFeedback(null), 5000);
         
-        // Clear thinking events when execution completes
-        setTimeout(() => {
-          setThinkingEvents([]);
-          setCurrentStep({index: 0, total: 0});
-        }, 3000); // Keep visible for 3 seconds after completion
+        setTimeout(() => setLearningFeedback(null), 5000);
       } else if (message.type === 'AGENT_THINKING' && message.payload) {
         // AI Agent thinking event - update chain of thought
         const event = message.payload as ThinkingEvent;
@@ -642,6 +725,79 @@ function App() {
     }
   };
 
+  /**
+   * Consolidate consecutive INPUT steps on the same field
+   * Prevents fragmented text input from being saved as multiple steps
+   * Example: ["na", "nath", "nathan"] -> ["nathan"]
+   */
+  const consolidateInputSteps = (steps: WorkflowStep[]): WorkflowStep[] => {
+    if (steps.length === 0) return steps;
+    
+    const consolidated: WorkflowStep[] = [];
+    let i = 0;
+    
+    while (i < steps.length) {
+      const currentStep = steps[i];
+      
+      // Only consolidate INPUT steps
+      if (currentStep.type !== 'INPUT') {
+        consolidated.push(currentStep);
+        i++;
+        continue;
+      }
+      
+      // Check if this is a WorkflowStepPayload (has selector, label, etc.)
+      if (!isWorkflowStepPayload(currentStep.payload)) {
+        consolidated.push(currentStep);
+        i++;
+        continue;
+      }
+      
+      // Look ahead for consecutive INPUT steps on the same field
+      const currentSelector = currentStep.payload.selector;
+      const currentLabel = currentStep.payload.label;
+      let lastInputStep = currentStep;
+      let j = i + 1;
+      
+      // Find all consecutive INPUT steps on the same field
+      while (j < steps.length) {
+        const nextStep = steps[j];
+        
+        // Stop if not an INPUT step
+        if (nextStep.type !== 'INPUT') break;
+        if (!isWorkflowStepPayload(nextStep.payload)) break;
+        
+        // Stop if different field (check both selector and label)
+        const nextSelector = nextStep.payload.selector;
+        const nextLabel = nextStep.payload.label;
+        const sameField = (currentSelector && nextSelector && currentSelector === nextSelector) ||
+                         (currentLabel && nextLabel && currentLabel === nextLabel);
+        
+        if (!sameField) break;
+        
+        // Same field - this is a continuation of the input
+        lastInputStep = nextStep;
+        j++;
+      }
+      
+      // If we found multiple consecutive INPUT steps on the same field
+      if (j > i + 1) {
+        console.log('[consolidateInputSteps] Found', j - i, 'consecutive INPUT steps on', currentLabel || currentSelector, '- keeping only the last one');
+        console.log('[consolidateInputSteps] Discarded intermediate values:', 
+          steps.slice(i, j - 1).map((s: any) => s.payload.value).join(', ')
+        );
+        console.log('[consolidateInputSteps] Final value:', (lastInputStep.payload as any).value);
+      }
+      
+      // Keep only the last INPUT step (with the final value)
+      consolidated.push(lastInputStep);
+      i = j;
+    }
+    
+    console.log('[consolidateInputSteps] Original steps:', steps.length, '→ Consolidated:', consolidated.length, '(removed', steps.length - consolidated.length, 'fragmented inputs)');
+    return consolidated;
+  };
+
   const handleSaveWorkflow = async () => {
     console.log('[SaveWorkflow] 🚀 Save button clicked', {
       hasName: !!workflowName.trim(),
@@ -658,10 +814,15 @@ function App() {
     }
 
     try {
-      // CRITICAL: Sort steps by timestamp before saving
+      // STEP 1: Consolidate fragmented INPUT steps
+      // This prevents "na", "nath", "nathan" from being saved as 3 separate steps
+      console.log('[SaveWorkflow] 🔧 Consolidating fragmented INPUT steps...');
+      const consolidatedSteps = consolidateInputSteps(workflowSteps);
+      
+      // STEP 2: Sort steps by timestamp
       // INPUT steps are debounced and may arrive after subsequent CLICK steps
       // This ensures the correct execution order is preserved
-      const sortedSteps = [...workflowSteps].sort((a, b) => 
+      const sortedSteps = [...consolidatedSteps].sort((a, b) => 
         a.payload.timestamp - b.payload.timestamp
       );
       
@@ -850,6 +1011,9 @@ function App() {
       setCurrentWorkflowName(workflow.name);
       setShowSaveDialog(false);
       setWorkflowName('');
+      
+      // Clear workflow steps to return to home screen
+      clearWorkflowSteps();
       
       // Extract site knowledge from workflow (async, non-blocking)
       SiteKnowledgeBase.learnFromWorkflow(workflow).catch(err => {
@@ -1082,38 +1246,83 @@ function App() {
   };
 
   /**
-   * Stop agent execution and save state for resume
+   * Stop agent execution via centralized controller
    */
   const handleStopExecution = async () => {
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id) {
-        const response = await runtimeBridge.sendMessage({ type: 'STOP_AGENT' }, tab.id);
-        if (response.success && response.state) {
-          setStoppedAgentState(response.state);
-        }
+      const response = await runtimeBridge.sendMessage({
+        type: 'EXECUTION_CONTROL',
+        payload: {
+          action: 'pause',
+          reason: 'user_requested',
+        },
+      });
+      
+      console.log('[App] Pause execution response:', response);
+      
+      if (response.success) {
+        setIsAgentRunning(false);
+        setLearningFeedback('⏸️ Execution paused - click Resume to continue');
+      } else {
+        console.error('[App] Failed to pause:', response);
+        setIsAgentRunning(false);
+        setError('Cannot pause: ' + (response.error || 'Unknown error'));
+        setTimeout(() => {
+          setThinkingEvents([]);
+          setCurrentStep({index: 0, total: 0});
+          setError(null);
+        }, 3000);
       }
-      setIsAgentRunning(false);
-      setLearningFeedback('Execution paused - click Resume to continue');
     } catch (err) {
-      console.error('Failed to stop execution:', err);
-      setError(err instanceof Error ? err.message : 'Failed to stop execution');
+      console.error('Failed to pause execution:', err);
+      setError(err instanceof Error ? err.message : 'Failed to pause execution');
     }
   };
 
   /**
-   * Resume agent execution from saved state
+   * Dismiss execution panel and return to home
+   */
+  const handleDismissExecution = () => {
+    setThinkingEvents([]);
+    setCurrentStep({index: 0, total: 0});
+    setExecutionSession(null);
+    setIsAgentRunning(false);
+    setIsExecuting(false);
+    setState('IDLE');
+    setAgentProgress(null);
+    setLearningFeedback(null);
+  };
+
+  /**
+   * Resume agent execution via centralized controller
    */
   const handleResumeExecution = async () => {
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id) {
-        const response = await runtimeBridge.sendMessage({ type: 'RESUME_AGENT' }, tab.id);
-        if (response.success) {
-          setIsAgentRunning(true);
-          setStoppedAgentState(null);
-          setLearningFeedback(null);
+      const response = await runtimeBridge.sendMessage({
+        type: 'EXECUTION_CONTROL',
+        payload: {
+          action: 'resume',
+        },
+      });
+      
+      console.log('[App] Resume execution response:', response);
+      
+      if (response.success) {
+        // Update local state optimistically
+        setIsAgentRunning(true);
+        setLearningFeedback(null);
+        
+        // Also update execution session locally to prevent both buttons showing
+        if (executionSession) {
+          setExecutionSession({
+            ...executionSession,
+            status: 'running',
+            pauseReason: undefined,
+            humanHelpContext: undefined,
+          });
         }
+      } else {
+        setError('Cannot resume: ' + (response.error || 'Unknown error'));
       }
     } catch (err) {
       console.error('Failed to resume execution:', err);
@@ -1306,17 +1515,20 @@ function App() {
           {/* Header - Minimal */}
           <div className="flex items-center justify-between mb-6">
             <h1 className="text-xl font-bold text-foreground">mimoai</h1>
-            <button
-              onClick={() => setShowSettings(true)}
-              className="p-2 text-muted-foreground hover:text-foreground transition-colors"
-              title="Settings"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-                  d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </button>
+            <div className="flex items-center gap-2">
+              <OpenWorkWindowButton variant="icon" />
+              <button
+                onClick={() => setShowSettings(true)}
+                className="p-2 text-muted-foreground hover:text-foreground transition-colors"
+                title="Settings"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
+                    d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </button>
+            </div>
           </div>
 
           {/* Recording Indicator */}
@@ -1335,7 +1547,7 @@ function App() {
           )}
           
           {/* Greeting - Only show when not recording and no steps */}
-          {!isRecording && workflowSteps.length === 0 && !isAgentRunning && !stoppedAgentState && thinkingEvents.length === 0 && (
+          {!isRecording && workflowSteps.length === 0 && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
             <div className="mb-6">
               <h2 className="text-2xl font-semibold text-foreground mb-2">
                 How can I help you?
@@ -1414,6 +1626,16 @@ function App() {
         {workflowSteps.length > 0 && !isRecording && (
           <div className="mb-6">
             <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  clearWorkflowSteps();
+                  setCurrentWorkflowVariables(null);
+                }}
+                className="px-3 py-2 bg-muted border border-border rounded-md hover:bg-muted/80 text-sm"
+                title="Cancel and go back"
+              >
+                ← Back
+              </button>
               <button
                 onClick={() => setShowSaveDialog(true)}
                 className="flex-1 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
@@ -1512,18 +1734,32 @@ function App() {
         )}
 
         {/* AI Agent Chain of Thought */}
-        {(isAgentRunning || stoppedAgentState || thinkingEvents.length > 0) && (
-          <ThinkingPanel
-            events={thinkingEvents}
-            currentStep={currentStep}
-            hints={pendingExecution.workflow?.steps || []}
-            isRunning={isAgentRunning}
-            isStopped={!!stoppedAgentState}
-            workflowName={pendingExecution.workflow?.name}
-            onStop={handleStopExecution}
-            onResume={handleResumeExecution}
-          />
-        )}
+        {(isAgentRunning || executionSession || thinkingEvents.length > 0) && (() => {
+          // Derive button states from execution session (source of truth)
+          const sessionStatus = executionSession?.status;
+          const isSessionRunning = sessionStatus === 'running';
+          const isSessionStopped = sessionStatus === 'paused' || sessionStatus === 'stopped' || sessionStatus === 'waiting_for_human';
+          
+          // If we have a session, use its status; otherwise fall back to local state
+          const showStopButton = executionSession ? isSessionRunning : isAgentRunning;
+          const showResumeButton = executionSession ? isSessionStopped : false;
+          
+          return (
+            <ThinkingPanel
+              events={thinkingEvents}
+              currentStep={executionSession ? { index: executionSession.currentStepIndex, total: executionSession.totalSteps } : currentStep}
+              hints={executionSession?.agentState?.hints || executionSession?.workflowSteps || pendingExecution.workflow?.steps || []}
+              isRunning={showStopButton}
+              isStopped={showResumeButton}
+              workflowName={executionSession?.workflowName || pendingExecution.workflow?.name}
+              pauseReason={executionSession?.pauseReason}
+              helpContext={executionSession?.humanHelpContext}
+              onStop={handleStopExecution}
+              onResume={handleResumeExecution}
+              onDismiss={handleDismissExecution}
+            />
+          );
+        })()}
 
         {/* Learning Feedback */}
         {learningFeedback && (
