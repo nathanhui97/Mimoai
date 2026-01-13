@@ -9,9 +9,10 @@
  */
 
 import type { AgentState } from '../lib/ai-agent';
+import type { SafetyDecision } from '../types/ai';
 
 /** Reasons why execution might be paused */
-export type PauseReason = 'user_requested' | 'agent_needs_help' | 'error_recovery' | 'confirmation_needed';
+export type PauseReason = 'user_requested' | 'agent_needs_help' | 'error_recovery' | 'confirmation_needed' | 'safety_confirmation';
 
 /** Context for when agent needs human help */
 export interface HumanHelpContext {
@@ -21,17 +22,33 @@ export interface HumanHelpContext {
   errorDetails?: string;
 }
 
+/** Context for safety confirmation (Gemini Computer Use) */
+export interface SafetyConfirmationContext {
+  /** The safety decision from the model */
+  decision: SafetyDecision;
+  /** Description of the action being confirmed */
+  actionDescription: string;
+  /** The action that will be executed if confirmed */
+  pendingAction?: {
+    type: string;
+    params: Record<string, unknown>;
+  };
+  /** Timestamp when confirmation was requested */
+  requestedAt: number;
+}
+
 /** Execution session state - persisted across reloads */
 export interface ExecutionSession {
   id: string;
   workflowId: string;
   workflowName: string;
   workflowSteps: any[]; // Store workflow steps for UI display
-  status: 'running' | 'paused' | 'stopped' | 'waiting_for_human' | 'completed' | 'failed';
+  status: 'running' | 'paused' | 'stopped' | 'waiting_for_human' | 'waiting_for_safety_confirmation' | 'completed' | 'failed';
   currentStepIndex: number;
   totalSteps: number;
   pauseReason?: PauseReason;
   humanHelpContext?: HumanHelpContext;
+  safetyConfirmationContext?: SafetyConfirmationContext; // For Computer Use safety decisions
   agentState?: AgentState; // Serializable snapshot of agent state
   tabId: number;
   startedAt: number;
@@ -168,8 +185,8 @@ export class ExecutionController {
       return false;
     }
 
-    // Allow resuming from paused, stopped, or waiting_for_human
-    if (session.status !== 'paused' && session.status !== 'stopped' && session.status !== 'waiting_for_human') {
+    // Allow resuming from paused, stopped, waiting_for_human, or waiting_for_safety_confirmation
+    if (session.status !== 'paused' && session.status !== 'stopped' && session.status !== 'waiting_for_human' && session.status !== 'waiting_for_safety_confirmation') {
       console.warn('[ExecutionController] Cannot resume - invalid status:', session.status);
       return false;
     }
@@ -182,6 +199,7 @@ export class ExecutionController {
     session.pauseReason = undefined;
     session.pausedAt = undefined;
     session.humanHelpContext = undefined;
+    session.safetyConfirmationContext = undefined;
 
     await this.saveSession(session);
     
@@ -202,6 +220,103 @@ export class ExecutionController {
     } catch (error) {
       console.error('[ExecutionController] Failed to notify content script:', error);
       return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Request safety confirmation for an action
+   * Pauses execution until user confirms or denies the action
+   */
+  async requestSafetyConfirmation(context: SafetyConfirmationContext): Promise<boolean> {
+    const session = await this.getSession();
+    if (!session) {
+      console.warn('[ExecutionController] No active session for safety confirmation');
+      return false;
+    }
+
+    if (session.status !== 'running') {
+      console.warn('[ExecutionController] Cannot request safety confirmation - not running');
+      return false;
+    }
+
+    // Update session status
+    session.status = 'waiting_for_safety_confirmation';
+    session.pauseReason = 'safety_confirmation';
+    session.pausedAt = Date.now();
+    session.safetyConfirmationContext = context;
+
+    await this.saveSession(session);
+    this.broadcastStatus(session);
+
+    console.log('[ExecutionController] Waiting for safety confirmation:', context.actionDescription);
+    return true;
+  }
+
+  /**
+   * Respond to safety confirmation request
+   * @param confirmed - Whether user confirmed the action
+   */
+  async respondToSafetyConfirmation(confirmed: boolean): Promise<boolean> {
+    const session = await this.getSession();
+    if (!session) {
+      console.warn('[ExecutionController] No session for safety response');
+      return false;
+    }
+
+    if (session.status !== 'waiting_for_safety_confirmation') {
+      console.warn('[ExecutionController] Not waiting for safety confirmation');
+      return false;
+    }
+
+    if (confirmed) {
+      // Resume execution with safety acknowledgement
+      session.status = 'running';
+      session.pauseReason = undefined;
+      session.pausedAt = undefined;
+      session.safetyConfirmationContext = undefined;
+
+      await this.saveSession(session);
+      this.broadcastStatus(session);
+
+      // Notify content script to resume with safety acknowledgement
+      try {
+        await chrome.tabs.sendMessage(session.tabId, {
+          type: 'EXECUTION_CONTROL',
+          payload: {
+            action: 'resume',
+            safetyAcknowledgement: true,
+          },
+        });
+      } catch (error) {
+        console.error('[ExecutionController] Failed to notify content script:', error);
+        return false;
+      }
+    } else {
+      // User denied - stop execution
+      session.status = 'stopped';
+      session.completedAt = Date.now();
+      session.safetyConfirmationContext = undefined;
+
+      await this.saveSession(session);
+      this.broadcastStatus(session);
+
+      // Notify content script to stop
+      try {
+        await chrome.tabs.sendMessage(session.tabId, {
+          type: 'EXECUTION_CONTROL',
+          payload: {
+            action: 'stop',
+            reason: 'safety_confirmation_denied',
+          },
+        });
+      } catch (error) {
+        console.error('[ExecutionController] Failed to notify content script:', error);
+      }
+
+      // Clear session after a delay
+      setTimeout(() => this.clearSession(), 1000);
     }
 
     return true;

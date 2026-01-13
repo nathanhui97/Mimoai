@@ -25,6 +25,15 @@ export const FeatureFlags = {
   VISION_CLICKER: true,
   
   /**
+   * Use Gemini Computer Use model for vision tasks
+   * When enabled: Uses gemini-2.5-computer-use-preview (specialized for UI automation)
+   * When disabled: Falls back to gemini-2.5-flash (generic vision model)
+   * Cost: Similar to flash, but more accurate for coordinates
+   * Risk: Preview model - may have occasional issues
+   */
+  COMPUTER_USE_MODEL: true,
+  
+  /**
    * AI-powered variable detection after recording
    * Cost: Medium (one-time LLM call per workflow)
    * Risk: None, just expensive

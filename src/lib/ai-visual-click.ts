@@ -13,7 +13,9 @@
 import { aiConfig } from './ai-config';
 import { AICache } from './ai-cache';
 import { VisualSnapshotService } from '../content/visual-snapshot';
+import { isFeatureEnabled } from './feature-flags';
 import type { ElementSignature } from '../types/universal-types';
+import type { SafetyDecision } from '../types/ai';
 
 // ============================================================================
 // Types
@@ -745,7 +747,9 @@ export class AIVisualClickService {
   }
 
   /**
-   * Call the visual_click Edge Function
+   * Call the visual click Edge Function
+   * Uses computer_use endpoint when COMPUTER_USE_MODEL flag is enabled
+   * Falls back to visual_click endpoint otherwise
    */
   private static async callVisualClickAPI(
     screenshot: string,
@@ -758,10 +762,11 @@ export class AIVisualClickService {
     workflowContext?: WorkflowContext
   ): Promise<AICoordinateResponse | null> {
     const config = aiConfig.getConfig();
+    const useComputerUse = isFeatureEnabled('COMPUTER_USE_MODEL');
 
     // Check cache first
     const cacheKey = AICache.generateKey({
-      type: 'visual_click',
+      type: useComputerUse ? 'computer_use' : 'visual_click',
       targetText: target.text,
       targetRole: target.role,
       targetLabel: target.label,
@@ -778,9 +783,46 @@ export class AIVisualClickService {
     // }
     console.log('[AIVisualClick] Cache disabled - calling Edge Function fresh');
 
-    const url = `${config.supabaseUrl}/functions/v1/visual_click`;
+    // Choose endpoint based on feature flag
+    const endpoint = useComputerUse ? 'computer_use' : 'visual_click';
+    const url = `${config.supabaseUrl}/functions/v1/${endpoint}`;
 
-    const payload = {
+    // Build payload - different structure for computer_use
+    const payload = useComputerUse ? {
+      // Computer Use endpoint format
+      mode: 'find_element' as const,
+      screenshot,
+      target: {
+        text: target.text,
+        role: target.role,
+        label: target.label,
+        description: target.description,
+        context: target.pageContext,
+      },
+      hints: {
+        approximateCoordinates: hints?.approximateCoordinates,
+        nearbyElements: hints?.nearbyElements,
+        excludeAreas: excludedAreas?.map(a => ({
+          x: a.x,
+          y: a.y,
+          label: a.label,
+        })),
+        recordedBounds: hints?.recordedBounds,
+        recordedClickPoint: hints?.recordedClickPoint,
+      },
+      referenceScreenshot: recordedSnapshot,
+      hasAnnotatedReference: hasAnnotatedReference || false,
+      pageContext: {
+        title: document.title,
+        url: window.location.href,
+        viewportSize: {
+          width: window.innerWidth,
+          height: window.innerHeight,
+        },
+      },
+      workflowContext: workflowContext || undefined,
+    } : {
+      // Legacy visual_click endpoint format
       screenshot,
       prompt,
       target: {
@@ -802,7 +844,6 @@ export class AIVisualClickService {
         recordedClickPoint: hints?.recordedClickPoint,
       },
       recordedScreenshot: recordedSnapshot,
-      // Flag to tell server the reference image has visual markers
       hasAnnotatedReference: hasAnnotatedReference || false,
       pageContext: {
         title: document.title,
@@ -812,7 +853,6 @@ export class AIVisualClickService {
           height: window.innerHeight,
         },
       },
-      // Workflow execution context
       workflowContext: workflowContext || undefined,
     };
 
@@ -821,7 +861,7 @@ export class AIVisualClickService {
     const timeoutId = setTimeout(() => controller.abort(), timeout);
 
     try {
-      console.log('[AIVisualClick] Calling visual_click Edge Function...');
+      console.log(`[AIVisualClick] Calling ${endpoint} Edge Function (Computer Use: ${useComputerUse})...`);
       
       const response = await fetch(url, {
         method: 'POST',
@@ -853,6 +893,13 @@ export class AIVisualClickService {
       console.log('[AIVisualClick] Coordinates:', result.coordinates);
       console.log('[AIVisualClick] Confidence:', result.confidence);
       console.log('[AIVisualClick] Reasoning:', result.reasoning);
+      
+      // Log safety decision if present (Computer Use model feature)
+      if (result.safetyDecision) {
+        console.log('[AIVisualClick] Safety Decision:', result.safetyDecision);
+        // Store safety decision for handling by caller
+        (result as any)._safetyDecision = result.safetyDecision as SafetyDecision;
+      }
 
       // Validate response
       if (!result.coordinates || typeof result.coordinates.x !== 'number') {

@@ -656,22 +656,38 @@ async function executeStep(
           const containerSelector = containerInfo.selector;
           const scrollTop = containerInfo.scrollTop || 0;
           const scrollLeft = containerInfo.scrollLeft || 0;
+          const isDropdownScroll = containerInfo.isDropdownScroll || false;
           
-          console.log(`[UniversalOrchestrator] 📜 Replaying container scroll: ${containerSelector} to top=${scrollTop}, left=${scrollLeft}`);
+          console.log(`[UniversalOrchestrator] 📜 Replaying container scroll: ${containerSelector} to top=${scrollTop}, left=${scrollLeft}${isDropdownScroll ? ' (DROPDOWN)' : ''}`);
           
-          // Try to find the container
+          // 🎯 NEW: For dropdown scrolls, use MenuDetector instead of selector
           let container: Element | null = null;
-          try {
-            container = document.querySelector(containerSelector);
-          } catch (err) {
-            // Selector might be invalid, try fallback selectors from payload
-            const fallbackSelectors = (step as any).pattern?.data?.fallbackSelectors || [];
-            for (const selector of fallbackSelectors) {
-              try {
-                container = document.querySelector(selector);
-                if (container) break;
-              } catch (e) {
-                // Continue to next selector
+          if (isDropdownScroll) {
+            const { MenuDetector } = await import('../menu-detector');
+            const visibleMenu = MenuDetector.findVisibleMenu();
+            
+            if (visibleMenu) {
+              console.log(`[UniversalOrchestrator] 📜 Found visible dropdown/menu using MenuDetector`);
+              container = visibleMenu;
+            } else {
+              console.warn(`[UniversalOrchestrator] ⚠️ No visible menu found via MenuDetector, falling back to selector`);
+            }
+          }
+          
+          // Fall back to selector-based approach if MenuDetector didn't find anything
+          if (!container) {
+            try {
+              container = document.querySelector(containerSelector);
+            } catch (err) {
+              // Selector might be invalid, try fallback selectors from payload
+              const fallbackSelectors = (step as any).pattern?.data?.fallbackSelectors || [];
+              for (const selector of fallbackSelectors) {
+                try {
+                  container = document.querySelector(selector);
+                  if (container) break;
+                } catch (e) {
+                  // Continue to next selector
+                }
               }
             }
           }

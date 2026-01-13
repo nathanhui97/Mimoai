@@ -14,6 +14,7 @@
  */
 
 import { aiConfig } from './ai-config';
+import { isFeatureEnabled } from './feature-flags';
 import type { SemanticTarget } from './ai-agent';
 import { computeAccessibleName } from './accessible-name';
 
@@ -69,6 +70,9 @@ export class VisionAssist {
   /**
    * Get vision hint from screenshot when DOM resolution fails
    * Returns semantic description, NOT coordinates
+   * 
+   * Uses computer_use endpoint when COMPUTER_USE_MODEL flag is enabled
+   * Falls back to vision_hint endpoint otherwise
    */
   static async getHint(
     screenshot: string,
@@ -86,19 +90,46 @@ export class VisionAssist {
       };
     }
     
+    const useComputerUse = isFeatureEnabled('COMPUTER_USE_MODEL');
+    
     try {
-      const url = `${config.supabaseUrl}/functions/v1/vision_hint`;
+      // Choose endpoint based on feature flag
+      const endpoint = useComputerUse ? 'computer_use' : 'vision_hint';
+      const url = `${config.supabaseUrl}/functions/v1/${endpoint}`;
       
-      const payload = {
+      // Build payload based on endpoint
+      const payload = useComputerUse ? {
+        // Computer Use endpoint format
+        mode: 'find_element' as const,
+        screenshot,
+        target: {
+          text: failedTarget.text,
+          role: failedTarget.role,
+          label: failedTarget.name,
+          description: `Find element: ${failedTarget.text || failedTarget.name || failedTarget.role || 'unknown'}`,
+        },
+        hints: {
+          nearbyElements: failedTarget.nearbyText,
+        },
+        pageContext: {
+          title: document.title,
+          url: window.location.href,
+          viewportSize: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+          },
+        },
+      } : {
+        // Legacy vision_hint endpoint format
         screenshot,
         failedTarget,
-        domMap, // Give context about what was tried
-        mode: 'hint', // Request hint, not coordinates
+        domMap,
+        mode: 'hint',
       };
       
       // Use AbortController with timeout to avoid hanging on CORS errors
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout for Computer Use
       
       let response: Response;
       try {
@@ -113,11 +144,10 @@ export class VisionAssist {
         });
       } catch (fetchError) {
         clearTimeout(timeoutId);
-        // CORS or network error - this is expected if vision_hint function doesn't exist
-        console.warn('[Tier3] Vision hint fetch failed (function may not be deployed):', 
+        console.warn(`[Tier3] ${endpoint} fetch failed:`, 
           fetchError instanceof Error ? fetchError.message : 'Unknown error');
         return {
-          description: 'Vision hint unavailable (edge function not deployed)',
+          description: `Vision hint unavailable (${endpoint} not deployed)`,
           refinedTarget: failedTarget,
           confidence: 0,
         };
@@ -126,7 +156,7 @@ export class VisionAssist {
       clearTimeout(timeoutId);
       
       if (!response.ok) {
-        console.error('[Tier3] Vision hint API error:', response.status);
+        console.error(`[Tier3] ${endpoint} API error:`, response.status);
         return {
           description: 'Vision hint failed',
           refinedTarget: failedTarget,
@@ -136,8 +166,24 @@ export class VisionAssist {
       
       const result = await response.json();
       
-      console.log('[Tier3] ✅ Vision hint received:', result.description);
+      console.log(`[Tier3] ✅ Vision hint received (${endpoint}):`, 
+        useComputerUse ? result.reasoning : result.description);
       
+      // Handle Computer Use response format
+      if (useComputerUse) {
+        return {
+          description: result.reasoning || 'No description',
+          refinedTarget: failedTarget, // Computer Use returns coordinates, not refined targets
+          confidence: result.confidence || 0.5,
+          coordinatesIfNeeded: result.coordinates && result.coordinates.x > 0 ? {
+            x: result.coordinates.x,
+            y: result.coordinates.y,
+            mustValidate: true,
+          } : undefined,
+        };
+      }
+      
+      // Handle legacy vision_hint response
       return {
         description: result.description || 'No description',
         refinedTarget: result.refinedTarget || failedTarget,

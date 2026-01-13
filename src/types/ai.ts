@@ -171,5 +171,88 @@ export interface AIWorkflowPayload {
     sequenceType?: 'row' | 'column' | 'grid' | 'none';
     confidence: number;
   };
+  
+  // Key screenshots for vision-based summary generation
+  keyScreenshots?: {
+    first?: string;  // Optimized base64 viewport screenshot (1280px, 75% quality)
+    last?: string;   // Optimized base64 viewport screenshot
+  };
+}
+
+// ============================================================================
+// Computer Use / Safety Decision Types
+// ============================================================================
+
+/**
+ * Safety decision from Gemini Computer Use model
+ * The model flags potentially risky actions for user confirmation
+ */
+export interface SafetyDecision {
+  /** Decision type */
+  decision: 'allowed' | 'require_confirmation' | 'blocked';
+  /** Explanation of why this action was flagged */
+  explanation: string;
+}
+
+/**
+ * Safety acknowledgement to send back after user confirms
+ */
+export interface SafetyAcknowledgement {
+  /** Whether user confirmed the action */
+  acknowledged: boolean;
+  /** Timestamp of acknowledgement */
+  timestamp: number;
+}
+
+/**
+ * Computer Use response with safety decision
+ */
+export interface ComputerUseResponse {
+  /** Action to perform */
+  action: 'click' | 'type' | 'scroll' | 'navigate' | 'wait' | 'done' | 'fail';
+  /** Action parameters */
+  params: {
+    x?: number;
+    y?: number;
+    text?: string;
+    direction?: string;
+    amount?: number;
+    url?: string;
+    duration?: number;
+    reason?: string;
+    description?: string;
+    pressEnter?: boolean;
+    clearBeforeTyping?: boolean;
+  };
+  /** AI reasoning for this action */
+  reasoning: string;
+  /** Confidence score (0-1) */
+  confidence: number;
+  /** Hint step index (for agent mode) */
+  hintStepIndex?: number;
+  /** Safety decision from model (if flagged) */
+  safetyDecision?: SafetyDecision;
+}
+
+/**
+ * Computer Use find element response (replaces visual_click)
+ */
+export interface ComputerUseFindElementResponse {
+  /** Coordinates of found element */
+  coordinates: { x: number; y: number };
+  /** Bounding box if available */
+  boundingBox?: { x: number; y: number; width: number; height: number };
+  /** Confidence score (0-1) */
+  confidence: number;
+  /** AI reasoning */
+  reasoning: string;
+  /** Safety decision if flagged */
+  safetyDecision?: SafetyDecision;
+  /** Alternative candidates if multiple matches */
+  alternativeCandidates?: Array<{
+    coordinates: { x: number; y: number };
+    confidence: number;
+    reasoning: string;
+  }>;
 }
 

@@ -476,6 +476,17 @@ export class RecordingManager {
     const url = window.location.href;
     const currentTimestamp = Date.now();
 
+    // 🎯 Detect if this is a dropdown/menu scroll (for MenuDetector replay)
+    let isDropdownScroll = false;
+    if (scrollContainer) {
+      const role = scrollContainer.getAttribute('role');
+      isDropdownScroll = role === 'listbox' || role === 'menu' || 
+                        scrollContainer.closest('[role="listbox"], [role="menu"]') !== null;
+      if (isDropdownScroll) {
+        console.log('📜 GhostWriter: Detected DROPDOWN/MENU scroll (flush) - will use MenuDetector on replay');
+      }
+    }
+
     // Capture viewport snapshot for scroll (shows what's visible after scrolling)
     let visualSnapshot: WorkflowStepPayload['visualSnapshot'] | undefined;
     try {
@@ -511,6 +522,8 @@ export class RecordingManager {
             : scrollContainer.tagName.toLowerCase(),
           scrollTop,
           scrollLeft,
+          // 🎯 NEW: Flag for dropdown/menu scrolls (uses MenuDetector on replay)
+          isDropdownScroll,
         }
       }),
     };
@@ -2566,6 +2579,17 @@ export class RecordingManager {
           }
         }
         
+        // 🎯 Detect if this is a dropdown/menu scroll (for MenuDetector replay)
+        let isDropdownScroll = false;
+        if (scrollContainer) {
+          const role = scrollContainer.getAttribute('role');
+          isDropdownScroll = role === 'listbox' || role === 'menu' || 
+                            scrollContainer.closest('[role="listbox"], [role="menu"]') !== null;
+          if (isDropdownScroll) {
+            console.log('📜 GhostWriter: Detected DROPDOWN/MENU scroll - will use MenuDetector on replay');
+          }
+        }
+        
         const scrollX = window.scrollX || window.pageXOffset;
         const scrollY = window.scrollY || window.pageYOffset;
         const currentTimestamp = Date.now();
@@ -2656,6 +2680,8 @@ export class RecordingManager {
               // 🎯 NEW: Store delta for container scrolls too
               scrollDeltaX,
               scrollDeltaY,
+              // 🎯 NEW: Flag for dropdown/menu scrolls (uses MenuDetector on replay)
+              isDropdownScroll,
             }
           }),
         };

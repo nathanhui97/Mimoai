@@ -61,6 +61,8 @@ export interface ViewportInfo {
     // 🎯 Scroll delta for container scrolls
     scrollDeltaX?: number;
     scrollDeltaY?: number;
+    // 🎯 Flag for dropdown/menu scrolls (uses MenuDetector on replay)
+    isDropdownScroll?: boolean;
   };
 }
 
@@ -471,14 +473,14 @@ export interface SavedWorkflow {
   additionalInstructions?: string; // User tips, edge cases - surfaced to AI as system context
   createdAt: number; // Timestamp
   updatedAt: number; // Timestamp
-  steps: WorkflowStep[]; // Array of recorded steps
+  steps: WorkflowStep[]; // Array of recorded steps (REQUIRED - many parts of codebase depend on this)
   // Phase 4: Human-like visual understanding
   analyzedIntent?: VisualWorkflowIntent; // AI-inferred workflow intent
   pageTypeHistory?: PageType[]; // Page types encountered during recording
   // Phase 5: Variable detection and parameterization
   variables?: WorkflowVariables; // Detected variables for parameterized execution
   // Navigation optimization
-  optimizedSteps?: WorkflowStep[]; // Optimized version of workflow steps for playback
+  optimizedSteps?: WorkflowStep[]; // Optimized version (ONLY set when optimization actually reduced steps)
   optimizationMetadata?: OptimizationMetadata; // Metadata about the optimization process
   // Enhanced Recording Intelligence: Intent inference
   inferredIntent?: {

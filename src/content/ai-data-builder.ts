@@ -166,10 +166,10 @@ export class AIDataBuilder {
   /**
    * Build AI-optimized payload for full workflow
    */
-  static buildWorkflowAnalysisPayload(
+  static async buildWorkflowAnalysisPayload(
     workflow: SavedWorkflow,
     pattern?: import('../types/workflow').Pattern
-  ): AIWorkflowPayload {
+  ): Promise<AIWorkflowPayload> {
     const steps = workflow.steps.map((step, index) => {
       const previousStep = index > 0 ? workflow.steps[index - 1] : undefined;
       return this.buildStepAnalysisPayload(step, previousStep);
@@ -191,6 +191,33 @@ export class AIDataBuilder {
         sequenceType: pattern.sequenceType,
         confidence: pattern.confidence,
       };
+    }
+
+    // Extract and optimize key screenshots for vision-based summary
+    const keyScreenshots: { first?: string; last?: string } = {};
+
+    // Get and optimize first step viewport
+    const firstStep = workflow.steps[0];
+    if (isWorkflowStepPayload(firstStep?.payload) && firstStep.payload.visualSnapshot?.viewport) {
+      console.log('📸 AIDataBuilder: Optimizing first step screenshot for summary...');
+      keyScreenshots.first = await this.optimizeScreenshotForSummary(
+        firstStep.payload.visualSnapshot.viewport
+      );
+    }
+
+    // Get and optimize last step viewport
+    const lastStep = workflow.steps[workflow.steps.length - 1];
+    if (isWorkflowStepPayload(lastStep?.payload) && lastStep.payload.visualSnapshot?.viewport) {
+      console.log('📸 AIDataBuilder: Optimizing last step screenshot for summary...');
+      keyScreenshots.last = await this.optimizeScreenshotForSummary(
+        lastStep.payload.visualSnapshot.viewport
+      );
+    }
+
+    // Add key screenshots if we have any
+    if (keyScreenshots.first || keyScreenshots.last) {
+      payload.keyScreenshots = keyScreenshots;
+      console.log('📸 AIDataBuilder: Added optimized screenshots to payload');
     }
 
     return payload;
@@ -363,6 +390,46 @@ export class AIDataBuilder {
       context.position ||
       context.surroundingText
     );
+  }
+
+  /**
+   * Optimize screenshot for summary generation
+   * Resizes to max 1280px width and compresses to 75% JPEG quality
+   * This reduces payload size while preserving text readability for AI
+   */
+  private static async optimizeScreenshotForSummary(base64: string): Promise<string> {
+    return new Promise((resolve) => {
+      const image = new Image();
+      image.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        if (!ctx) {
+          resolve(base64);
+          return;
+        }
+
+        // Resize to max 1280px width (maintains aspect ratio)
+        const maxWidth = 1280;
+        let width = image.width;
+        let height = image.height;
+
+        if (width > maxWidth) {
+          const scale = maxWidth / width;
+          width = maxWidth;
+          height = Math.round(height * scale);
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(image, 0, 0, width, height);
+
+        // Compress to 75% JPEG quality (good for text readability)
+        resolve(canvas.toDataURL('image/jpeg', 0.75));
+      };
+      image.onerror = () => resolve(base64);
+      image.src = base64;
+    });
   }
 }
 

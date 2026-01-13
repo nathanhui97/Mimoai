@@ -66,8 +66,8 @@ export class IntentAnalyzer {
         return cached as IntentAnalysisResult;
       }
 
-      // Build AI payload
-      const aiPayload = AIDataBuilder.buildWorkflowAnalysisPayload(workflow);
+      // Build AI payload (now async to optimize screenshots)
+      const aiPayload = await AIDataBuilder.buildWorkflowAnalysisPayload(workflow);
 
       // Call Edge Function
       const result = await this.callAnalyzeIntentFunction(workflow, aiPayload);

@@ -31,6 +31,7 @@ import type {
   ThinkingEvent
 } from '../types/messages';
 import type { CorrectionEntry } from '../types/visual';
+import type { SafetyDecision } from '../types/ai';
 
 function App() {
   const { 
@@ -97,6 +98,15 @@ function App() {
   // Chain of thought state
   const [thinkingEvents, setThinkingEvents] = useState<ThinkingEvent[]>([]);
   const [currentStep, setCurrentStep] = useState<{index: number; total: number}>({index: 0, total: 0});
+  
+  // Safety confirmation state (for Gemini Computer Use model)
+  const [safetyConfirmation, setSafetyConfirmation] = useState<{
+    show: boolean;
+    decision: SafetyDecision | null;
+    actionDescription: string;
+    onConfirm: (() => void) | null;
+    onDeny: (() => void) | null;
+  }>({ show: false, decision: null, actionDescription: '', onConfirm: null, onDeny: null });
   
   // Centralized execution state (from service worker)
   const [executionSession, setExecutionSession] = useState<any>(null);
@@ -1155,10 +1165,11 @@ function App() {
         steps: stepsWithTranslations,
         // Include detected variables if any were found
         variables: variables.variables.length > 0 ? variables : undefined,
-        // Use optimized steps if optimization reduced steps, otherwise use stepsWithTranslations
+        // Only include optimizedSteps if actual optimization occurred (steps were removed)
+        // This prevents duplicate data when optimizer is disabled
         optimizedSteps: optimizationResult.metadata.stepsRemoved > 0 
           ? optimizationResult.optimizedSteps 
-          : stepsWithTranslations,
+          : undefined,
         optimizationMetadata: optimizationResult.metadata.stepsRemoved > 0 ? optimizationResult.metadata : undefined,
       };
 
@@ -2095,6 +2106,60 @@ function App() {
             onConfirm={handleVariableFormConfirm}
             onCancel={handleVariableFormCancel}
           />
+        )}
+
+        {/* Safety Confirmation Dialog (Gemini Computer Use) */}
+        {safetyConfirmation.show && safetyConfirmation.decision && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-card p-6 rounded-lg border border-border max-w-md w-full mx-4">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-yellow-100 rounded-full">
+                  <svg className="w-6 h-6 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </div>
+                <h2 className="text-xl font-semibold text-card-foreground">Confirmation Required</h2>
+              </div>
+              
+              <p className="text-sm text-muted-foreground mb-3">
+                The AI wants to perform an action that may be sensitive:
+              </p>
+              
+              <div className="bg-muted p-3 rounded-md mb-4">
+                <p className="text-sm font-medium text-foreground mb-2">
+                  {safetyConfirmation.actionDescription}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {safetyConfirmation.decision.explanation}
+                </p>
+              </div>
+              
+              <p className="text-xs text-muted-foreground mb-4">
+                Please confirm you want to proceed with this action.
+              </p>
+              
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    safetyConfirmation.onConfirm?.();
+                    setSafetyConfirmation({ show: false, decision: null, actionDescription: '', onConfirm: null, onDeny: null });
+                  }}
+                  className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                >
+                  Yes, Proceed
+                </button>
+                <button
+                  onClick={() => {
+                    safetyConfirmation.onDeny?.();
+                    setSafetyConfirmation({ show: false, decision: null, actionDescription: '', onConfirm: null, onDeny: null });
+                  }}
+                  className="flex-1 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Refresh Warning Dialog */}

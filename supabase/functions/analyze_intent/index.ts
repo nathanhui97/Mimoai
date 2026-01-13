@@ -38,6 +38,10 @@ interface AnalyzeIntentRequest {
     sequenceType?: string;
     confidence: number;
   };
+  keyScreenshots?: {
+    first?: string;  // Base64 viewport screenshot (pre-optimized on client)
+    last?: string;   // Base64 viewport screenshot
+  };
 }
 
 interface StepTranslation {
@@ -126,29 +130,28 @@ serve(async (req) => {
       }
     };
 
-    // Add visual snapshots if available (limit to first and last step to save tokens)
-    if (payload.steps.length > 0) {
-      const firstStep = payload.steps[0];
-      const lastStep = payload.steps[payload.steps.length - 1];
-      
-      if (firstStep.visualSnapshot?.elementSnippet) {
-        const base64 = extractBase64Data(firstStep.visualSnapshot.elementSnippet);
+    // Add key viewport screenshots for vision-based summary (optimized on client)
+    if (payload.keyScreenshots) {
+      if (payload.keyScreenshots.first) {
+        const base64 = extractBase64Data(payload.keyScreenshots.first);
         geminiRequest.contents[0].parts.push({
           inline_data: {
             mime_type: 'image/jpeg',
             data: base64
           }
         });
+        console.log('Added first viewport screenshot for vision analysis');
       }
       
-      if (payload.steps.length > 1 && lastStep.visualSnapshot?.elementSnippet) {
-        const base64 = extractBase64Data(lastStep.visualSnapshot.elementSnippet);
+      if (payload.keyScreenshots.last) {
+        const base64 = extractBase64Data(payload.keyScreenshots.last);
         geminiRequest.contents[0].parts.push({
           inline_data: {
             mime_type: 'image/jpeg',
             data: base64
           }
         });
+        console.log('Added last viewport screenshot for vision analysis');
       }
     }
 
@@ -207,10 +210,21 @@ serve(async (req) => {
  * Build intent analysis prompt
  */
 function buildIntentPrompt(payload: AnalyzeIntentRequest): string {
-  const { workflow, steps, pattern } = payload;
+  const { workflow, steps, pattern, keyScreenshots } = payload;
   
-  let prompt = `Analyze this recorded browser workflow to understand the user's intent.
+  let prompt = `You are analyzing a recorded browser workflow to understand the user's intent.
 
+${keyScreenshots?.first || keyScreenshots?.last ? `🎯 VISUAL CONTEXT PROVIDED:
+I am providing screenshots of the ${keyScreenshots.first ? 'FIRST' : ''}${keyScreenshots.first && keyScreenshots.last ? ' and ' : ''}${keyScreenshots.last ? 'LAST' : ''} state${keyScreenshots.first && keyScreenshots.last ? 's' : ''} of the workflow.
+
+CRITICAL - Look at the screenshot(s) to identify:
+1. What APPLICATION/WEBSITE is being used (e.g., Salesforce, Gainsight, Google Sheets, HubSpot, QuickBooks, etc.)
+2. What SPECIFIC TASK the user is performing (not just "fill form" but "Create sales opportunity" or "Log expense report")
+3. Any visible page titles, form names, button labels, or data being entered
+4. The visual context and purpose of the workflow
+
+Your summary should be descriptive enough that a non-technical user would immediately understand what this workflow does.
+` : ''}
 WORKFLOW INFO:
 - Name: "${workflow.name}"
 - Steps: ${workflow.stepCount}
@@ -257,13 +271,10 @@ RECORDED STEPS:
 
   prompt += `
 
-${steps.length > 0 && steps[0].visualSnapshot ? '\nVISUAL CONTEXT:\n- First step screenshot provided as image 1' : ''}
-${steps.length > 1 && steps[steps.length - 1].visualSnapshot ? '\n- Last step screenshot provided as image 2' : ''}
-
 ANALYZE AND RETURN JSON:
 {
   "intent": {
-    "primaryGoal": "<What is the user trying to accomplish? Be specific and concise>",
+    "primaryGoal": "<What is the user trying to accomplish? Be VERY SPECIFIC - include application name and exact task>",
     "subGoals": ["<Step 1 goal>", "<Step 2 goal>", ...],
     "expectedOutcome": "<What should happen when workflow completes successfully?>",
     "visualConfirmation": "<What would the success state look like visually?>",
@@ -290,7 +301,11 @@ ANALYZE AND RETURN JSON:
 }
 
 GUIDELINES:
-- Be specific about the PRIMARY GOAL (e.g., "Fill out invoice form and submit" not "Fill form")
+- PRIMARY GOAL should be VERY SPECIFIC and mention the application name
+  * Good: "Create a new sales opportunity in Salesforce CRM for Acme Corp"
+  * Bad: "Fill out a form"
+- Use visual context from screenshots to identify the exact application and task
+- Include specific form names, page titles, or section names you see in the screenshots
 - List sub-goals in order of execution
 - Describe expected outcome in user-friendly terms
 - Include 2-3 likely failure patterns
