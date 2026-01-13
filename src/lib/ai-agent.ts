@@ -17,8 +17,9 @@
 import { aiConfig, debugLog } from './ai-config';
 import { VisualSnapshotService } from '../content/visual-snapshot';
 import { generateDOMMap, domMapToText, invalidateDOMMapCache, type DOMMap, type DOMMapElement } from '../content/dom-map';
-import { FeatureFlags } from './feature-flags';
+import { FeatureFlags, isFeatureEnabled } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
+import { PostActionObserver, type PageChanges } from './post-action-observer';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
 import { SheetStateExtractor } from '../content/sheet-state-extractor';
 import { SpreadsheetHelpers } from './spreadsheet-helpers';
@@ -329,6 +330,7 @@ export interface ActionHistoryEntry {
   result: 'success' | 'failed' | 'pending';
   error?: string;
   timestamp: number;
+  pageChanges?: PageChanges;  // Post-action observation - what changed after this action
 }
 
 /** Agent state during execution */
@@ -1181,6 +1183,7 @@ export class AIAgent {
             const confidence = hybridResult.confidence || 95;
             const confidenceLabel = confidence >= 95 ? 'HIGH' : 'MEDIUM-HIGH';
             console.log(`[Hybrid] ⚡ ${confidenceLabel} CONFIDENCE (${confidence}%) - ${currentHint.actionType.toUpperCase()} executed instantly, skipping LLM`);
+            console.log(`[Hybrid] ✅ MARKING STEP ${this.state.currentHintIndex} (${currentHint.description?.slice(0, 40)}) AS COMPLETE`);
             
             // Mark as completed and advance
             this.state.hints[this.state.currentHintIndex].completed = true;
@@ -1296,7 +1299,41 @@ export class AIAgent {
         // 4. Act (non-navigation actions)
         this.onProgress?.(this.state.currentHintIndex, action, 'acting');
         const actionStartTime = Date.now();
+        
+        // 4.1 Capture pre-action state for post-action observation
+        const preActionState = isFeatureEnabled('POST_ACTION_OBSERVER')
+          ? PostActionObserver.captureQuickState()
+          : null;
+        
         const result = await this.act(action);
+        
+        // 4.2 Post-action observation - detect what changed
+        let pageChanges: PageChanges | null = null;
+        if (preActionState && isFeatureEnabled('POST_ACTION_OBSERVER')) {
+          try {
+            const postActionState = PostActionObserver.captureQuickState();
+            if (postActionState) {
+              pageChanges = PostActionObserver.detectChanges(preActionState, postActionState);
+              
+              if (pageChanges?.hasSignificantChange) {
+                console.log('[AIAgent] 🔍 Post-action changes detected:', {
+                  interpretation: pageChanges.interpretation,
+                  changes: pageChanges.changes.map(c => c.description),
+                });
+                
+                // Log specific important changes with context
+                pageChanges.changes.forEach(change => {
+                  if (change.context) {
+                    console.log(`[AIAgent]   - ${change.description}: ${change.context}`);
+                  }
+                });
+              }
+            }
+          } catch (error) {
+            // Observer failed - continue execution normally (non-fatal)
+            console.warn('[PostActionObserver] Error (non-fatal, execution continues):', error);
+          }
+        }
         
         // Emit action result event
         this.onThinkingEvent?.({
@@ -1311,7 +1348,7 @@ export class AIAgent {
           },
         });
 
-        // 5. Record history
+        // 5. Record history (including page changes if detected)
         const historyEntry: ActionHistoryEntry = {
           stepNumber: this.state.history.length + 1,
           action,
@@ -1319,6 +1356,7 @@ export class AIAgent {
           result: result.success ? 'success' : 'failed',
           error: result.error,
           timestamp: Date.now(),
+          pageChanges: pageChanges || undefined,  // Add observed changes
         };
         this.state.history.push(historyEntry);
 
@@ -1431,18 +1469,34 @@ export class AIAgent {
                   const { generateDOMMap } = await import('../content/dom-map');
                   const currentMap = generateDOMMap();
                   
-                  // Check if we have interactive elements with matching text
+                  // Check if we have interactive elements with EXACT or near-exact matching text
+                  // CRITICAL FIX: Be more strict - don't match "New" to "New Account" breadcrumb
+                  // Only match if the element's PRIMARY text is the target
+                  const targetText = nextHint.targetText?.toLowerCase().trim() || '';
                   const hasMatchingElements = currentMap.interactiveElements.some(el => {
-                    const targetText = nextHint.targetText?.toLowerCase() || '';
-                    const elName = (el.name || '').toLowerCase();
-                    const elText = (el.text || '').toLowerCase();
-                    return elName.includes(targetText) || elText.includes(targetText) || targetText.includes(elName);
+                    const elName = (el.name || '').toLowerCase().trim();
+                    const elText = (el.text || '').toLowerCase().trim();
+                    
+                    // Must be an exact match
+                    // (e.g., "New" matches "New" button, not "New Account" link)
+                    const isExactMatch = elName === targetText || elText === targetText;
+                    
+                    // For buttons specifically, check if it's a clickable element with the right text
+                    const isButton = el.role === 'button';
+                    const buttonWithText = isButton && (elName === targetText || elText === targetText);
+                    
+                    return isExactMatch || buttonWithText;
                   });
-                  
+
                   if (hasMatchingElements) {
-                    console.log(`[AIAgent] ✅ Content ready - found matching elements (waited ${Date.now() - startWait}ms)`);
+                    console.log(`[AIAgent] ✅ Content ready - found EXACT matching elements for "${targetText}" (waited ${Date.now() - startWait}ms)`);
                     contentReady = true;
                     break;
+                  }
+                  
+                  // Also check DOM element count - if it's very low, page is still loading
+                  if (currentMap.interactiveElements.length < 30) {
+                    console.log(`[AIAgent] ⏳ Only ${currentMap.interactiveElements.length} elements - page still loading...`);
                   }
                   
                   await this.sleep(checkIntervalMs);
@@ -1769,18 +1823,28 @@ export class AIAgent {
       const domMap = generateDOMMap();
       const dropdownIsOpen = !!domMap.activeDropdown;
       
-      // If dropdown is open and hint text matches a dropdown option, ONLY consider dropdown menu items
+      // If dropdown is open and hint text EXACTLY matches a dropdown option, let LLM handle selection
+      // CRITICAL FIX: Use EXACT match only - loose "includes" matching was causing "New" button
+      // to be skipped because options like "New Account" or "Renew" contain "new"
       if (dropdownIsOpen && hint.targetText && hint.actionType === 'click') {
-        const hintTextLower = hint.targetText.toLowerCase();
+        const hintTextLower = hint.targetText.toLowerCase().trim();
         const dropdownOptions = domMap.activeDropdown?.options || [];
-        const matchesDropdownOption = dropdownOptions.some(opt => 
-          (opt.text || opt.name || '').toLowerCase().includes(hintTextLower) ||
-          hintTextLower.includes((opt.text || opt.name || '').toLowerCase())
-        );
+        
+        // EXACT match only - the hint text must EQUAL an option text (normalized)
+        const matchesDropdownOption = dropdownOptions.some(opt => {
+          const optText = (opt.text || opt.name || '').toLowerCase().trim();
+          // Only match if texts are equal or very close (within 3 char difference for typos)
+          return optText === hintTextLower || 
+                 (optText.length > 5 && hintTextLower.length > 5 && 
+                  Math.abs(optText.length - hintTextLower.length) <= 3 &&
+                  (optText.startsWith(hintTextLower) || hintTextLower.startsWith(optText)));
+        });
         
         if (matchesDropdownOption) {
-          console.log('[Hybrid] ⚡ Confidence-based skip: Dropdown is open (let LLM select option)');
+          console.log(`[Hybrid] ⚡ Confidence-based skip: Dropdown option EXACTLY matches "${hint.targetText}" (let LLM select)`);
           return { executed: false, confidence: 50 };
+        } else {
+          console.log(`[Hybrid] 📋 Dropdown is open but "${hint.targetText}" doesn't exactly match any option - continuing hybrid path`);
         }
       }
 
@@ -1973,7 +2037,27 @@ export class AIAgent {
         // For shadow DOM elements, check widget title directly instead of distance
         const filtered: HTMLElement[] = [];
         
+        // CRITICAL: Get hint's target text for text-match override
+        const hintTargetText = (hint.targetText || '').toLowerCase().trim();
+        
         for (const c of candidates) {
+          // CRITICAL FIX: If candidate's text matches hint's targetText, ALWAYS include it
+          // This prevents filtering out buttons like "New" that are in the action bar
+          // (outside the scope widget) but are clearly what we're looking for
+          const candidateText = (c.textContent?.trim() || '').toLowerCase();
+          const candidateAriaLabel = (c.getAttribute('aria-label') || '').toLowerCase();
+          
+          if (hintTargetText.length > 0 && (
+            candidateText === hintTargetText ||
+            candidateText.includes(hintTargetText) ||
+            candidateAriaLabel === hintTargetText ||
+            candidateAriaLabel.includes(hintTargetText)
+          )) {
+            console.log(`[Hybrid] ✅ Candidate "${candidateText.substring(0, 30)}" matches hint targetText "${hintTargetText}" - including regardless of scope`);
+            filtered.push(c);
+            continue;
+          }
+          
           // Check if element is in a shadow root
           const rootNode = c.getRootNode();
           if (rootNode instanceof ShadowRoot) {
@@ -2029,6 +2113,55 @@ export class AIAgent {
           candidates.push(...filtered);
         } else {
           console.warn(`[Hybrid] ⚠️ Scope filter found no candidates within widget - keeping all ${candidates.length}`);
+        }
+      }
+      
+      // CRITICAL FIX: If 0 candidates found, wait for page to load and retry
+      // This handles dynamic pages like Salesforce Pipeline Inspection that load content async
+      if (candidates.length === 0 && hint.targetText) {
+        console.log(`[Hybrid] ⚠️ 0 candidates found for "${hint.targetText}" - page may still be loading, waiting...`);
+        
+        // Wait up to 3 seconds for the element to appear
+        const maxRetries = 6;
+        const retryDelay = 500;
+        
+        for (let retry = 1; retry <= maxRetries; retry++) {
+          await this.sleep(retryDelay);
+          
+          // Regenerate DOM map
+          const { generateDOMMap: refreshDOMMap } = await import('../content/dom-map');
+          const freshDomMap = refreshDOMMap();
+          console.log(`[Hybrid] 🔄 Retry ${retry}/${maxRetries}: DOM map has ${freshDomMap.interactiveElements.length} elements`);
+          
+          // Try to find by targetText directly in the fresh DOM map
+          const targetTextLower = hint.targetText.toLowerCase().trim();
+          for (const el of freshDomMap.interactiveElements) {
+            const elText = (el.text || el.name || '').toLowerCase().trim();
+            if (elText === targetTextLower || elText.includes(targetTextLower)) {
+              // Found a matching element - try to get the actual DOM element
+              // Use a simple query to find it
+              const possibleElements = document.querySelectorAll('button, a, [role="button"], div[title]');
+              for (const possibleEl of Array.from(possibleElements)) {
+                const possibleText = (possibleEl.textContent || '').trim().toLowerCase();
+                const possibleTitle = (possibleEl.getAttribute('title') || '').toLowerCase();
+                if (possibleText === targetTextLower || possibleTitle === targetTextLower) {
+                  console.log(`[Hybrid] ✅ Found "${hint.targetText}" after ${retry * retryDelay}ms wait`);
+                  candidates.push(possibleEl as HTMLElement);
+                  break;
+                }
+              }
+              if (candidates.length > 0) break;
+            }
+          }
+          
+          if (candidates.length > 0) {
+            console.log(`[Hybrid] ✅ Retry successful: found ${candidates.length} candidates`);
+            break;
+          }
+        }
+        
+        if (candidates.length === 0) {
+          console.log(`[Hybrid] ⚠️ Still 0 candidates after ${maxRetries * retryDelay}ms - element may not exist on this page`);
         }
       }
       
@@ -2153,7 +2286,28 @@ export class AIAgent {
       
       // Execute action
       if (hint.actionType === 'click') {
+        // For NAVIGATION steps, capture URL before click to verify navigation happened
+        const isNavigationStep = hint.description?.toLowerCase().includes('navigate') ||
+                                 hint.description?.toLowerCase().includes('go to') ||
+                                 hint.stepType === 'NAVIGATION';
+        const urlBefore = isNavigationStep ? window.location.href : null;
+        
         htmlElement.click();
+        
+        // For NAVIGATION steps, verify something changed (URL or modal appeared)
+        if (isNavigationStep) {
+          await this.sleep(500); // Wait for navigation to start
+          const urlAfter = window.location.href;
+          const modalAppeared = document.querySelector('[role="dialog"], .modal, .slds-modal, [aria-modal="true"]');
+          
+          if (urlAfter === urlBefore && !modalAppeared) {
+            console.warn(`[Hybrid] ⚠️ NAVIGATION step clicked but no URL change or modal detected`);
+            console.warn(`[Hybrid] ⚠️ URL before: ${urlBefore}`);
+            console.warn(`[Hybrid] ⚠️ URL after: ${urlAfter}`);
+            console.warn(`[Hybrid] ⚠️ Falling back to LLM for better element selection`);
+            return { executed: false, success: false, error: 'Navigation click had no effect', confidence };
+          }
+        }
       } else if (hint.actionType === 'type' && hint.value) {
         // For type actions, use Tier1Executor for robust typing
         const { Tier1Executor } = await import('./tier1-executor');

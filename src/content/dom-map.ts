@@ -665,17 +665,42 @@ function findActiveDropdown(): { triggerName?: string; options: DOMMapElement[] 
   const zIndex = parseInt(style.zIndex || '0', 10);
   const position = style.position;
   
-  // Truly open dropdowns are usually position:fixed/absolute with high z-index
-  // Skip static elements that are just part of the page layout
-  if (!isGoogleSheets && position === 'static' && zIndex < 100) {
-    // Check if it has aria-expanded="true" on its trigger
-    const triggerId = menu.getAttribute('aria-controls') || menu.getAttribute('id');
-    if (triggerId) {
-      const trigger = document.querySelector(`[aria-controls="${triggerId}"][aria-expanded="true"]`);
-      if (!trigger) return null; // No expanded trigger found, skip
-    } else {
-      return null; // No way to verify it's open, skip
+  // CRITICAL FIX: Always try to verify dropdown is actually OPEN using ARIA attributes
+  // Even positioned elements need verification - Salesforce Lightning has permanent nav menus
+  // that are positioned but NOT actual open dropdowns
+  const menuId = menu.getAttribute('id');
+  const menuAriaControls = menu.getAttribute('aria-controls');
+  
+  // Method 1: Check if menu itself has aria-expanded (some frameworks put it on the menu)
+  const menuExpanded = menu.getAttribute('aria-expanded');
+  if (menuExpanded === 'false') {
+    return null; // Menu explicitly says it's closed
+  }
+  
+  // Method 2: Check for a trigger that's expanded and controls this menu
+  const triggerId = menuAriaControls || menuId;
+  if (triggerId) {
+    const trigger = document.querySelector(`[aria-controls="${triggerId}"][aria-expanded="true"]`);
+    if (!trigger) {
+      // No expanded trigger - check if it's truly a floating overlay
+      // Only trust positioned elements with very high z-index AND recent appearance
+      if (position === 'static' || zIndex < 1000) {
+        return null; // Likely a permanent nav menu, not a dropdown
+      }
     }
+  } else if (position === 'static' && zIndex < 100) {
+    // No trigger ID and low z-index static element - definitely not a dropdown
+    return null;
+  }
+  
+  // Method 3: For Salesforce Lightning specifically, check for popover/dropdown classes
+  const isSalesforceNavMenu = menu.closest('.slds-global-header') || 
+                               menu.closest('.tabBarContainer') ||
+                               menu.closest('[class*="navItem"]') ||
+                               menu.closest('[class*="appLauncher"]');
+  if (isSalesforceNavMenu && !menu.closest('.slds-is-open')) {
+    console.log('[DOMMap] ⏭️ Skipping Salesforce nav menu (not .slds-is-open)');
+    return null;
   }
   
   // Extract menu items using universal selectors
@@ -696,7 +721,7 @@ function findActiveDropdown(): { triggerName?: string; options: DOMMapElement[] 
   
   // Try to find the trigger element (combobox/button that opened it)
   let triggerName: string | undefined;
-  const menuId = menu.getAttribute('id');
+  // Note: menuId already declared above
   if (menuId) {
     const trigger = document.querySelector(`[aria-controls="${menuId}"], [aria-owns="${menuId}"]`);
     if (trigger) {

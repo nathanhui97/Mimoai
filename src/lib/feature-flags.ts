@@ -84,6 +84,13 @@ export const FeatureFlags = {
    * Risk: None - prevents flaky execution
    */
   STABILITY_WAITS: true,
+  
+  /**
+   * Post-action observation for intelligent change detection
+   * Cost: Very Low (~5-15ms per action)
+   * Risk: None - isolated, wrapped in try-catch
+   */
+  POST_ACTION_OBSERVER: true,
 } as const;
 
 /**

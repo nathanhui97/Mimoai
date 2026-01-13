@@ -180,6 +180,8 @@ export class HintExtractor {
         recordedScrollX,
         // 📋 Decision space for dropdown validation/fallback
         decisionSpace,
+        // Store original step type for outcome verification (NAVIGATION, CLICK, INPUT, etc.)
+        stepType: step.type as AgentHint['stepType'],
       };
     });
   }

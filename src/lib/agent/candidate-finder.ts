@@ -38,11 +38,19 @@ export class CandidateFinder {
       const isDropdownOption = (el: DOMMapElement) => 
         el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio' || el.role === 'menuitemcheckbox';
       
-      // 🧠 SMART FILTERING: Only filter to dropdown options if hint is about selecting
-      // If hint is about typing, scrolling, or other actions, DON'T filter!
-      const hintIsAboutDropdownSelection = 
-        hint.actionType === 'click' || 
-        hint.actionType === 'other';  // Unknown action might be selection
+      // 🧠 SMART FILTERING: Only filter to dropdown options if hint ACTUALLY wants to select from this dropdown
+      // CRITICAL FIX: Check if hint's targetText matches any dropdown option!
+      // If hint says "Click New" but dropdown has "Home, Accounts, Cases...", DON'T filter to dropdown!
+      const hintTargetText = (hint.targetText || '').toLowerCase().trim();
+      const dropdownOptions = domMap.activeDropdown?.options || [];
+      const dropdownOptionTexts = dropdownOptions.map(opt => 
+        (opt.text || opt.name || '').toLowerCase().trim()
+      );
+      
+      // Check if hint target matches any dropdown option
+      const hintMatchesDropdownOption = hintTargetText.length > 0 && dropdownOptionTexts.some(optText => 
+        optText.includes(hintTargetText) || hintTargetText.includes(optText)
+      );
       
       const hintIsAboutTyping = hint.actionType === 'type';
       const hintIsAboutScrolling = hint.actionType === 'scroll';
@@ -50,18 +58,25 @@ export class CandidateFinder {
       
       if (hintIsAboutTyping || hintIsAboutScrolling || hintIsAboutNavigation) {
         // ⚠️ Hint is NOT about dropdown selection - include ALL elements
-        // Don't filter! The agent may need to close dropdown or type elsewhere
         console.log(`[CandidateFinder] 🔽 Dropdown is open BUT hint action is "${hint.actionType}" - including ALL ${allElements.length} elements`);
         console.log(`[CandidateFinder] 💡 Hint description: "${hint.description}"`);
-        console.log(`[CandidateFinder] 💡 The AI should handle closing dropdown or working around it`);
         // candidatePool stays as allElements
-      } else if (hintIsAboutDropdownSelection) {
-        // ✅ Hint IS about selection - filter to dropdown options only
+      } else if (hintMatchesDropdownOption) {
+        // ✅ Hint targetText MATCHES a dropdown option - filter to dropdown options only
         candidatePool = allElements.filter(isDropdownOption);
-        console.log(`[CandidateFinder] 🔽 Dropdown is open AND hint is about clicking/selecting - filtered to ${candidatePool.length} dropdown options ONLY (ignoring ${allElements.length - candidatePool.length} non-dropdown elements)`);
+        console.log(`[CandidateFinder] 🔽 Dropdown is open AND hint "${hintTargetText}" matches dropdown option - filtered to ${candidatePool.length} dropdown options ONLY`);
+      } else if (hintTargetText.length > 0) {
+        // ⚠️ Hint has targetText but it DOESN'T match any dropdown option!
+        // This means the hint wants something OUTSIDE the dropdown (like "New" button)
+        // Include ALL elements so the agent can find the actual target
+        console.log(`[CandidateFinder] 🔽 Dropdown is open BUT hint "${hintTargetText}" does NOT match any dropdown option`);
+        console.log(`[CandidateFinder] 💡 Dropdown options: ${dropdownOptionTexts.slice(0, 5).join(', ')}${dropdownOptionTexts.length > 5 ? '...' : ''}`);
+        console.log(`[CandidateFinder] 💡 Including ALL ${allElements.length} elements (hint target is outside dropdown)`);
+        // candidatePool stays as allElements - don't filter!
       } else {
-        // Unknown action type - be conservative and include all elements
-        console.log(`[CandidateFinder] 🔽 Dropdown is open with unknown hint action "${hint.actionType}" - including ALL ${allElements.length} elements to be safe`);
+        // No targetText - be conservative, might be selecting from dropdown
+        candidatePool = allElements.filter(isDropdownOption);
+        console.log(`[CandidateFinder] 🔽 Dropdown is open, no targetText in hint - filtered to ${candidatePool.length} dropdown options`);
       }
     } else if (hint.recordedScopeHint && !isMenuItem) {
       // 🎯 CRITICAL: Skip scope filtering for menu items - they're in portals/overlays
