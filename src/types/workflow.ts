@@ -421,6 +421,8 @@ export interface WorkflowStep {
   description?: string; // AI-generated natural language description
   /** Natural language translation for AI agent (added after recording stops) */
   naturalLanguage?: NaturalLanguageContext;
+  /** User annotation added during recording (for skill extraction) */
+  annotation?: import('../types/skill').StepAnnotation;
 }
 
 /**

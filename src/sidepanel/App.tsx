@@ -16,6 +16,9 @@ import { PreRecordingChat } from './PreRecordingChat';
 import { PostRecordingConfirm } from './PostRecordingConfirm';
 import { WorkflowDetails } from './WorkflowDetails';
 import { OptionConfirmationModal } from './OptionConfirmationModal';
+import { SkillsLibrary } from './SkillsLibrary';
+import { SkillBoundaryEditor } from './SkillBoundaryEditor';
+import { AnnotationInput } from './AnnotationInput';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep, SavedWorkflow, TeachingIntent, LearnedSkill } from '../types/workflow';
@@ -33,6 +36,9 @@ import type {
 } from '../types/messages';
 import type { CorrectionEntry } from '../types/visual';
 import type { SafetyDecision } from '../types/ai';
+import type { StepAnnotation, SuggestedSkill, SkillDefinition } from '../types/skill';
+import { analyzeWorkflowForSkills } from '../lib/skill-extractor';
+import { SkillStorage } from '../lib/skill-storage';
 
 function App() {
   const { 
@@ -139,6 +145,16 @@ function App() {
 
   // Workflow details view state
   const [selectedWorkflow, setSelectedWorkflow] = useState<SavedWorkflow | null>(null);
+
+  // Skills system state
+  const [showSkillsLibrary, setShowSkillsLibrary] = useState(false);
+  const [showSkillBoundaryEditor, setShowSkillBoundaryEditor] = useState(false);
+  const [pendingSkillExtraction, setPendingSkillExtraction] = useState<{
+    workflow: SavedWorkflow;
+    suggestedSkills: SuggestedSkill[];
+  } | null>(null);
+  // Recording annotations - used by AnnotationInput during recording
+  const [recordingAnnotations, setRecordingAnnotations] = useState<StepAnnotation[]>([]);
 
   // Ping content script on mount
   useEffect(() => {
@@ -1311,6 +1327,64 @@ function App() {
   };
 
   /**
+   * Handle annotation added during recording
+   */
+  const handleAnnotation = (annotation: StepAnnotation) => {
+    setRecordingAnnotations(prev => [...prev, annotation]);
+    console.log('[App] Annotation added:', annotation.text, 'for step', annotation.attachedToStepIndex);
+  };
+
+  /**
+   * Extract skills from a workflow
+   * Can be called from WorkflowDetails to extract skills from a saved workflow
+   */
+  const handleExtractSkills = async (workflow: SavedWorkflow) => {
+    try {
+      setLearningFeedback('Analyzing workflow for skills...');
+
+      // Get annotations if any (from the workflow steps)
+      const annotations = workflow.steps
+        .filter(step => step.annotation)
+        .map(step => step.annotation!);
+
+      const result = await analyzeWorkflowForSkills(workflow, annotations);
+
+      if (result.skills.length > 0) {
+        setPendingSkillExtraction({
+          workflow,
+          suggestedSkills: result.skills,
+        });
+        setShowSkillBoundaryEditor(true);
+        setLearningFeedback(null);
+      } else {
+        setLearningFeedback('No extractable skills found in this workflow');
+        setTimeout(() => setLearningFeedback(null), 3000);
+      }
+    } catch (error) {
+      console.error('[App] Failed to extract skills:', error);
+      setLearningFeedback('Failed to analyze workflow for skills');
+      setTimeout(() => setLearningFeedback(null), 3000);
+    }
+  };
+
+  /**
+   * Save extracted skills to library
+   */
+  const handleSaveSkills = async (skills: SkillDefinition[]) => {
+    try {
+      await SkillStorage.saveSkills(skills);
+      setShowSkillBoundaryEditor(false);
+      setPendingSkillExtraction(null);
+      setLearningFeedback(`${skills.length} skill(s) saved to library`);
+      setTimeout(() => setLearningFeedback(null), 3000);
+    } catch (error) {
+      console.error('[App] Failed to save skills:', error);
+      setLearningFeedback('Failed to save skills');
+      setTimeout(() => setLearningFeedback(null), 3000);
+    }
+  };
+
+  /**
    * Execute workflow with optional variable values
    * Uses AI Agent with fast-path DOM execution for best reliability
    */
@@ -1758,6 +1832,15 @@ function App() {
             <div className="flex items-center gap-2">
               <OpenWorkWindowButton variant="icon" />
               <button
+                onClick={() => setShowSkillsLibrary(true)}
+                className="p-2 text-muted-foreground hover:text-foreground transition-colors"
+                title="Skills Library"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                </svg>
+              </button>
+              <button
                 onClick={() => setShowSettings(true)}
                 className="p-2 text-muted-foreground hover:text-foreground transition-colors"
                 title="Settings"
@@ -1818,6 +1901,14 @@ function App() {
               </button>
             </div>
           )}
+
+          {/* Annotation Input during Recording */}
+          <AnnotationInput
+            isRecording={isRecording}
+            currentStepIndex={workflowSteps.length - 1}
+            annotations={recordingAnnotations}
+            onAnnotation={handleAnnotation}
+          />
           
           {/* Workflow Details View - Hide during execution */}
           {selectedWorkflow && !isRecording && workflowSteps.length === 0 && teachingMode === 'idle' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
@@ -1830,6 +1921,7 @@ function App() {
                 await handleDeleteWorkflow(selectedWorkflow.id);
                 setSelectedWorkflow(null);
               }}
+              onExtractSkills={() => handleExtractSkills(selectedWorkflow)}
               onSave={handleSaveWorkflowEdits}
               isExecuting={isExecuting}
             />
@@ -2193,6 +2285,26 @@ function App() {
             handleExportJSON={handleExportJSON}
             clearWorkflowSteps={clearWorkflowSteps}
             onClose={() => setShowSettings(false)}
+          />
+        )}
+
+        {/* Skills Library Modal */}
+        {showSkillsLibrary && (
+          <SkillsLibrary
+            onClose={() => setShowSkillsLibrary(false)}
+          />
+        )}
+
+        {/* Skill Boundary Editor Modal */}
+        {showSkillBoundaryEditor && pendingSkillExtraction && (
+          <SkillBoundaryEditor
+            workflow={pendingSkillExtraction.workflow}
+            suggestedSkills={pendingSkillExtraction.suggestedSkills}
+            onSave={handleSaveSkills}
+            onCancel={() => {
+              setShowSkillBoundaryEditor(false);
+              setPendingSkillExtraction(null);
+            }}
           />
         )}
         </div>

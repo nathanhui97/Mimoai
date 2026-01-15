@@ -8,6 +8,7 @@ interface WorkflowDetailsProps {
   onBack: () => void;
   onExport: () => void;
   onDelete: () => void;
+  onExtractSkills: () => void;
   onSave: (updatedWorkflow: SavedWorkflow) => void;
   isExecuting: boolean;
 }
@@ -18,6 +19,7 @@ export function WorkflowDetails({
   onBack,
   onExport,
   onDelete,
+  onExtractSkills,
   onSave,
   isExecuting,
 }: WorkflowDetailsProps) {
@@ -289,6 +291,15 @@ export function WorkflowDetails({
           className="w-full px-5 py-4 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
         >
           {isExecuting ? 'Running...' : hasChanges ? 'Save changes to run' : 'Run this workflow'}
+        </button>
+
+        <button
+          onClick={onExtractSkills}
+          disabled={isExecuting}
+          className="w-full px-4 py-3 bg-blue-50 text-blue-600 border border-blue-200 rounded-xl font-medium hover:bg-blue-100 active:scale-[0.98] disabled:opacity-50 transition-all duration-200"
+          title="Extract reusable skills from this workflow"
+        >
+          Extract Skills
         </button>
 
         <div className="flex gap-3">
