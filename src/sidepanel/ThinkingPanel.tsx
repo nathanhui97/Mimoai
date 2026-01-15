@@ -35,111 +35,166 @@ export function ThinkingPanel({
   onResume,
   onDismiss,
 }: ThinkingPanelProps) {
-  const [dots, setDots] = useState('');
+  const [elapsedTime, setElapsedTime] = useState(0);
 
-  // Animate dots for "thinking" effect
+  // Timer for elapsed time
   useEffect(() => {
     if (!isRunning) return;
+    const startTime = Date.now() - (elapsedTime * 1000);
     const interval = setInterval(() => {
-      setDots(d => d.length >= 3 ? '' : d + '.');
-    }, 400);
+      setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
+    }, 1000);
     return () => clearInterval(interval);
   }, [isRunning]);
+
+  // Reset timer when starting fresh
+  useEffect(() => {
+    if (events.length === 0) {
+      setElapsedTime(0);
+    }
+  }, [events.length]);
 
   // Calculate progress
   const completedSteps = currentStep.index;
   const totalSteps = currentStep.total;
   const progressPercent = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
 
-  // Get AI status message from latest event
-  const getAIStatus = () => {
+  // Format elapsed time
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+  };
+
+  // Get current action details
+  const getCurrentAction = () => {
     const lastEvent = events[events.length - 1];
-    if (!lastEvent) return isRunning ? 'Starting' : 'Ready';
+    if (!lastEvent) return { status: 'Initializing', detail: 'Preparing to start...' };
 
     switch (lastEvent.type) {
       case 'observe':
-        return 'Analyzing page';
+        return { status: 'Observing', detail: 'Analyzing page structure...' };
       case 'decide':
         if (lastEvent.decision?.targetDescription) {
-          const action = lastEvent.decision.action || 'Planning';
-          const target = lastEvent.decision.targetDescription;
-          // Truncate long descriptions
-          const shortTarget = target.length > 30 ? target.substring(0, 30) + '...' : target;
-          return `${action}: ${shortTarget}`;
+          return {
+            status: lastEvent.decision.action || 'Planning',
+            detail: lastEvent.decision.targetDescription
+          };
         }
-        return 'Deciding next action';
+        return { status: 'Deciding', detail: 'Determining next action...' };
       case 'act':
-        return lastEvent.result?.success ? 'Action completed' : 'Retrying';
+        return {
+          status: lastEvent.result?.success ? 'Completed' : 'Retrying',
+          detail: lastEvent.result?.success ? 'Action successful' : 'Attempting again...'
+        };
       case 'complete':
-        return 'Workflow completed!';
+        return { status: 'Finished', detail: 'All steps completed successfully' };
       default:
-        return 'Working';
+        return { status: 'Processing', detail: 'Working...' };
     }
   };
 
   const isComplete = events.some(e => e.type === 'complete');
+  const action = getCurrentAction();
+
+  // Get recent activity log (last 3 events)
+  const recentEvents = events.slice(-4).reverse();
 
   return (
-    <div className="mb-6 animate-fade-in">
-      {/* Main Card */}
-      <div className="p-6 bg-gradient-to-br from-orange-50 via-amber-50 to-yellow-50 rounded-3xl border border-orange-100/60 shadow-soft-lg">
-        {/* AI Brain Header */}
-        <div className="flex items-center justify-center mb-6">
-          <div className="relative">
-            {/* Outer glow ring */}
-            {isRunning && (
-              <div className="absolute inset-0 w-16 h-16 rounded-full bg-orange-400/20 animate-ping" />
-            )}
-            {/* Brain icon container */}
-            <div className={`relative w-16 h-16 rounded-2xl flex items-center justify-center ${
-              isComplete
-                ? 'bg-green-100'
-                : isRunning
-                  ? 'bg-orange-100'
-                  : isStopped
-                    ? 'bg-amber-100'
-                    : 'bg-gray-100'
-            }`}>
-              {isComplete ? (
-                <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                </svg>
-              ) : (
-                <svg className={`w-8 h-8 ${isRunning ? 'text-orange-600' : isStopped ? 'text-amber-600' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
-              )}
-            </div>
-          </div>
+    <div className="flex flex-col min-h-[400px] animate-fade-in">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-3">
+          {/* Status indicator */}
+          <div className={`w-2.5 h-2.5 rounded-full ${
+            isComplete ? 'bg-green-500' :
+            isStopped ? 'bg-amber-500' :
+            isRunning ? 'bg-primary animate-pulse' : 'bg-gray-300'
+          }`} />
+          <span className="text-sm font-medium text-muted-foreground">
+            {isComplete ? 'Completed' : isStopped ? 'Paused' : isRunning ? 'Running' : 'Ready'}
+          </span>
         </div>
+        {totalSteps > 0 && (
+          <span className="text-sm text-muted-foreground">
+            Step {Math.min(completedSteps + 1, totalSteps)} of {totalSteps}
+          </span>
+        )}
+      </div>
 
-        {/* Status Text */}
-        <div className="text-center mb-6">
-          <p className={`text-base font-semibold tracking-tight ${isComplete ? 'text-green-600' : isStopped ? 'text-amber-600' : 'text-orange-600'}`}>
-            {isComplete ? 'Completed!' : isStopped ? 'Paused' : getAIStatus()}{isRunning && !isComplete && dots}
+      {/* Main Status */}
+      <div className="flex-1 flex flex-col justify-center py-8">
+        {/* Current Action */}
+        <div className="text-center mb-8">
+          <h2 className={`text-2xl font-semibold tracking-tight mb-2 ${
+            isComplete ? 'text-green-600' : 'text-foreground'
+          }`}>
+            {action.status}
+          </h2>
+          <p className="text-muted-foreground text-sm max-w-[280px] mx-auto line-clamp-2">
+            {action.detail}
           </p>
         </div>
 
-        {/* Progress Bar */}
-        <div className="mb-6">
-          <div className="h-2.5 bg-white/60 rounded-full overflow-hidden shadow-inner">
+        {/* Progress Section */}
+        <div className="mb-8">
+          <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
+            <span>{progressPercent}% complete</span>
+            <span>{formatTime(elapsedTime)}</span>
+          </div>
+          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
             <div
-              className={`h-full transition-all duration-700 ease-out rounded-full ${
-                isComplete ? 'bg-gradient-to-r from-green-400 to-emerald-500' : 'bg-gradient-to-r from-orange-400 to-amber-500'
+              className={`h-full transition-all duration-500 ease-out rounded-full ${
+                isComplete ? 'bg-green-500' : 'bg-primary'
               }`}
-              style={{ width: `${progressPercent}%` }}
+              style={{ width: `${Math.max(progressPercent, 2)}%` }}
             />
           </div>
         </div>
 
-        {/* Action Buttons */}
+        {/* Activity Log */}
+        {recentEvents.length > 0 && (
+          <div className="mb-6">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
+              Recent Activity
+            </h3>
+            <div className="space-y-2">
+              {recentEvents.map((event, i) => (
+                <div
+                  key={i}
+                  className={`flex items-start gap-3 text-sm py-2 px-3 rounded-lg ${
+                    i === 0 ? 'bg-muted/50' : ''
+                  }`}
+                >
+                  <div className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${
+                    event.type === 'complete' ? 'bg-green-500' :
+                    event.type === 'act' && event.result?.success === false ? 'bg-red-400' :
+                    i === 0 ? 'bg-primary' : 'bg-muted-foreground/40'
+                  }`} />
+                  <span className={`${i === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
+                    {event.type === 'observe' && 'Analyzed page'}
+                    {event.type === 'decide' && (event.decision?.targetDescription
+                      ? `${event.decision.action}: ${event.decision.targetDescription.slice(0, 40)}${event.decision.targetDescription.length > 40 ? '...' : ''}`
+                      : 'Planned next action')}
+                    {event.type === 'act' && (event.result?.success ? 'Action completed' : 'Action failed, retrying')}
+                    {event.type === 'complete' && 'Workflow finished'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Action Buttons */}
+      <div className="mt-auto space-y-3">
         <div className="flex items-center gap-3">
           <OpenWorkWindowButton variant="secondary" />
 
           {isRunning && onStop && (
             <button
               onClick={onStop}
-              className="flex-1 py-3.5 px-5 bg-red-500 text-white rounded-xl font-semibold hover:bg-red-600 active:scale-[0.98] shadow-soft transition-all duration-200"
+              className="flex-1 py-3.5 px-5 bg-muted text-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
             >
               Stop
             </button>
@@ -148,7 +203,7 @@ export function ThinkingPanel({
           {isStopped && onResume && pauseReason !== 'agent_needs_help' && (
             <button
               onClick={() => onResume()}
-              className="flex-1 py-3.5 px-5 bg-green-500 text-white rounded-xl font-semibold hover:bg-green-600 active:scale-[0.98] shadow-soft transition-all duration-200"
+              className="flex-1 py-3.5 px-5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               Resume
             </button>
@@ -157,7 +212,7 @@ export function ThinkingPanel({
           {!isRunning && !isStopped && onDismiss && (
             <button
               onClick={onDismiss}
-              className="flex-1 py-3.5 px-5 bg-primary text-white rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
+              className="flex-1 py-3.5 px-5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               Done
             </button>
@@ -167,7 +222,7 @@ export function ThinkingPanel({
 
       {/* Human Help Request - Only show when agent needs help */}
       {pauseReason === 'agent_needs_help' && helpContext && (
-        <div className="mt-4 p-5 bg-amber-50/80 border border-amber-200/60 rounded-2xl animate-fade-in">
+        <div className="mt-6 p-5 bg-amber-50/80 border border-amber-200/60 rounded-2xl animate-fade-in">
           <div className="flex items-start gap-3 mb-4">
             <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0">
               <svg className="h-5 w-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
