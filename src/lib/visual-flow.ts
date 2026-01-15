@@ -31,7 +31,7 @@ export class VisualFlowTracker {
     try {
       this.isCapturing = true;
       
-      const fullPage = await VisualSnapshotService.captureFullPage(0.6);
+      const fullPage = await VisualSnapshotService.captureFullPage(0.6, true);
       if (fullPage) {
         this.beforeState = {
           screenshot: fullPage.screenshot,
@@ -51,7 +51,7 @@ export class VisualFlowTracker {
    */
   async captureAfterState(): Promise<void> {
     try {
-      const fullPage = await VisualSnapshotService.captureFullPage(0.6);
+      const fullPage = await VisualSnapshotService.captureFullPage(0.6, true);
       if (fullPage) {
         this.afterState = {
           screenshot: fullPage.screenshot,

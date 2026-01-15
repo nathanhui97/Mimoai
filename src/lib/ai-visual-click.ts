@@ -411,8 +411,8 @@ export class AIVisualClickService {
     };
 
     try {
-      // Capture full viewport
-      const fullPage = await VisualSnapshotService.captureFullPage(0.8);
+      // Capture full viewport (skipZoom=true to avoid flashing during execution)
+      const fullPage = await VisualSnapshotService.captureFullPage(0.8, true);
       if (fullPage) {
         result.fullViewport = fullPage.screenshot;
       }

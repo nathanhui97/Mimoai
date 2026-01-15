@@ -64,7 +64,7 @@ export class VisualWait {
 
     while (Date.now() - startTime < timeout) {
       try {
-        const fullPage = await VisualSnapshotService.captureFullPage(0.5);
+        const fullPage = await VisualSnapshotService.captureFullPage(0.5, true);
         if (!fullPage) {
           await this.sleep(pollInterval);
           continue;
@@ -283,7 +283,7 @@ export class VisualWait {
 
     while (Date.now() - startTime < timeout) {
       try {
-        const fullPage = await VisualSnapshotService.captureFullPage(0.3);
+        const fullPage = await VisualSnapshotService.captureFullPage(0.3, true);
         if (!fullPage) {
           await this.sleep(pollInterval);
           continue;

@@ -42,7 +42,8 @@ export class VisualAnalysisService {
       // Capture screenshot if not provided
       let pageScreenshot = screenshot;
       if (!pageScreenshot) {
-        const fullPage = await VisualSnapshotService.captureFullPage();
+        // skipZoom=true to avoid zoom flashing during execution
+        const fullPage = await VisualSnapshotService.captureFullPage(0.7, true);
         if (!fullPage) {
           console.warn('🔍 GhostWriter: Could not capture page screenshot');
           return null;

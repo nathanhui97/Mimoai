@@ -40,11 +40,6 @@ export class HintExtractor {
       }
     }
     
-    // Surface additional instructions as system context
-    if (workflow.additionalInstructions) {
-      goal += `\n\nIMPORTANT USER INSTRUCTIONS:\n${workflow.additionalInstructions}`;
-    }
-    
     return goal;
   }
 

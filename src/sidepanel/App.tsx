@@ -1178,9 +1178,12 @@ function App() {
       setCurrentWorkflowName(workflow.name);
       setShowSaveDialog(false);
       setWorkflowName('');
-      
-      // Clear workflow steps to return to home screen
+
+      // Clear workflow steps and reset teaching mode to return to home screen
       clearWorkflowSteps();
+      setTeachingMode('idle');
+      setTeachingIntent(null);
+      setPendingLearnedSkill(null);
       
       // Extract site knowledge from workflow (async, non-blocking)
       SiteKnowledgeBase.learnFromWorkflow(workflow).catch(err => {
@@ -1813,78 +1816,71 @@ function App() {
               {/* Task Cards */}
               {savedWorkflows.length > 0 && (
                 <div className="mb-4">
-                  <div className="space-y-2 mb-2">
+                  <div className="space-y-2 mb-3">
                     {savedWorkflows.map((workflow) => (
                       <button
                         key={workflow.id}
                         onClick={() => handleTaskSelect(workflow)}
+                        onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
                         disabled={isExecuting}
-                        className="w-full text-left p-4 bg-card border border-border rounded-lg hover:border-primary/50 hover:bg-card/80 transition-colors disabled:opacity-50 disabled:cursor-not-allowed group"
+                        className="w-full text-left p-4 bg-card border border-border rounded-xl hover:border-primary/40 hover:shadow-md transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed group"
                       >
-                        <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center justify-between gap-3">
                           <div className="flex-1 min-w-0">
-                            <h3 className="font-medium text-foreground mb-1 group-hover:text-primary transition-colors">
+                            <h3 className="font-medium text-foreground group-hover:text-primary transition-colors">
                               {workflow.name}
                             </h3>
                             {workflow.description && (
-                              <p className="text-sm text-muted-foreground line-clamp-2">
+                              <p className="text-sm text-muted-foreground mt-0.5 line-clamp-1">
                                 {workflow.description}
                               </p>
                             )}
-                            <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
-                              <span>{workflow.steps.length} steps</span>
-                              {workflow.variables && workflow.variables.variables.length > 0 && (
-                                <span>• {workflow.variables.variables.length} variables</span>
-                              )}
-                            </div>
                           </div>
-                          <svg className="w-5 h-5 text-muted-foreground group-hover:text-primary transition-colors flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <svg className="w-5 h-5 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all duration-200 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                           </svg>
                         </div>
                       </button>
                     ))}
                   </div>
-                  
-                  {/* Teach New Task Buttons */}
-                  <div className="flex gap-2">
-                    <button
-                      onClick={handleTeachMeClick}
-                      disabled={state === 'CONNECTING'}
-                      className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50"
-                    >
+
+                  {/* Teach New Task Button */}
+                  <button
+                    onClick={handleTeachMeClick}
+                    onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
+                    disabled={state === 'CONNECTING'}
+                    className="w-full px-4 py-3 bg-primary/10 text-primary border border-primary/20 rounded-xl text-sm font-medium hover:bg-primary/20 transition-all duration-200 disabled:opacity-50"
+                    title="Right-click for quick record"
+                  >
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                      </svg>
                       Teach me something new
-                    </button>
-                    <button
-                      onClick={handleQuickRecordClick}
-                      disabled={state === 'CONNECTING'}
-                      className="px-4 py-2 bg-background border border-border rounded-md text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50"
-                      title="Quick record without conversation"
-                    >
-                      Quick
-                    </button>
-                  </div>
+                    </span>
+                  </button>
                 </div>
               )}
-              
+
               {/* No tasks state */}
               {savedWorkflows.length === 0 && (
-                <div className="p-6 text-center text-sm text-muted-foreground border-2 border-dashed border-border rounded-lg mb-4">
-                  <p className="mb-3">You haven't taught me any tasks yet.</p>
-                  <div className="flex flex-col gap-2">
-                    <button
-                      onClick={handleTeachMeClick}
-                      className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
-                    >
-                      Teach me something new
-                    </button>
-                    <button
-                      onClick={handleQuickRecordClick}
-                      className="text-xs text-muted-foreground hover:text-foreground"
-                    >
-                      or quick record
-                    </button>
+                <div className="py-12 text-center">
+                  <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-primary/10 flex items-center justify-center">
+                    <svg className="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
                   </div>
+                  <p className="text-muted-foreground mb-4">
+                    No tasks yet. Teach me what you'd like automated.
+                  </p>
+                  <button
+                    onClick={handleTeachMeClick}
+                    onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
+                    className="px-6 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:bg-primary/90 transition-all duration-200"
+                    title="Right-click for quick record"
+                  >
+                    Teach me something new
+                  </button>
                 </div>
               )}
             </div>

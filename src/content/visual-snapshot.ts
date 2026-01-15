@@ -423,10 +423,13 @@ export class VisualSnapshotService {
    * Uses compression to keep size manageable while preserving visual clarity
    * Note: For spreadsheets, page is refreshed before recording starts, so headers are visible
    * For spreadsheets, zooms out to 33% to capture more columns, then restores original zoom
+   * @param quality - JPEG quality (0-1)
+   * @param skipZoom - If true, skip zoom manipulation (use during execution to avoid flashing)
    */
-  static async captureFullPage(quality: number = 0.7): Promise<FullPageResult | null> {
+  static async captureFullPage(quality: number = 0.7, skipZoom: boolean = false): Promise<FullPageResult | null> {
     // CRITICAL: Only apply zoom for spreadsheets (Google Sheets/Excel)
-    const isSpreadsheet = this.isSpreadsheetDomain();
+    // Skip zoom if explicitly requested (e.g., during execution)
+    const isSpreadsheet = this.isSpreadsheetDomain() && !skipZoom;
     let originalZoom = 1.0;
 
     try {
@@ -529,8 +532,8 @@ export class VisualSnapshotService {
     captures: RegionCapture[];
   } | null> {
     try {
-      // First capture full page
-      const fullPage = await this.captureFullPage(0.8);
+      // First capture full page (skipZoom for execution)
+      const fullPage = await this.captureFullPage(0.8, true);
       if (!fullPage) {
         return null;
       }
@@ -577,7 +580,8 @@ export class VisualSnapshotService {
    */
   static async captureRegion(box: BoundingBox, padding: number = 20): Promise<string | null> {
     try {
-      const fullPage = await this.captureFullPage();
+      // skipZoom for execution
+      const fullPage = await this.captureFullPage(0.7, true);
       if (!fullPage) {
         return null;
       }
@@ -594,10 +598,10 @@ export class VisualSnapshotService {
    */
   static async captureElements(elements: Element[]): Promise<Map<Element, string>> {
     const results = new Map<Element, string>();
-    
+
     try {
-      // Get single full page screenshot
-      const fullPage = await this.captureFullPage();
+      // Get single full page screenshot (skipZoom for execution)
+      const fullPage = await this.captureFullPage(0.7, true);
       if (!fullPage) {
         return results;
       }
@@ -1141,8 +1145,8 @@ export class VisualSnapshotService {
     };
 
     try {
-      // 1. Capture full viewport
-      const fullPage = await this.captureFullPage(0.8);
+      // 1. Capture full viewport (skipZoom for execution)
+      const fullPage = await this.captureFullPage(0.8, true);
       if (fullPage) {
         result.fullViewport = fullPage.screenshot;
       } else {
@@ -1205,8 +1209,8 @@ export class VisualSnapshotService {
     zoomLevel: number = 2
   ): Promise<string | null> {
     try {
-      // First get the full page screenshot
-      const fullPage = await this.captureFullPage();
+      // First get the full page screenshot (skipZoom for execution)
+      const fullPage = await this.captureFullPage(0.7, true);
       if (!fullPage) {
         return null;
       }
@@ -1325,7 +1329,8 @@ export class VisualSnapshotService {
     similarity: number;
     currentScreenshot: string | null;
   }> {
-    const current = await this.captureFullPage();
+    // skipZoom for execution
+    const current = await this.captureFullPage(0.7, true);
     if (!current) {
       return { similarity: 0, currentScreenshot: null };
     }

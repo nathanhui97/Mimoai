@@ -24,20 +24,18 @@ export function WorkflowDetails({
   // Editing state
   const [editingName, setEditingName] = useState(false);
   const [editingDescription, setEditingDescription] = useState(false);
-  const [editingInstructions, setEditingInstructions] = useState(false);
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
-  
+  const [showSteps, setShowSteps] = useState(false);
+
   // Temporary edit values
   const [editedName, setEditedName] = useState(workflow.name);
   const [editedDescription, setEditedDescription] = useState(workflow.description || '');
-  const [editedInstructions, setEditedInstructions] = useState(workflow.additionalInstructions || '');
   const [editedSteps, setEditedSteps] = useState<Map<number, string>>(new Map());
-  
+
   // Track if there are unsaved changes
-  const hasChanges = 
+  const hasChanges =
     editedName !== workflow.name ||
     editedDescription !== (workflow.description || '') ||
-    editedInstructions !== (workflow.additionalInstructions || '') ||
     editedSteps.size > 0;
   
   const handleSave = () => {
@@ -66,30 +64,26 @@ export function WorkflowDetails({
       ...workflow,
       name: editedName,
       description: editedDescription || undefined,
-      additionalInstructions: editedInstructions || undefined,
       steps: updatedSteps,
       updatedAt: Date.now(),
     };
-    
+
     onSave(updatedWorkflow);
-    
+
     // Clear editing state
     setEditingName(false);
     setEditingDescription(false);
-    setEditingInstructions(false);
     setEditingStepIndex(null);
     setEditedSteps(new Map());
   };
-  
+
   const handleCancel = () => {
     // Reset to original values
     setEditedName(workflow.name);
     setEditedDescription(workflow.description || '');
-    setEditedInstructions(workflow.additionalInstructions || '');
     setEditedSteps(new Map());
     setEditingName(false);
     setEditingDescription(false);
-    setEditingInstructions(false);
     setEditingStepIndex(null);
   };
   
@@ -207,137 +201,82 @@ export function WorkflowDetails({
         )}
       </div>
 
-      {/* Additional Instructions - NEW */}
-      <div className="mb-4 p-4 bg-amber-50 dark:bg-amber-900/20 rounded-lg border border-amber-200 dark:border-amber-700">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-medium text-amber-900 dark:text-amber-100">Additional Instructions</h3>
-            <span className="text-xs text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/50 px-2 py-0.5 rounded">
-              AI will see this
-            </span>
-          </div>
-          {!editingInstructions && (
-            <button
-              onClick={() => setEditingInstructions(true)}
-              className="p-1 text-amber-600 dark:text-amber-400 hover:text-amber-900 dark:hover:text-amber-100 transition-colors"
-              title="Edit instructions"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-              </svg>
-            </button>
-          )}
-        </div>
-        {editingInstructions ? (
-          <textarea
-            value={editedInstructions}
-            onChange={(e) => setEditedInstructions(e.target.value)}
-            onBlur={() => setEditingInstructions(false)}
-            className="w-full text-sm text-foreground bg-background border border-amber-300 dark:border-amber-600 rounded px-2 py-1 min-h-[80px]"
-            autoFocus
-            placeholder="Add tips, edge cases, or context for the AI (e.g., 'Always wait 2 seconds after clicking Submit')"
-          />
-        ) : (
-          <p className="text-sm text-amber-800 dark:text-amber-200">
-            {editedInstructions || 'No additional instructions - click to add tips for the AI'}
-          </p>
-        )}
-      </div>
+      {/* Steps list - collapsible */}
+      <div className="mb-4">
+        <button
+          onClick={() => setShowSteps(!showSteps)}
+          className="w-full flex items-center justify-between p-3 bg-muted/50 rounded-lg border border-border hover:bg-muted/70 transition-colors"
+        >
+          <span className="text-sm font-medium text-foreground">
+            {workflow.steps.length} steps
+          </span>
+          <svg
+            className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${showSteps ? 'rotate-180' : ''}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
 
-      {/* Steps list */}
-      <div className="mb-4 p-4 bg-card rounded-lg border border-border">
-        <h3 className="text-sm font-medium text-foreground mb-3">
-          Steps ({workflow.steps.length})
-        </h3>
-        <div className="space-y-2 max-h-[400px] overflow-y-auto">
-          {workflow.steps.map((step, index) => {
-            const isEditing = editingStepIndex === index;
-            const currentDescription = editedSteps.get(index) ?? getHumanDescription(step);
-            
-            return (
-              <div 
-                key={index} 
-                className="py-2 px-3 bg-muted/30 rounded border border-border/50 text-sm flex items-start gap-2"
-              >
-                <span className="text-muted-foreground flex-shrink-0 font-medium">
-                  {index + 1}.
-                </span>
-                {isEditing ? (
-                  <input
-                    type="text"
-                    value={currentDescription}
-                    onChange={(e) => {
-                      const newMap = new Map(editedSteps);
-                      newMap.set(index, e.target.value);
-                      setEditedSteps(newMap);
-                    }}
-                    onBlur={() => setEditingStepIndex(null)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') setEditingStepIndex(null);
-                      if (e.key === 'Escape') {
-                        const newMap = new Map(editedSteps);
-                        newMap.delete(index);
-                        setEditedSteps(newMap);
-                        setEditingStepIndex(null);
-                      }
-                    }}
-                    className="flex-1 text-foreground bg-background border border-border rounded px-2 py-1"
-                    autoFocus
-                  />
-                ) : (
-                  <span className="flex-1 text-foreground">
-                    {currentDescription}
+        {showSteps && (
+          <div className="mt-2 p-3 bg-card rounded-lg border border-border space-y-2 max-h-[300px] overflow-y-auto">
+            {workflow.steps.map((step, index) => {
+              const isEditing = editingStepIndex === index;
+              const currentDescription = editedSteps.get(index) ?? getHumanDescription(step);
+
+              return (
+                <div
+                  key={index}
+                  className="py-2 px-3 bg-muted/30 rounded border border-border/50 text-sm flex items-start gap-2"
+                >
+                  <span className="text-muted-foreground flex-shrink-0 font-medium">
+                    {index + 1}.
                   </span>
-                )}
-                {!isEditing && (
-                  <button
-                    onClick={() => setEditingStepIndex(index)}
-                    className="p-1 text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
-                    title="Edit step description"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Variables info if present */}
-      {workflow.variables && workflow.variables.variables.length > 0 && (
-        <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-700">
-          <h3 className="text-sm font-medium text-blue-900 dark:text-blue-100 mb-2">
-            Variables ({workflow.variables.variables.length})
-          </h3>
-          <div className="space-y-1">
-            {workflow.variables.variables.map((variable, index) => (
-              <div key={index} className="text-sm text-blue-800 dark:text-blue-200">
-                • {variable.variableName || variable.fieldName}
-              </div>
-            ))}
+                  {isEditing ? (
+                    <input
+                      type="text"
+                      value={currentDescription}
+                      onChange={(e) => {
+                        const newMap = new Map(editedSteps);
+                        newMap.set(index, e.target.value);
+                        setEditedSteps(newMap);
+                      }}
+                      onBlur={() => setEditingStepIndex(null)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') setEditingStepIndex(null);
+                        if (e.key === 'Escape') {
+                          const newMap = new Map(editedSteps);
+                          newMap.delete(index);
+                          setEditedSteps(newMap);
+                          setEditingStepIndex(null);
+                        }
+                      }}
+                      className="flex-1 text-foreground bg-background border border-border rounded px-2 py-1"
+                      autoFocus
+                    />
+                  ) : (
+                    <span className="flex-1 text-foreground">
+                      {currentDescription}
+                    </span>
+                  )}
+                  {!isEditing && (
+                    <button
+                      onClick={() => setEditingStepIndex(index)}
+                      className="p-1 text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
+                      title="Edit step description"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
-          <p className="text-xs text-blue-600 dark:text-blue-300 mt-2">
-            You'll be prompted to provide values when you run this workflow
-          </p>
-        </div>
-      )}
-
-      {/* Metadata */}
-      <div className="mb-4 p-3 bg-muted/30 rounded border border-border">
-        <div className="text-xs text-muted-foreground space-y-1">
-          <div>Created: {new Date(workflow.createdAt).toLocaleString()}</div>
-          {workflow.updatedAt !== workflow.createdAt && (
-            <div>Updated: {new Date(workflow.updatedAt).toLocaleString()}</div>
-          )}
-          {workflow.executionStats && (
-            <div>
-              Runs: {workflow.executionStats.successfulRuns}/{workflow.executionStats.totalRuns} successful
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Action buttons */}

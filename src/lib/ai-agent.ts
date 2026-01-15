@@ -1684,7 +1684,8 @@ export class AIAgent {
     // Only capture screenshot if VisionClicker is enabled as fallback
     let screenshot: string | undefined;
     if (FeatureFlags.VISION_CLICKER) {
-      const capture = await VisualSnapshotService.captureFullPage(0.8);
+      // skipZoom=true to avoid zoom flashing during execution on spreadsheets
+      const capture = await VisualSnapshotService.captureFullPage(0.8, true);
       screenshot = capture?.screenshot;
     }
     

@@ -161,9 +161,9 @@ export class WidgetIdentifierService {
     } catch (error) {
       console.warn('[WidgetIdentifier] Screenshot capture failed:', error);
       
-      // Fallback: try full page capture
+      // Fallback: try full page capture (skipZoom=true for execution)
       try {
-        const fullPage = await VisualSnapshotService.captureFullPage(0.7);
+        const fullPage = await VisualSnapshotService.captureFullPage(0.7, true);
         return fullPage?.screenshot || null;
       } catch (e) {
         return null;
