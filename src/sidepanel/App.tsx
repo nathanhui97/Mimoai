@@ -1759,8 +1759,8 @@ function App() {
             </div>
           )}
           
-          {/* Workflow Details View */}
-          {selectedWorkflow && !isRecording && workflowSteps.length === 0 && teachingMode === 'idle' && (
+          {/* Workflow Details View - Hide during execution */}
+          {selectedWorkflow && !isRecording && workflowSteps.length === 0 && teachingMode === 'idle' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
             <WorkflowDetails
               workflow={selectedWorkflow}
               onExecute={() => handleExecuteWorkflow(selectedWorkflow)}
