@@ -13,7 +13,7 @@ import { SettingsPanel } from './SettingsPanel';
 import { ThinkingPanel } from './ThinkingPanel';
 import { OpenWorkWindowButton } from './OpenWorkWindowButton';
 import { PreRecordingChat } from './PreRecordingChat';
-import { PostRecordingChat } from './PostRecordingChat';
+import { PostRecordingConfirm } from './PostRecordingConfirm';
 import { WorkflowDetails } from './WorkflowDetails';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
@@ -806,62 +806,48 @@ function App() {
   };
 
   /**
-   * Called when post-recording conversation completes with learned skill
+   * Called when user confirms post-recording with simplified UI
+   * Saves workflow with user-provided name and edited variable names
    */
-  const handleTeachingComplete = async (learnedSkill: LearnedSkill) => {
-    console.log('[App] 🎓 Teaching complete:', learnedSkill.whatItDoes);
-    setPendingLearnedSkill(learnedSkill);
-    
-    // Use the learned skill's description as the workflow name
-    setWorkflowName(learnedSkill.whatItDoes);
-    
-    // Save the workflow with the learned skill
-    await handleSaveWorkflowWithTeaching(learnedSkill);
-  };
+  const handlePostRecordingConfirmSave = async (name: string, editedVariableNames: Record<string, string>) => {
+    console.log('[App] 🎓 Saving workflow from confirmation UI:', { name, editedVariableNames });
 
-  /**
-   * Called when user skips post-recording chat
-   */
-  const handleSkipPostRecording = () => {
-    console.log('[App] 🎓 Skipping post-recording chat');
-    setTeachingMode('idle');
-    setTeachingIntent(null);
-    
-    // Fall back to regular save dialog
-    const suggestedName = generateTaskName(workflowSteps);
-    setWorkflowName(suggestedName);
-    setShowSaveDialog(true);
-  };
-
-  /**
-   * Save workflow with learned skill attached
-   */
-  const handleSaveWorkflowWithTeaching = async (learnedSkill: LearnedSkill) => {
-    console.log('[App] 🎓 Saving workflow with learned skill');
-    
     try {
       setIsDetectingVariables(true);
-      setLearningFeedback('💾 Saving with learned knowledge...');
-      
-      // Use existing variable detection
-      const variables = await VariableDetector.detectVariables(workflowSteps);
-      
-      // Create the workflow with learned skill
+      setLearningFeedback('💾 Saving your task...');
+
+      // Detect variables
+      const variables = VariableDetector.detectVariablesSimplified(workflowSteps);
+
+      // Apply user-edited names to spreadsheet variables
+      const updatedVariables = {
+        ...variables,
+        variables: variables.variables.map(v => {
+          if (v.cellReference && editedVariableNames[v.stepId]) {
+            return {
+              ...v,
+              fieldName: editedVariableNames[v.stepId],
+            };
+          }
+          return v;
+        }),
+      };
+
+      // Create the workflow
       const workflow: SavedWorkflow = {
         id: `workflow-${Date.now()}`,
-        name: learnedSkill.whatItDoes,
-        description: `I can ${learnedSkill.whatItDoes.toLowerCase()}. Try saying: "${learnedSkill.exampleQueries[0] || learnedSkill.whatItDoes}"`,
+        name: name,
+        description: teachingIntent?.userDescription || undefined,
         createdAt: Date.now(),
         updatedAt: Date.now(),
         steps: workflowSteps,
-        variables: variables,
-        learnedSkill: learnedSkill,
+        variables: updatedVariables,
       };
-      
+
       // Save to storage
       await WorkflowStorage.saveWorkflow(workflow);
       addSavedWorkflow(workflow);
-      
+
       // Reset state
       clearWorkflowSteps();
       setTeachingMode('idle');
@@ -869,12 +855,12 @@ function App() {
       setPendingLearnedSkill(null);
       setCurrentWorkflowVariables(null);
       setIsDetectingVariables(false);
-      
-      setLearningFeedback(`✅ Got it! I learned how to ${learnedSkill.whatItDoes.toLowerCase()}.`);
+
+      setLearningFeedback(`✅ Got it! I saved "${name}".`);
       setTimeout(() => setLearningFeedback(null), 3000);
-      
+
     } catch (err) {
-      console.error('[App] Error saving with teaching:', err);
+      console.error('[App] Error saving workflow:', err);
       setError(err instanceof Error ? err.message : 'Failed to save workflow');
       setIsDetectingVariables(false);
     }
@@ -1746,29 +1732,15 @@ function App() {
             </div>
           )}
 
-          {/* Post-Recording Teaching Chat */}
-          {teachingMode === 'post_recording' && teachingIntent && workflowSteps.length > 0 && (
+          {/* Post-Recording Confirmation */}
+          {teachingMode === 'post_recording' && workflowSteps.length > 0 && (
             <div className="mb-6">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-foreground">Let me confirm what I learned</h2>
-                <button
-                  onClick={handleCancelTeaching}
-                  className="text-sm text-muted-foreground hover:text-foreground"
-                >
-                  Cancel
-                </button>
-              </div>
-              <div className="bg-card border border-border rounded-lg p-4 min-h-[300px]">
-                <PostRecordingChat
-                  teachingIntent={teachingIntent}
-                  workflow={{
-                    name: workflowName || 'New Task',
-                    steps: workflowSteps,
-                  }}
-                  onComplete={handleTeachingComplete}
-                  onSkip={handleSkipPostRecording}
-                />
-              </div>
+              <PostRecordingConfirm
+                workflowSteps={workflowSteps}
+                suggestedName={teachingIntent?.userDescription || generateTaskName(workflowSteps)}
+                onSave={handlePostRecordingConfirmSave}
+                onCancel={handleCancelTeaching}
+              />
             </div>
           )}
 
@@ -1976,8 +1948,8 @@ function App() {
           </div>
         )}
 
-        {/* Recorded Steps - Show during/after recording */}
-        {workflowSteps.length > 0 && (
+        {/* Recorded Steps - Show only during recording (hide during post_recording and execution) */}
+        {workflowSteps.length > 0 && teachingMode !== 'post_recording' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
           <div className="mb-6 p-4 bg-card rounded-lg border border-border">
             <h3 className="font-medium mb-3 text-card-foreground">
               I learned {workflowSteps.length} action{workflowSteps.length !== 1 ? 's' : ''}
