@@ -15,6 +15,7 @@ import { OpenWorkWindowButton } from './OpenWorkWindowButton';
 import { PreRecordingChat } from './PreRecordingChat';
 import { PostRecordingConfirm } from './PostRecordingConfirm';
 import { WorkflowDetails } from './WorkflowDetails';
+import { OptionConfirmationModal } from './OptionConfirmationModal';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep, SavedWorkflow, TeachingIntent, LearnedSkill } from '../types/workflow';
@@ -107,6 +108,17 @@ function App() {
     onConfirm: (() => void) | null;
     onDeny: (() => void) | null;
   }>({ show: false, decision: null, actionDescription: '', onConfirm: null, onDeny: null });
+
+  // Option confirmation modal state (fuzzy matching)
+  const [optionConfirmation, setOptionConfirmation] = useState<{
+    show: boolean;
+    requestId: string;
+    userInput: string;
+    matches: Array<{ option: string; confidence: number; preSelected: boolean }>;
+    allOptions: string[];
+    fieldName: string;
+    stepIndex: number;
+  } | null>(null);
   
   // Centralized execution state (from service worker)
   const [executionSession, setExecutionSession] = useState<any>(null);
@@ -403,6 +415,18 @@ function App() {
       } else if (message.type === 'ELEMENT_FIND_FAILED' && message.payload?.stepId) {
         // Show correction option when element finding fails
         setCorrectionModeStep(message.payload.stepId);
+      } else if (message.type === 'OPTION_MATCH_CONFIRMATION_NEEDED' && message.payload) {
+        // Show option confirmation modal for fuzzy matching
+        console.log('[App] Option confirmation needed:', message.payload);
+        setOptionConfirmation({
+          show: true,
+          requestId: message.payload.requestId,
+          userInput: message.payload.userInput,
+          matches: message.payload.alternatives,
+          allOptions: message.payload.allOptions,
+          fieldName: message.payload.fieldName,
+          stepIndex: message.payload.stepIndex,
+        });
       }
       return false;
     };
@@ -1245,6 +1269,48 @@ function App() {
   };
 
   /**
+   * Handle option confirmation (fuzzy matching)
+   */
+  const handleOptionConfirm = async (selectedOptions: string[]) => {
+    if (!optionConfirmation) return;
+
+    console.log('[App] Option confirmed:', selectedOptions);
+
+    // Send confirmation response back to the executor
+    await chrome.runtime.sendMessage({
+      type: 'OPTION_MATCH_CONFIRMED',
+      payload: {
+        requestId: optionConfirmation.requestId,
+        selectedOptions,
+        skipped: false,
+      },
+    });
+
+    setOptionConfirmation(null);
+  };
+
+  /**
+   * Handle option skip (fuzzy matching)
+   */
+  const handleOptionSkip = async () => {
+    if (!optionConfirmation) return;
+
+    console.log('[App] Option skipped');
+
+    // Send skip response back to the executor
+    await chrome.runtime.sendMessage({
+      type: 'OPTION_MATCH_CONFIRMED',
+      payload: {
+        requestId: optionConfirmation.requestId,
+        selectedOptions: [],
+        skipped: true,
+      },
+    });
+
+    setOptionConfirmation(null);
+  };
+
+  /**
    * Execute workflow with optional variable values
    * Uses AI Agent with fast-path DOM execution for best reliability
    */
@@ -2007,6 +2073,18 @@ function App() {
             workflowName={pendingExecution.workflow.name}
             onConfirm={handleVariableFormConfirm}
             onCancel={handleVariableFormCancel}
+          />
+        )}
+
+        {/* Option Confirmation Modal (Fuzzy Matching) */}
+        {optionConfirmation && optionConfirmation.show && (
+          <OptionConfirmationModal
+            userInput={optionConfirmation.userInput}
+            matches={optionConfirmation.matches}
+            allOptions={optionConfirmation.allOptions}
+            fieldName={optionConfirmation.fieldName}
+            onConfirm={handleOptionConfirm}
+            onSkip={handleOptionSkip}
           />
         )}
 

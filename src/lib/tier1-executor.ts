@@ -19,6 +19,7 @@ import { StateWaitEngine } from '../content/state-wait-engine';
 import type { LocatorBundle, LocatorStrategy } from '../types/locator';
 import type { Intent } from '../types/intent';
 import { SelectorReliability } from './selector-reliability';
+import { findBestMatch } from './fuzzy-option-matcher';
 
 // ============================================================================
 // Types
@@ -27,13 +28,14 @@ import { SelectorReliability } from './selector-reliability';
 /**
  * Explicit rejection codes (not generic errors)
  */
-export type RejectionCode = 
+export type RejectionCode =
   | 'NOT_FOUND'        // No candidates matched
   | 'AMBIGUOUS'        // Multiple candidates, can't decide
   | 'NOT_INTERACTABLE' // Element found but not clickable/visible
   | 'SCOPE_FAILED'     // Scope container not found
   | 'UNSAFE_ACTION'    // Would click delete/confirm in popup
-  | 'OUTCOME_FAILED';  // Action succeeded but outcome verification failed
+  | 'OUTCOME_FAILED'   // Action succeeded but outcome verification failed
+  | 'OPTION_CONFIRMATION_NEEDED'; // Dropdown option needs user confirmation (fuzzy match)
 
 /**
  * Execution result with explicit rejection codes
@@ -66,6 +68,16 @@ export interface Tier1ExecutionResult {
     
     // For read action
     value?: string | boolean | number;
+
+    // For OPTION_CONFIRMATION_NEEDED (fuzzy match)
+    fuzzyMatchResult?: {
+      userInput: string;
+      suggestedOption: string | null;
+      confidence: number;
+      alternatives: Array<{ option: string; confidence: number; preSelected: boolean }>;
+      allOptions: string[];
+      fieldName: string;
+    };
   };
   message?: string;
 }
@@ -921,6 +933,75 @@ export class Tier1Executor {
       }
     }
     
+    // STRATEGY 5: Fuzzy matching as final fallback before giving up
+    // Uses intelligent matching to handle typos, partial matches, multilingual content
+    if (!matchedOption && allOptions.length > 0) {
+      console.log('[Tier1] Strategy 5: Trying fuzzy option matching...');
+
+      // Extract option texts from DOM elements
+      const optionTexts = allOptions
+        .map(opt => opt.textContent?.trim())
+        .filter((text): text is string => !!text);
+
+      if (optionTexts.length > 0) {
+        const fuzzyResult = findBestMatch(option, optionTexts);
+        console.log('[Tier1] Fuzzy match result:', {
+          matchedOption: fuzzyResult.matchedOption,
+          confidence: fuzzyResult.confidence,
+          matchType: fuzzyResult.matchType,
+          needsLLM: fuzzyResult.needsLLM,
+          needsConfirmation: fuzzyResult.needsConfirmation,
+        });
+
+        // HIGH CONFIDENCE: Auto-select if match is very strong
+        if (fuzzyResult.matchedOption && fuzzyResult.confidence >= 0.85 && !fuzzyResult.needsConfirmation) {
+          console.log(`[Tier1] ✅ High confidence fuzzy match (${(fuzzyResult.confidence * 100).toFixed(0)}%): "${fuzzyResult.matchedOption}"`);
+
+          // Find the element for this option
+          for (const opt of allOptions) {
+            if (opt.textContent?.trim() === fuzzyResult.matchedOption) {
+              matchedOption = opt;
+              matchType = 'fuzzy-high-confidence';
+              break;
+            }
+          }
+        }
+        // MEDIUM/LOW CONFIDENCE: Request user confirmation
+        else if (fuzzyResult.needsConfirmation || fuzzyResult.needsLLM || fuzzyResult.confidence < 0.85) {
+          console.log('[Tier1] 🔄 Fuzzy match needs confirmation, returning OPTION_CONFIRMATION_NEEDED');
+
+          // Build alternatives list with pre-selection flag
+          const alternatives = fuzzyResult.allScores
+            .filter(s => s.score >= 0.30) // Only show reasonable matches
+            .slice(0, 5) // Limit to top 5
+            .map(s => ({
+              option: s.option,
+              confidence: s.score,
+              preSelected: s.score >= 0.80, // Pre-check items above 80%
+            }));
+
+          // Close dropdown before returning (we'll reopen after user confirms)
+          await this.closeAnyOpenDropdown();
+
+          return {
+            status: 'rejected',
+            code: 'OPTION_CONFIRMATION_NEEDED',
+            details: {
+              fuzzyMatchResult: {
+                userInput: option,
+                suggestedOption: fuzzyResult.matchedOption,
+                confidence: fuzzyResult.confidence,
+                alternatives,
+                allOptions: optionTexts,
+                fieldName: target?.name || target?.text || 'dropdown',
+              },
+            },
+            message: `Option "${option}" needs confirmation (best match: "${fuzzyResult.matchedOption}" at ${(fuzzyResult.confidence * 100).toFixed(0)}%)`,
+          };
+        }
+      }
+    }
+
     if (!matchedOption) {
       console.error('[Tier1] ❌ Failed to find option after all strategies:', option);
       console.error('[Tier1] Available options:', Array.from(allOptions).map(o => o.textContent?.trim()));

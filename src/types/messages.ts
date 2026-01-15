@@ -72,7 +72,10 @@ export type MessageType =
   // TabManager state operations (routed through service worker for reliability)
   | 'GET_TAB_MANAGER_STATE' // Get tab manager state from storage
   | 'SET_TAB_MANAGER_STATE' // Save tab manager state to storage
-  | 'CLEAR_TAB_MANAGER_STATE'; // Clear tab manager state from storage
+  | 'CLEAR_TAB_MANAGER_STATE' // Clear tab manager state from storage
+  // Option matching confirmation (hybrid fuzzy matching system)
+  | 'OPTION_MATCH_CONFIRMATION_NEEDED' // Ask user to confirm option selection
+  | 'OPTION_MATCH_CONFIRMED'; // User confirmed option selection
 
 /**
  * Base message interface for all extension messages
@@ -451,5 +454,46 @@ export interface ThinkingEvent {
 export interface AgentThinkingMessage extends ExtensionMessage {
   type: 'AGENT_THINKING';
   payload: ThinkingEvent;
+}
+
+/**
+ * OPTION_MATCH_CONFIRMATION_NEEDED message - ask user to confirm option selection
+ * Sent when fuzzy/LLM matching has low confidence or multiple similar matches
+ */
+export interface OptionMatchConfirmationNeededMessage extends ExtensionMessage {
+  type: 'OPTION_MATCH_CONFIRMATION_NEEDED';
+  payload: {
+    /** Unique ID to correlate request/response */
+    requestId: string;
+    /** What the user originally typed/specified */
+    userInput: string;
+    /** Best matching option (may be null if no good match) */
+    suggestedOption: string | null;
+    /** Confidence score 0-1 */
+    confidence: number;
+    /** Other possible matches with scores */
+    alternatives: Array<{ option: string; confidence: number; preSelected: boolean }>;
+    /** All available dropdown options */
+    allOptions: string[];
+    /** The field/dropdown name for context */
+    fieldName: string;
+    /** Current step index */
+    stepIndex: number;
+  };
+}
+
+/**
+ * OPTION_MATCH_CONFIRMED message - user confirmed their option selection
+ */
+export interface OptionMatchConfirmedMessage extends ExtensionMessage {
+  type: 'OPTION_MATCH_CONFIRMED';
+  payload: {
+    /** Request ID from the confirmation request */
+    requestId: string;
+    /** The option(s) user selected (array for multi-select) */
+    selectedOptions: string[];
+    /** Whether user skipped the selection */
+    skipped: boolean;
+  };
 }
 

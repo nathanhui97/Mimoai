@@ -40,6 +40,11 @@ class NotificationService {
       priority: 2,
       requireInteraction: true,
     }],
+    ['option_confirmation', {
+      title: 'Selection Needed',
+      priority: 2,
+      requireInteraction: true,  // Don't auto-dismiss - user must respond
+    }],
   ]);
 
   // Track notification metadata for cleanup and click handling
@@ -123,6 +128,21 @@ class NotificationService {
    */
   async notifyTaskStuck(taskName: string, reason: string, windowId?: number): Promise<string | null> {
     return this.notify('task_stuck', `${taskName}: ${reason}`, windowId);
+  }
+
+  /**
+   * Convenience method for option confirmation needed
+   */
+  async notifyOptionConfirmation(
+    fieldName: string,
+    userInput: string,
+    windowId?: number
+  ): Promise<string | null> {
+    return this.notify(
+      'option_confirmation',
+      `Which "${userInput}" do you want for ${fieldName}?`,
+      windowId
+    );
   }
 
   /**
