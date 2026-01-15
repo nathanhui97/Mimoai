@@ -37,7 +37,7 @@ export function WorkflowDetails({
     editedName !== workflow.name ||
     editedDescription !== (workflow.description || '') ||
     editedSteps.size > 0;
-  
+
   const handleSave = () => {
     // Build updated workflow
     const updatedSteps = workflow.steps.map((step, index) => {
@@ -59,7 +59,7 @@ export function WorkflowDetails({
       }
       return step;
     });
-    
+
     const updatedWorkflow: SavedWorkflow = {
       ...workflow,
       name: editedName,
@@ -86,13 +86,13 @@ export function WorkflowDetails({
     setEditingDescription(false);
     setEditingStepIndex(null);
   };
-  
+
   const getHumanDescription = (step: WorkflowStep): string => {
     // Use natural language if available
     if (step.naturalLanguage?.intent) {
       return step.naturalLanguage.intent;
     }
-    
+
     // Otherwise generate from step data
     if (!isWorkflowStepPayload(step.payload)) {
       return step.description || step.type;
@@ -123,12 +123,12 @@ export function WorkflowDetails({
   };
 
   return (
-    <div className="mb-6">
+    <div className="mb-6 animate-fade-in">
       {/* Header with back button */}
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex items-center gap-3 mb-5">
         <button
           onClick={onBack}
-          className="p-2 text-muted-foreground hover:text-foreground transition-colors"
+          className="p-2.5 text-muted-foreground hover:text-foreground hover:bg-muted/60 rounded-xl transition-all duration-200"
           title="Back to home"
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -148,64 +148,56 @@ export function WorkflowDetails({
                 setEditingName(false);
               }
             }}
-            className="flex-1 text-xl font-semibold text-foreground bg-background border border-border rounded px-2 py-1"
+            className="flex-1 text-xl font-semibold text-foreground bg-muted/30 border border-border/60 rounded-xl px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
             autoFocus
           />
         ) : (
-          <h2 className="text-xl font-semibold text-foreground flex-1">
+          <h2
+            onClick={() => setEditingName(true)}
+            className="text-xl font-semibold text-foreground flex-1 cursor-pointer hover:text-primary transition-colors tracking-tight"
+            title="Click to edit"
+          >
             {editedName}
           </h2>
         )}
-        {!editingName && (
-          <button
-            onClick={() => setEditingName(true)}
-            className="p-1.5 text-muted-foreground hover:text-foreground transition-colors"
-            title="Edit name"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-            </svg>
-          </button>
-        )}
       </div>
 
-      {/* Workflow description */}
-      <div className="mb-4 p-4 bg-muted/50 rounded-lg border border-border">
-        <div className="flex items-center justify-between mb-2">
-          <h3 className="text-sm font-medium text-foreground">What this workflow does</h3>
-          {!editingDescription && (
-            <button
-              onClick={() => setEditingDescription(true)}
-              className="p-1 text-muted-foreground hover:text-foreground transition-colors"
-              title="Edit description"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-              </svg>
-            </button>
-          )}
-        </div>
+      {/* Workflow description - click to edit */}
+      <div className="mb-5 p-5 bg-card rounded-2xl border border-border/60 shadow-soft">
+        <h3 className="text-sm font-semibold text-foreground mb-3">What this workflow does</h3>
         {editingDescription ? (
           <textarea
             value={editedDescription}
             onChange={(e) => setEditedDescription(e.target.value)}
             onBlur={() => setEditingDescription(false)}
-            className="w-full text-sm text-foreground bg-background border border-border rounded px-2 py-1 min-h-[60px]"
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                setEditedDescription(workflow.description || '');
+                setEditingDescription(false);
+              }
+            }}
+            className="w-full text-sm text-foreground bg-muted/30 border border-border/60 rounded-xl px-4 py-3 min-h-[80px] focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all resize-none"
             autoFocus
             placeholder="Describe what this workflow does..."
           />
         ) : (
-          <p className="text-sm text-muted-foreground">
-            {editedDescription || 'No description'}
+          <p
+            onClick={() => setEditingDescription(true)}
+            className={`text-sm cursor-pointer transition-colors ${
+              editedDescription ? 'text-foreground hover:text-primary' : 'text-muted-foreground italic hover:text-foreground'
+            }`}
+            title="Click to edit"
+          >
+            {editedDescription || 'Click to add description...'}
           </p>
         )}
       </div>
 
       {/* Steps list - collapsible */}
-      <div className="mb-4">
+      <div className="mb-5">
         <button
           onClick={() => setShowSteps(!showSteps)}
-          className="w-full flex items-center justify-between p-3 bg-muted/50 rounded-lg border border-border hover:bg-muted/70 transition-colors"
+          className="w-full flex items-center justify-between p-4 bg-muted/30 rounded-xl hover:bg-muted/50 transition-colors"
         >
           <span className="text-sm font-medium text-foreground">
             {workflow.steps.length} steps
@@ -221,7 +213,7 @@ export function WorkflowDetails({
         </button>
 
         {showSteps && (
-          <div className="mt-2 p-3 bg-card rounded-lg border border-border space-y-2 max-h-[300px] overflow-y-auto">
+          <div className="mt-3 p-4 bg-card rounded-2xl border border-border/60 shadow-soft space-y-2 max-h-[300px] overflow-y-auto animate-fade-in">
             {workflow.steps.map((step, index) => {
               const isEditing = editingStepIndex === index;
               const currentDescription = editedSteps.get(index) ?? getHumanDescription(step);
@@ -229,7 +221,7 @@ export function WorkflowDetails({
               return (
                 <div
                   key={index}
-                  className="py-2 px-3 bg-muted/30 rounded border border-border/50 text-sm flex items-start gap-2"
+                  className="group py-3 px-4 bg-muted/30 rounded-xl text-sm flex items-start gap-3 hover:bg-muted/50 transition-colors"
                 >
                   <span className="text-muted-foreground flex-shrink-0 font-medium">
                     {index + 1}.
@@ -253,24 +245,17 @@ export function WorkflowDetails({
                           setEditingStepIndex(null);
                         }
                       }}
-                      className="flex-1 text-foreground bg-background border border-border rounded px-2 py-1"
+                      className="flex-1 text-foreground bg-background border border-border/60 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
                       autoFocus
                     />
                   ) : (
-                    <span className="flex-1 text-foreground">
+                    <span
+                      onClick={() => setEditingStepIndex(index)}
+                      className="flex-1 text-foreground cursor-pointer hover:text-primary transition-colors"
+                      title="Click to edit"
+                    >
                       {currentDescription}
                     </span>
-                  )}
-                  {!isEditing && (
-                    <button
-                      onClick={() => setEditingStepIndex(index)}
-                      className="p-1 text-muted-foreground hover:text-foreground transition-colors flex-shrink-0"
-                      title="Edit step description"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                      </svg>
-                    </button>
                   )}
                 </div>
               );
@@ -280,37 +265,37 @@ export function WorkflowDetails({
       </div>
 
       {/* Action buttons */}
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-3">
         {hasChanges && (
-          <div className="flex gap-2">
+          <div className="flex gap-3 animate-fade-in">
             <button
               onClick={handleSave}
-              className="flex-1 px-4 py-2 bg-green-600 text-white rounded-md text-sm font-medium hover:bg-green-700 transition-colors"
+              className="flex-1 px-5 py-3 bg-green-500 text-white rounded-xl font-semibold hover:bg-green-600 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               Save Changes
             </button>
             <button
               onClick={handleCancel}
-              className="flex-1 px-4 py-2 bg-gray-600 text-white rounded-md text-sm hover:bg-gray-700 transition-colors"
+              className="flex-1 px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
             >
               Cancel
             </button>
           </div>
         )}
-        
+
         <button
           onClick={onExecute}
           disabled={isExecuting || hasChanges}
-          className="w-full px-4 py-3 bg-primary text-primary-foreground rounded-md text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full px-5 py-4 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"
         >
           {isExecuting ? 'Running...' : hasChanges ? 'Save changes to run' : 'Run this workflow'}
         </button>
-        
-        <div className="flex gap-2">
+
+        <div className="flex gap-3">
           <button
             onClick={onExport}
             disabled={isExecuting}
-            className="flex-1 px-3 py-2 bg-secondary text-secondary-foreground rounded-md text-sm hover:bg-secondary/90 transition-colors disabled:opacity-50"
+            className="flex-1 px-4 py-3 bg-muted/60 text-muted-foreground rounded-xl font-medium hover:bg-muted active:scale-[0.98] disabled:opacity-50 transition-all duration-200"
             title="Export as JSON"
           >
             Export
@@ -318,7 +303,7 @@ export function WorkflowDetails({
           <button
             onClick={onDelete}
             disabled={isExecuting}
-            className="flex-1 px-3 py-2 bg-destructive text-destructive-foreground rounded-md text-sm hover:bg-destructive/90 transition-colors disabled:opacity-50"
+            className="flex-1 px-4 py-3 bg-red-50 text-red-600 rounded-xl font-medium hover:bg-red-100 active:scale-[0.98] disabled:opacity-50 transition-all duration-200"
             title="Delete workflow"
           >
             Delete

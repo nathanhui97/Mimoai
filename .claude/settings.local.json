@@ -4,7 +4,8 @@
       "Bash(npm run build:*)",
       "Bash(git add:*)",
       "Bash(git commit -m \"$\\(cat <<''EOF''\nHide workflow details during execution for cleaner UI\n\nOnly show ThinkingPanel with AI status, progress, and control buttons during execution.\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nClean up WorkflowDetails - remove edit icons, use click-to-edit\n\n- Removed all pen/edit icons from UI\n- Title, description, and steps are now click-to-edit directly\n- Text changes color on hover to indicate editability\n- Updated styling to match warm design system\n- Cleaner, less cluttered interface\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ]
   }
 }
