@@ -88,3 +88,49 @@
     @apply focus:outline-none focus:ring-2 focus:ring-primary/30 focus:ring-offset-2;
   }
 }
+
+/* Chain of thought animations */
+@keyframes thinking-shimmer {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+@keyframes fade-out-up {
+  0% {
+    opacity: 0.6;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0.3;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes text-reveal {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+    filter: blur(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+.thinking-shimmer {
+  animation: thinking-shimmer 2s ease-in-out infinite;
+}
+
+.animate-fade-out-up {
+  animation: fade-out-up 0.5s ease-out forwards;
+}
+
+.animate-text-reveal {
+  animation: text-reveal 0.4s ease-out forwards;
+}

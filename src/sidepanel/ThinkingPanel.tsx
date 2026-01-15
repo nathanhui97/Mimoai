@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { ThinkingEvent } from '../types/messages';
 import type { WorkflowStep } from '../types/workflow';
 import { OpenWorkWindowButton } from './OpenWorkWindowButton';
@@ -27,6 +27,7 @@ interface ThinkingPanelProps {
 export function ThinkingPanel({
   events,
   currentStep,
+  hints,
   isRunning,
   isStopped,
   pauseReason,
@@ -35,78 +36,77 @@ export function ThinkingPanel({
   onResume,
   onDismiss,
 }: ThinkingPanelProps) {
-  const [elapsedTime, setElapsedTime] = useState(0);
+  // Track previous step for smooth transitions
+  const [displayedStep, setDisplayedStep] = useState(currentStep.index);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const prevStepRef = useRef(currentStep.index);
 
-  // Timer for elapsed time
+  // Smooth step transitions
   useEffect(() => {
-    if (!isRunning) return;
-    const startTime = Date.now() - (elapsedTime * 1000);
-    const interval = setInterval(() => {
-      setElapsedTime(Math.floor((Date.now() - startTime) / 1000));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isRunning]);
-
-  // Reset timer when starting fresh
-  useEffect(() => {
-    if (events.length === 0) {
-      setElapsedTime(0);
+    if (currentStep.index !== prevStepRef.current) {
+      setIsTransitioning(true);
+      // Small delay for exit animation
+      const timer = setTimeout(() => {
+        setDisplayedStep(currentStep.index);
+        prevStepRef.current = currentStep.index;
+        // Allow enter animation
+        setTimeout(() => setIsTransitioning(false), 50);
+      }, 150);
+      return () => clearTimeout(timer);
     }
-  }, [events.length]);
+  }, [currentStep.index]);
 
   // Calculate progress
   const completedSteps = currentStep.index;
   const totalSteps = currentStep.total;
   const progressPercent = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
 
-  // Format elapsed time
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-  };
+  // Get human-readable description for a workflow step
+  const getStepDescription = (stepIndex: number): string | null => {
+    const step = hints[stepIndex];
+    if (!step) return null;
 
-  // Get current action details
-  const getCurrentAction = () => {
-    const lastEvent = events[events.length - 1];
-    if (!lastEvent) return { status: 'Initializing', detail: 'Preparing to start...' };
-
-    switch (lastEvent.type) {
-      case 'observe':
-        return { status: 'Observing', detail: 'Analyzing page structure...' };
-      case 'decide':
-        if (lastEvent.decision?.targetDescription) {
-          return {
-            status: lastEvent.decision.action || 'Planning',
-            detail: lastEvent.decision.targetDescription
-          };
-        }
-        return { status: 'Deciding', detail: 'Determining next action...' };
-      case 'act':
-        return {
-          status: lastEvent.result?.success ? 'Completed' : 'Retrying',
-          detail: lastEvent.result?.success ? 'Action successful' : 'Attempting again...'
-        };
-      case 'complete':
-        return { status: 'Finished', detail: 'All steps completed successfully' };
-      default:
-        return { status: 'Processing', detail: 'Working...' };
+    // Prefer natural language intent if available
+    if (step.naturalLanguage?.intent) {
+      return step.naturalLanguage.intent;
     }
+
+    // Fall back to description
+    if (step.description) {
+      return step.description;
+    }
+
+    // Generate from step type
+    if ('selector' in step.payload) {
+      const payload = step.payload as { label?: string; elementText?: string; value?: string };
+      switch (step.type) {
+        case 'CLICK':
+          return `Click "${payload.elementText || payload.label || 'element'}"`;
+        case 'INPUT':
+          const value = payload.value?.substring(0, 20);
+          return `Type "${value}${value && value.length >= 20 ? '...' : ''}" in ${payload.label || 'field'}`;
+        case 'NAVIGATION':
+          return 'Navigate to page';
+        case 'SCROLL':
+          return 'Scroll page';
+        case 'KEYBOARD':
+          return 'Press key';
+        default:
+          return step.type;
+      }
+    }
+
+    return step.type;
   };
 
   const isComplete = events.some(e => e.type === 'complete');
-  const action = getCurrentAction();
-
-  // Get recent activity log (last 3 events)
-  const recentEvents = events.slice(-4).reverse();
 
   return (
-    <div className="flex flex-col min-h-[400px] animate-fade-in">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+    <div className="flex flex-col h-full min-h-[400px]">
+      {/* Header - Fixed */}
+      <div className="flex items-center justify-between mb-4 flex-shrink-0">
         <div className="flex items-center gap-3">
-          {/* Status indicator */}
-          <div className={`w-2.5 h-2.5 rounded-full ${
+          <div className={`w-2.5 h-2.5 rounded-full transition-colors duration-300 ${
             isComplete ? 'bg-green-500' :
             isStopped ? 'bg-amber-500' :
             isRunning ? 'bg-primary animate-pulse' : 'bg-gray-300'
@@ -122,25 +122,73 @@ export function ThinkingPanel({
         )}
       </div>
 
-      {/* Main Status */}
-      <div className="flex-1 flex flex-col justify-center py-8">
-        {/* Current Action */}
-        <div className="text-center mb-8">
-          <h2 className={`text-2xl font-semibold tracking-tight mb-2 ${
-            isComplete ? 'text-green-600' : 'text-foreground'
-          }`}>
-            {action.status}
-          </h2>
-          <p className="text-muted-foreground text-sm max-w-[280px] mx-auto line-clamp-2">
-            {action.detail}
-          </p>
-        </div>
+      {/* Chain of Thought - Flexible middle section with fixed height */}
+      <div className="flex-1 flex flex-col justify-center py-6">
+        {hints.length > 0 ? (
+          <div className="h-[120px] flex flex-col justify-center overflow-hidden">
+            {/* Previous step - faded */}
+            <div className={`h-8 flex items-center transition-all duration-300 ease-out ${
+              displayedStep > 0 ? 'opacity-40' : 'opacity-0'
+            }`}>
+              <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <svg className="w-3.5 h-3.5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                </svg>
+                <span className="truncate max-w-[260px]">
+                  {displayedStep > 0 ? (getStepDescription(displayedStep - 1) || `Step ${displayedStep}`) : ''}
+                </span>
+              </span>
+            </div>
 
-        {/* Progress Section */}
-        <div className="mb-8">
+            {/* Current step - prominent */}
+            <div className={`h-10 flex items-center transition-all duration-300 ease-out ${
+              isTransitioning ? 'opacity-0 translate-y-2' : 'opacity-100 translate-y-0'
+            }`}>
+              <span className="inline-flex items-center gap-2.5 text-base text-foreground font-medium">
+                {isRunning && !isComplete && (
+                  <span className="relative flex h-2 w-2 flex-shrink-0">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-60"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+                  </span>
+                )}
+                {isComplete && (
+                  <svg className="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+                <span className="truncate max-w-[280px]">
+                  {isComplete
+                    ? 'All steps completed'
+                    : (getStepDescription(displayedStep) || `Step ${displayedStep + 1}`)}
+                </span>
+              </span>
+            </div>
+
+            {/* Next step - very faded preview */}
+            <div className={`h-8 flex items-center transition-all duration-300 ease-out ${
+              displayedStep < hints.length - 1 && !isComplete ? 'opacity-25' : 'opacity-0'
+            }`}>
+              <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <span className="w-3.5 text-center text-xs">{displayedStep + 2}</span>
+                <span className="truncate max-w-[260px]">
+                  {displayedStep < hints.length - 1 ? (getStepDescription(displayedStep + 1) || `Step ${displayedStep + 2}`) : ''}
+                </span>
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="h-[120px] flex items-center justify-center">
+            <span className="text-muted-foreground text-sm">Preparing workflow...</span>
+          </div>
+        )}
+      </div>
+
+      {/* Bottom Section - Fixed */}
+      <div className="flex-shrink-0 space-y-4">
+        {/* Progress Bar */}
+        <div>
           <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
             <span>{progressPercent}% complete</span>
-            <span>{formatTime(elapsedTime)}</span>
           </div>
           <div className="h-1.5 bg-muted rounded-full overflow-hidden">
             <div
@@ -152,42 +200,7 @@ export function ThinkingPanel({
           </div>
         </div>
 
-        {/* Activity Log */}
-        {recentEvents.length > 0 && (
-          <div className="mb-6">
-            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-3">
-              Recent Activity
-            </h3>
-            <div className="space-y-2">
-              {recentEvents.map((event, i) => (
-                <div
-                  key={i}
-                  className={`flex items-start gap-3 text-sm py-2 px-3 rounded-lg ${
-                    i === 0 ? 'bg-muted/50' : ''
-                  }`}
-                >
-                  <div className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${
-                    event.type === 'complete' ? 'bg-green-500' :
-                    event.type === 'act' && event.result?.success === false ? 'bg-red-400' :
-                    i === 0 ? 'bg-primary' : 'bg-muted-foreground/40'
-                  }`} />
-                  <span className={`${i === 0 ? 'text-foreground' : 'text-muted-foreground'}`}>
-                    {event.type === 'observe' && 'Analyzed page'}
-                    {event.type === 'decide' && (event.decision?.targetDescription
-                      ? `${event.decision.action}: ${event.decision.targetDescription.slice(0, 40)}${event.decision.targetDescription.length > 40 ? '...' : ''}`
-                      : 'Planned next action')}
-                    {event.type === 'act' && (event.result?.success ? 'Action completed' : 'Action failed, retrying')}
-                    {event.type === 'complete' && 'Workflow finished'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Action Buttons */}
-      <div className="mt-auto space-y-3">
+        {/* Action Buttons */}
         <div className="flex items-center gap-3">
           <OpenWorkWindowButton variant="secondary" />
 

@@ -1,8 +1,7 @@
 /**
  * Variable Input Form Component
- * 
- * A modal form that allows users to enter values for detected workflow variables
- * before executing a workflow. Supports validation and "Use Defaults" functionality.
+ *
+ * A clean modal for entering workflow variable values before execution.
  */
 
 import { useState } from 'react';
@@ -11,8 +10,7 @@ import type { WorkflowVariables, VariableDefinition } from '../lib/variable-dete
 interface VariableInputFormProps {
   variables: WorkflowVariables;
   workflowName: string;
-  workflowDescription?: string; // AI-generated summary
-  onConfirm: (values: Record<string, string>, editedDescription?: string) => void;
+  onConfirm: (values: Record<string, string>) => void;
   onCancel: () => void;
 }
 
@@ -21,26 +19,17 @@ interface VariableInputFormProps {
  */
 function getInputType(inputType?: string): string {
   switch (inputType?.toLowerCase()) {
-    case 'email':
-      return 'email';
-    case 'password':
-      return 'password';
-    case 'number':
-      return 'number';
+    case 'email': return 'email';
+    case 'password': return 'password';
+    case 'number': return 'number';
     case 'tel':
-    case 'phone':
-      return 'tel';
-    case 'url':
-      return 'url';
-    case 'date':
-      return 'date';
+    case 'phone': return 'tel';
+    case 'url': return 'url';
+    case 'date': return 'date';
     case 'datetime':
-    case 'datetime-local':
-      return 'datetime-local';
-    case 'time':
-      return 'time';
-    default:
-      return 'text';
+    case 'datetime-local': return 'datetime-local';
+    case 'time': return 'time';
+    default: return 'text';
   }
 }
 
@@ -49,31 +38,28 @@ function getInputType(inputType?: string): string {
  */
 function validateInput(value: string, inputType?: string, isDropdown?: boolean): string | null {
   if (!value.trim()) {
-    return 'This field is required';
+    return 'Required';
   }
 
-  // Dropdowns don't need validation (they're selecting from predefined options)
-  if (isDropdown) {
-    return null;
-  }
+  if (isDropdown) return null;
 
   switch (inputType?.toLowerCase()) {
     case 'email':
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)) {
-        return 'Please enter a valid email address';
+        return 'Invalid email';
       }
       break;
     case 'url':
       try {
         new URL(value);
       } catch {
-        return 'Please enter a valid URL';
+        return 'Invalid URL';
       }
       break;
     case 'tel':
     case 'phone':
       if (!/^[\d\s\-+()]+$/.test(value)) {
-        return 'Please enter a valid phone number';
+        return 'Invalid phone';
       }
       break;
   }
@@ -84,55 +70,28 @@ function validateInput(value: string, inputType?: string, isDropdown?: boolean):
 export function VariableInputForm({
   variables,
   workflowName,
-  workflowDescription,
   onConfirm,
   onCancel,
 }: VariableInputFormProps) {
-  // Initialize values with defaults - use stepId as key to avoid collisions
+  // Initialize values with defaults
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
     for (const variable of variables.variables) {
-      // For dropdowns, ensure default value exists in options
       if (variable.isDropdown && variable.options && variable.options.length > 0) {
         const defaultInOptions = variable.options.includes(variable.defaultValue || '');
         initial[variable.stepId] = defaultInOptions ? (variable.defaultValue || '') : variable.options[0];
-        console.log('[VariableInputForm] Dropdown init:', {
-          stepId: variable.stepId,
-          variableName: variable.variableName,
-          defaultValue: variable.defaultValue,
-          defaultInOptions,
-          selectedValue: initial[variable.stepId],
-        });
       } else {
         initial[variable.stepId] = variable.defaultValue || '';
       }
     }
-    console.log('[VariableInputForm] Initial values:', initial);
     return initial;
   });
 
-  // Track validation errors
   const [errors, setErrors] = useState<Record<string, string>>({});
-
-  // Track if form has been touched
   const [touched, setTouched] = useState<Record<string, boolean>>({});
-  
-  // Track workflow description (user can edit)
-  const [description, setDescription] = useState(workflowDescription || '');
-  const [showDescriptionEdit, setShowDescriptionEdit] = useState(false);
 
-  /**
-   * Handle input change
-   */
   const handleChange = (stepId: string, value: string) => {
-    console.log('[VariableInputForm] Value changed:', { stepId, value, previousValues: values });
-    setValues(prev => {
-      const next = { ...prev, [stepId]: value };
-      console.log('[VariableInputForm] Updated values:', next);
-      return next;
-    });
-    
-    // Clear error when user types
+    setValues(prev => ({ ...prev, [stepId]: value }));
     if (errors[stepId]) {
       setErrors(prev => {
         const next = { ...prev };
@@ -142,34 +101,14 @@ export function VariableInputForm({
     }
   };
 
-  /**
-   * Handle input blur - validate on blur
-   */
   const handleBlur = (variable: VariableDefinition) => {
     setTouched(prev => ({ ...prev, [variable.stepId]: true }));
-    
     const error = validateInput(values[variable.stepId], variable.inputType, variable.isDropdown);
     if (error) {
       setErrors(prev => ({ ...prev, [variable.stepId]: error }));
     }
   };
 
-  /**
-   * Fill all fields with default values
-   */
-  const handleUseDefaults = () => {
-    const defaults: Record<string, string> = {};
-    for (const variable of variables.variables) {
-      defaults[variable.stepId] = variable.defaultValue || '';
-    }
-    setValues(defaults);
-    setErrors({});
-    setTouched({});
-  };
-
-  /**
-   * Validate all fields and submit
-   */
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -184,7 +123,6 @@ export function VariableInputForm({
 
     if (Object.keys(newErrors).length > 0) {
       setErrors(newErrors);
-      // Mark all as touched to show errors
       const allTouched: Record<string, boolean> = {};
       for (const variable of variables.variables) {
         allTouched[variable.stepId] = true;
@@ -193,74 +131,34 @@ export function VariableInputForm({
       return;
     }
 
-    // Transform values from stepId keys to include BOTH stepId AND variableName as keys
-    // This ensures the hint-extractor can find values by either key (stepId is unique, variableName may collide)
+    // Transform values to include both stepId and variableName keys
     const valuesForParent: Record<string, string> = {};
     for (const variable of variables.variables) {
       const value = values[variable.stepId];
-      // Add by stepId (unique - prevents collisions between dropdowns with same variableName)
       valuesForParent[variable.stepId] = value;
-      // Also add by variableName for backwards compatibility
       valuesForParent[variable.variableName] = value;
     }
 
-    // Pass edited description if different from original
-    const editedDesc = description !== workflowDescription ? description : undefined;
-    onConfirm(valuesForParent, editedDesc);
+    onConfirm(valuesForParent);
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-card p-6 rounded-lg border border-border max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+        onClick={onCancel}
+      />
+
+      {/* Modal */}
+      <div className="relative bg-card p-6 rounded-2xl border border-border/60 shadow-soft-xl max-w-md w-full mx-4 max-h-[85vh] overflow-y-auto animate-scale-in">
         {/* Header */}
         <div className="mb-6">
-          <h2 className="text-xl font-semibold text-card-foreground">
-            Run Workflow
+          <h2 className="text-lg font-semibold text-foreground tracking-tight">
+            Fill in variables
           </h2>
           <p className="text-sm text-muted-foreground mt-1">
-            Workflow: <span className="font-medium">{workflowName}</span>
-          </p>
-          
-          {/* AI Summary / Description */}
-          {workflowDescription && (
-            <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-md">
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <p className="text-xs font-medium text-blue-700 mb-1">
-                    🤖 AI Understanding
-                  </p>
-                  {showDescriptionEdit ? (
-                    <textarea
-                      value={description}
-                      onChange={(e) => setDescription(e.target.value)}
-                      className="w-full text-sm text-blue-900 bg-white border border-blue-300 rounded p-2 min-h-[60px]"
-                      placeholder="Describe what this workflow does..."
-                    />
-                  ) : (
-                    <p className="text-sm text-blue-900 italic">
-                      "{description}"
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setShowDescriptionEdit(!showDescriptionEdit)}
-                  className="ml-2 text-blue-600 hover:text-blue-800 text-xs"
-                  title={showDescriptionEdit ? 'Done editing' : 'Edit description'}
-                >
-                  {showDescriptionEdit ? '✓ Done' : '✏️ Edit'}
-                </button>
-              </div>
-              {description !== workflowDescription && (
-                <p className="text-xs text-blue-600 mt-1">
-                  ✨ Your edits will be used to guide the AI
-                </p>
-              )}
-            </div>
-          )}
-          
-          <p className="text-xs text-muted-foreground mt-2">
-            {variables.variables.length} variable{variables.variables.length !== 1 ? 's' : ''} detected
+            {workflowName}
           </p>
         </div>
 
@@ -269,46 +167,22 @@ export function VariableInputForm({
           {variables.variables.map((variable) => {
             const inputType = getInputType(variable.inputType);
             const hasError = touched[variable.stepId] && errors[variable.stepId];
-            
+
             return (
-              <div key={variable.stepId} className="space-y-1">
-                <label 
+              <div key={variable.stepId}>
+                <label
                   htmlFor={variable.stepId}
-                  className="block text-sm font-medium text-foreground"
+                  className="block text-sm font-medium text-foreground mb-1.5"
                 >
                   {variable.fieldName}
-                  {variable.isDropdown && variable.options && (
-                    <span className="ml-2 text-xs text-purple-600" title="Dropdown with options">
-                      📋 Dropdown
-                    </span>
-                  )}
-                  {variable.confidence >= 0.8 && (
-                    <span className="ml-2 text-xs text-green-600" title={`AI confidence: ${Math.round(variable.confidence * 100)}%`}>
-                      ✓ High confidence
-                    </span>
-                  )}
                 </label>
-                
-                {/* Show dropdown if options are available, otherwise show input */}
+
                 {variable.isDropdown && variable.options && variable.options.length > 0 ? (
                   <select
                     id={variable.stepId}
                     value={values[variable.stepId] ?? variable.options[0]}
                     onChange={(e) => {
-                      const newValue = e.target.value;
-                      console.log('[VariableInputForm] Dropdown changed:', {
-                        stepId: variable.stepId,
-                        variableName: variable.variableName,
-                        newValue,
-                        currentValues: { ...values },
-                      });
-                      // Use functional update to ensure we preserve all other values
-                      setValues(currentValues => {
-                        const updated = { ...currentValues, [variable.stepId]: newValue };
-                        console.log('[VariableInputForm] State after update:', updated);
-                        return updated;
-                      });
-                      // Clear any error
+                      setValues(prev => ({ ...prev, [variable.stepId]: e.target.value }));
                       if (errors[variable.stepId]) {
                         setErrors(prev => {
                           const next = { ...prev };
@@ -318,11 +192,11 @@ export function VariableInputForm({
                       }
                     }}
                     onBlur={() => handleBlur(variable)}
-                    className={`w-full px-3 py-2 border rounded-md bg-background text-foreground ${
-                      hasError 
-                        ? 'border-red-500 focus:ring-red-500 focus:border-red-500' 
-                        : 'border-border focus:ring-primary focus:border-primary'
-                    }`}
+                    className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
+                      hasError
+                        ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
+                        : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
+                    } focus:outline-none`}
                   >
                     {variable.options.map((option, idx) => (
                       <option key={idx} value={option}>
@@ -337,62 +211,36 @@ export function VariableInputForm({
                     value={values[variable.stepId]}
                     onChange={(e) => handleChange(variable.stepId, e.target.value)}
                     onBlur={() => handleBlur(variable)}
-                    placeholder={variable.defaultValue || `Enter ${variable.fieldName.toLowerCase()}`}
-                    className={`w-full px-3 py-2 border rounded-md bg-background text-foreground ${
-                      hasError 
-                        ? 'border-red-500 focus:ring-red-500 focus:border-red-500' 
-                        : 'border-border focus:ring-primary focus:border-primary'
-                    }`}
+                    placeholder={`Enter ${variable.fieldName.toLowerCase()}`}
+                    className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
+                      hasError
+                        ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
+                        : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
+                    } focus:outline-none placeholder:text-muted-foreground/50`}
                   />
                 )}
-                
+
                 {hasError && (
-                  <p className="text-xs text-red-500">{errors[variable.stepId]}</p>
-                )}
-                
-                {variable.isDropdown && variable.options && (
-                  <p className="text-xs text-muted-foreground">
-                    {variable.options.length} option{variable.options.length !== 1 ? 's' : ''} available
-                  </p>
-                )}
-                
-                {variable.reasoning && (
-                  <p className="text-xs text-muted-foreground" title={variable.reasoning}>
-                    AI: {variable.reasoning.substring(0, 80)}{variable.reasoning.length > 80 ? '...' : ''}
-                  </p>
-                )}
-                
-                {variable.defaultValue && values[variable.stepId] !== variable.defaultValue && (
-                  <p className="text-xs text-muted-foreground">
-                    Default: <span className="font-mono">{variable.defaultValue.substring(0, 30)}{variable.defaultValue.length > 30 ? '...' : ''}</span>
-                  </p>
+                  <p className="text-xs text-red-500 mt-1.5">{errors[variable.stepId]}</p>
                 )}
               </div>
             );
           })}
 
           {/* Actions */}
-          <div className="flex gap-2 pt-4 border-t border-border">
-            <button
-              type="button"
-              onClick={handleUseDefaults}
-              className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200 text-sm"
-            >
-              Use Defaults
-            </button>
-            <div className="flex-1" />
+          <div className="flex gap-3 pt-4">
             <button
               type="button"
               onClick={onCancel}
-              className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+              className="flex-1 px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+              className="flex-1 px-5 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
-              Execute Workflow
+              Run
             </button>
           </div>
         </form>
@@ -400,13 +248,3 @@ export function VariableInputForm({
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
