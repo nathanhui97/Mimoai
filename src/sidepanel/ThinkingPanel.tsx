@@ -80,24 +80,24 @@ export function ThinkingPanel({
   const isComplete = events.some(e => e.type === 'complete');
 
   return (
-    <div className="mb-6">
+    <div className="mb-6 animate-fade-in">
       {/* Main Card */}
-      <div className="p-5 bg-gradient-to-br from-purple-50 to-blue-50 rounded-2xl border border-purple-100 shadow-sm">
+      <div className="p-6 bg-gradient-to-br from-orange-50 via-amber-50 to-yellow-50 rounded-3xl border border-orange-100/60 shadow-soft-lg">
         {/* AI Brain Header */}
         <div className="flex items-center justify-center mb-6">
           <div className="relative">
             {/* Outer glow ring */}
             {isRunning && (
-              <div className="absolute inset-0 w-16 h-16 rounded-full bg-purple-400/20 animate-ping" />
+              <div className="absolute inset-0 w-16 h-16 rounded-full bg-orange-400/20 animate-ping" />
             )}
             {/* Brain icon container */}
-            <div className={`relative w-16 h-16 rounded-full flex items-center justify-center ${
+            <div className={`relative w-16 h-16 rounded-2xl flex items-center justify-center ${
               isComplete
                 ? 'bg-green-100'
                 : isRunning
-                  ? 'bg-purple-100'
+                  ? 'bg-orange-100'
                   : isStopped
-                    ? 'bg-yellow-100'
+                    ? 'bg-amber-100'
                     : 'bg-gray-100'
             }`}>
               {isComplete ? (
@@ -105,7 +105,7 @@ export function ThinkingPanel({
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               ) : (
-                <svg className={`w-8 h-8 ${isRunning ? 'text-purple-600' : isStopped ? 'text-yellow-600' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className={`w-8 h-8 ${isRunning ? 'text-orange-600' : isStopped ? 'text-amber-600' : 'text-gray-400'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                 </svg>
               )}
@@ -115,17 +115,17 @@ export function ThinkingPanel({
 
         {/* Status Text */}
         <div className="text-center mb-6">
-          <p className={`text-base font-medium ${isComplete ? 'text-green-600' : isStopped ? 'text-yellow-600' : 'text-purple-600'}`}>
+          <p className={`text-base font-semibold tracking-tight ${isComplete ? 'text-green-600' : isStopped ? 'text-amber-600' : 'text-orange-600'}`}>
             {isComplete ? 'Completed!' : isStopped ? 'Paused' : getAIStatus()}{isRunning && !isComplete && dots}
           </p>
         </div>
 
         {/* Progress Bar */}
         <div className="mb-6">
-          <div className="h-2 bg-white/60 rounded-full overflow-hidden">
+          <div className="h-2.5 bg-white/60 rounded-full overflow-hidden shadow-inner">
             <div
-              className={`h-full transition-all duration-500 ease-out rounded-full ${
-                isComplete ? 'bg-green-500' : 'bg-purple-500'
+              className={`h-full transition-all duration-700 ease-out rounded-full ${
+                isComplete ? 'bg-gradient-to-r from-green-400 to-emerald-500' : 'bg-gradient-to-r from-orange-400 to-amber-500'
               }`}
               style={{ width: `${progressPercent}%` }}
             />
@@ -139,7 +139,7 @@ export function ThinkingPanel({
           {isRunning && onStop && (
             <button
               onClick={onStop}
-              className="flex-1 py-3 px-4 bg-red-500 text-white rounded-xl font-medium hover:bg-red-600 transition-colors"
+              className="flex-1 py-3.5 px-5 bg-red-500 text-white rounded-xl font-semibold hover:bg-red-600 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               Stop
             </button>
@@ -148,7 +148,7 @@ export function ThinkingPanel({
           {isStopped && onResume && pauseReason !== 'agent_needs_help' && (
             <button
               onClick={() => onResume()}
-              className="flex-1 py-3 px-4 bg-green-500 text-white rounded-xl font-medium hover:bg-green-600 transition-colors"
+              className="flex-1 py-3.5 px-5 bg-green-500 text-white rounded-xl font-semibold hover:bg-green-600 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               Resume
             </button>
@@ -157,7 +157,7 @@ export function ThinkingPanel({
           {!isRunning && !isStopped && onDismiss && (
             <button
               onClick={onDismiss}
-              className="flex-1 py-3 px-4 bg-purple-500 text-white rounded-xl font-medium hover:bg-purple-600 transition-colors"
+              className="flex-1 py-3.5 px-5 bg-primary text-white rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               Done
             </button>
@@ -167,18 +167,18 @@ export function ThinkingPanel({
 
       {/* Human Help Request - Only show when agent needs help */}
       {pauseReason === 'agent_needs_help' && helpContext && (
-        <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-xl">
+        <div className="mt-4 p-5 bg-amber-50/80 border border-amber-200/60 rounded-2xl animate-fade-in">
           <div className="flex items-start gap-3 mb-4">
-            <div className="w-10 h-10 rounded-full bg-yellow-100 flex items-center justify-center flex-shrink-0">
-              <svg className="h-5 w-5 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0">
+              <svg className="h-5 w-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
             </div>
             <div className="flex-1">
-              <h3 className="text-sm font-semibold text-yellow-800 mb-2">
+              <h3 className="text-sm font-semibold text-amber-800 mb-2">
                 I need your help
               </h3>
-              <div className="space-y-1.5 text-sm text-yellow-700">
+              <div className="space-y-1.5 text-sm text-amber-700">
                 <p><span className="font-medium">Task:</span> {helpContext.stepDescription}</p>
                 <p><span className="font-medium">Issue:</span> {helpContext.whatAgentTried}</p>
                 <p><span className="font-medium">Please:</span> {helpContext.whatHumanShouldDo}</p>
@@ -188,20 +188,20 @@ export function ThinkingPanel({
           <div className="flex flex-col gap-2">
             <button
               onClick={() => onResume?.('completed')}
-              className="w-full py-3 px-4 bg-green-500 text-white rounded-xl font-medium hover:bg-green-600 transition-colors"
+              className="w-full py-3.5 px-4 bg-green-500 text-white rounded-xl font-semibold hover:bg-green-600 active:scale-[0.98] shadow-soft transition-all duration-200"
             >
               I completed it - Continue
             </button>
             <div className="flex gap-2">
               <button
                 onClick={() => onResume?.('retry')}
-                className="flex-1 py-2.5 px-3 bg-white border border-gray-200 text-gray-700 rounded-xl text-sm font-medium hover:bg-gray-50 transition-colors"
+                className="flex-1 py-3 px-3 bg-white/80 border border-amber-200/60 text-amber-700 rounded-xl text-sm font-medium hover:bg-white active:scale-[0.98] transition-all duration-200"
               >
                 Try again
               </button>
               <button
                 onClick={() => onResume?.('skipped')}
-                className="flex-1 py-2.5 px-3 bg-white border border-gray-200 text-gray-500 rounded-xl text-sm font-medium hover:bg-gray-50 transition-colors"
+                className="flex-1 py-3 px-3 bg-white/80 border border-amber-200/60 text-amber-600 rounded-xl text-sm font-medium hover:bg-white active:scale-[0.98] transition-all duration-200"
               >
                 Skip step
               </button>

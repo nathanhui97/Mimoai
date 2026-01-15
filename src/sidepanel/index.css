@@ -4,26 +4,55 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-    --radius: 0.5rem;
+    /* Warm, friendly color palette */
+
+    /* Backgrounds - Warm cream/beige tones */
+    --background: 40 30% 98%;
+    --foreground: 20 14% 10%;
+
+    /* Cards - Slightly warmer white */
+    --card: 40 20% 99%;
+    --card-foreground: 20 14% 10%;
+
+    /* Popover */
+    --popover: 40 20% 99%;
+    --popover-foreground: 20 14% 10%;
+
+    /* Primary - Warm coral orange */
+    --primary: 16 80% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Secondary - Soft warm neutral */
+    --secondary: 30 20% 94%;
+    --secondary-foreground: 20 14% 20%;
+
+    /* Muted - Warm light beige */
+    --muted: 30 20% 94%;
+    --muted-foreground: 20 10% 45%;
+
+    /* Accent - Subtle warm tint */
+    --accent: 25 30% 95%;
+    --accent-foreground: 16 80% 40%;
+
+    /* Destructive - Modern red */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Success - Warm green */
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+
+    /* Warning - Warm amber */
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 100%;
+
+    /* Border - Warm gray */
+    --border: 30 15% 88%;
+    --input: 30 15% 88%;
+    --ring: 16 80% 55%;
+
+    /* Updated radius */
+    --radius: 1rem;
   }
 }
 
@@ -36,16 +65,26 @@
   }
 }
 
+@layer utilities {
+  /* Hover lift effect for cards */
+  .hover-lift {
+    @apply transition-all duration-200 ease-out
+           hover:-translate-y-0.5 hover:shadow-lg
+           active:translate-y-0 active:shadow-md;
+  }
 
+  /* Press effect for buttons */
+  .press {
+    @apply active:scale-[0.98] transition-transform duration-150;
+  }
 
+  /* Glass effect for modals */
+  .glass {
+    @apply backdrop-blur-xl bg-white/80;
+  }
 
-
-
-
-
-
-
-
-
-
-
+  /* Focus ring utility */
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-primary/30 focus:ring-offset-2;
+  }
+}

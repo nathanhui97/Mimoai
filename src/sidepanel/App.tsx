@@ -56,7 +56,7 @@ function App() {
   const [showRefreshDialog, setShowRefreshDialog] = useState(false);
   const [pendingTabId, setPendingTabId] = useState<number | null>(null);
   const [_isPaused, setIsPaused] = useState(false);
-  const [tabSwitchToast, setTabSwitchToast] = useState<{ title: string; tabIndex: number; totalTabs: number } | null>(null);
+  const [_tabSwitchToast, setTabSwitchToast] = useState<{ title: string; tabIndex: number; totalTabs: number } | null>(null);
   // Correction learning state
   const [showCorrections, setShowCorrections] = useState(false);
   const [storedCorrections, setStoredCorrections] = useState<CorrectionEntry[]>([]);
@@ -77,7 +77,7 @@ function App() {
   // Screenshot modal state
   const [screenshotModalStep, setScreenshotModalStep] = useState<{ step: WorkflowStep; index: number } | null>(null);
   // UI simplification state
-  const [showAdvancedMenu, setShowAdvancedMenu] = useState(false);
+  const [_showAdvancedMenu, _setShowAdvancedMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [_workflowMenu, _setWorkflowMenu] = useState<string | null>(null);
   
@@ -112,7 +112,7 @@ function App() {
   const [executionSession, setExecutionSession] = useState<any>(null);
   
   // Real-time intent inference (during recording)
-  const [realtimeIntent, setRealtimeIntent] = useState<{
+  const [_realtimeIntent, setRealtimeIntent] = useState<{
     likelyGoal: string;
     confidence: number;
     suggestedName: string;
@@ -1777,40 +1777,43 @@ function App() {
 
           {/* Greeting - Only show when not recording, no steps, not in teaching mode, and no workflow selected */}
           {!selectedWorkflow && !isRecording && workflowSteps.length === 0 && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && teachingMode === 'idle' && (
-            <div className="mb-6">
-              <h2 className="text-2xl font-semibold text-foreground mb-2">
+            <div className="mb-8 animate-fade-in">
+              <h2 className="text-2xl font-semibold text-foreground mb-2 tracking-tight">
                 How can I help you?
               </h2>
-              <p className="text-sm text-muted-foreground mb-4">
+              <p className="text-sm text-muted-foreground mb-6">
                 Choose a task below or type what you'd like to do
               </p>
-              
+
               {/* Task Cards */}
               {savedWorkflows.length > 0 && (
                 <div className="mb-4">
-                  <div className="space-y-2 mb-3">
-                    {savedWorkflows.map((workflow) => (
+                  <div className="space-y-3 mb-4">
+                    {savedWorkflows.map((workflow, index) => (
                       <button
                         key={workflow.id}
                         onClick={() => handleTaskSelect(workflow)}
                         onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
                         disabled={isExecuting}
-                        className="w-full text-left p-4 bg-card border border-border rounded-xl hover:border-primary/40 hover:shadow-md transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed group"
+                        className="w-full text-left p-5 bg-card border border-border/60 rounded-2xl shadow-soft hover:shadow-soft-lg hover:border-primary/30 hover:-translate-y-0.5 active:translate-y-0 active:shadow-soft transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed group animate-slide-up"
+                        style={{ animationDelay: `${index * 50}ms` }}
                       >
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center justify-between gap-4">
                           <div className="flex-1 min-w-0">
-                            <h3 className="font-medium text-foreground group-hover:text-primary transition-colors">
+                            <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors tracking-tight">
                               {workflow.name}
                             </h3>
                             {workflow.description && (
-                              <p className="text-sm text-muted-foreground mt-0.5 line-clamp-1">
+                              <p className="text-sm text-muted-foreground mt-1 line-clamp-1">
                                 {workflow.description}
                               </p>
                             )}
                           </div>
-                          <svg className="w-5 h-5 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all duration-200 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                          </svg>
+                          <div className="w-8 h-8 rounded-full bg-muted/50 flex items-center justify-center group-hover:bg-primary/10 transition-colors">
+                            <svg className="w-4 h-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                          </div>
                         </div>
                       </button>
                     ))}
@@ -1821,13 +1824,15 @@ function App() {
                     onClick={handleTeachMeClick}
                     onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
                     disabled={state === 'CONNECTING'}
-                    className="w-full px-4 py-3 bg-primary/10 text-primary border border-primary/20 rounded-xl text-sm font-medium hover:bg-primary/20 transition-all duration-200 disabled:opacity-50"
+                    className="w-full px-5 py-4 bg-gradient-to-r from-primary/10 to-accent text-primary border border-primary/15 rounded-2xl font-medium hover:from-primary/15 hover:to-primary/10 hover:shadow-soft active:scale-[0.98] transition-all duration-200 disabled:opacity-50"
                     title="Right-click for quick record"
                   >
-                    <span className="flex items-center justify-center gap-2">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-                      </svg>
+                    <span className="flex items-center justify-center gap-2.5">
+                      <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                        </svg>
+                      </div>
                       Teach me something new
                     </span>
                   </button>
@@ -1836,19 +1841,19 @@ function App() {
 
               {/* No tasks state */}
               {savedWorkflows.length === 0 && (
-                <div className="py-12 text-center">
-                  <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-primary/10 flex items-center justify-center">
-                    <svg className="w-6 h-6 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <div className="py-16 text-center animate-fade-in">
+                  <div className="w-14 h-14 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-primary/10 to-accent flex items-center justify-center">
+                    <svg className="w-7 h-7 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                     </svg>
                   </div>
-                  <p className="text-muted-foreground mb-4">
+                  <p className="text-muted-foreground mb-5">
                     No tasks yet. Teach me what you'd like automated.
                   </p>
                   <button
                     onClick={handleTeachMeClick}
                     onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
-                    className="px-6 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:bg-primary/90 transition-all duration-200"
+                    className="px-6 py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft-lg transition-all duration-200"
                     title="Right-click for quick record"
                   >
                     Teach me something new
@@ -1860,108 +1865,43 @@ function App() {
 
         {/* After recording: Show save workflow UI */}
         {workflowSteps.length > 0 && !isRecording && (
-          <div className="mb-6">
-            <div className="flex gap-2">
+          <div className="mb-6 animate-fade-in">
+            <div className="flex gap-3">
               <button
                 onClick={() => {
                   clearWorkflowSteps();
                   setCurrentWorkflowVariables(null);
                 }}
-                className="px-3 py-2 bg-muted border border-border rounded-md hover:bg-muted/80 text-sm"
+                className="px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
                 title="Cancel and go back"
               >
-                ← Back
+                Back
               </button>
               <button
                 onClick={() => setShowSaveDialog(true)}
-                className="flex-1 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                className="flex-1 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft disabled:opacity-50 transition-all duration-200"
                 disabled={isDetectingVariables}
               >
                 {isDetectingVariables ? 'Analyzing...' : 'Save as task'}
               </button>
-              <button
-                onClick={() => setShowAdvancedMenu(!showAdvancedMenu)}
-                className="p-2 bg-muted border border-border rounded-md hover:bg-muted/80"
-                title="More options"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" />
-                </svg>
-              </button>
-            </div>
-            
-            {showAdvancedMenu && (
-              <div className="mt-2 p-2 bg-muted rounded-md border border-border space-y-1">
-                <button
-                  onClick={() => {
-                    handleExportJSON();
-                    setShowAdvancedMenu(false);
-                  }}
-                  className="w-full px-3 py-2 text-left text-sm hover:bg-background rounded"
-                >
-                  Export as JSON
-                </button>
-                <button
-                  onClick={() => {
-                    if (confirm('Clear all recorded steps?')) {
-                      clearWorkflowSteps();
-                      setShowAdvancedMenu(false);
-                    }
-                  }}
-                  className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-background rounded"
-                >
-                  Clear steps
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Tab Switch Toast Notification - Only during recording */}
-        {tabSwitchToast && isRecording && (
-          <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900 rounded-lg border border-blue-200 dark:border-blue-700 animate-fade-in">
-            <div className="flex items-center gap-2 text-sm text-blue-800 dark:text-blue-200">
-              <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
-              </svg>
-              <span>Recording in: <strong>{tabSwitchToast.title}</strong></span>
-              <span className="ml-auto text-xs">Tab {tabSwitchToast.tabIndex + 1} of {tabSwitchToast.totalTabs}</span>
-            </div>
-          </div>
-        )}
-
-        {/* Real-time Intent Display - Show during recording */}
-        {isRecording && realtimeIntent && (
-          <div className="mb-4 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-700">
-            <div className="flex items-center gap-2 mb-2">
-              <svg className="h-4 w-4 text-purple-600 dark:text-purple-400" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M9 2a1 1 0 000 2h2a1 1 0 100-2H9z"/>
-                <path fillRule="evenodd" d="M4 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v11a2 2 0 01-2 2H6a2 2 0 01-2-2V5zm3 4a1 1 0 000 2h.01a1 1 0 100-2H7zm3 0a1 1 0 000 2h3a1 1 0 100-2h-3zm-3 4a1 1 0 100 2h.01a1 1 0 100-2H7zm3 0a1 1 0 100 2h3a1 1 0 100-2h-3z" clipRule="evenodd"/>
-              </svg>
-              <span className="text-sm font-medium text-purple-800 dark:text-purple-200">
-                I think you're trying to: <strong>{realtimeIntent.likelyGoal}</strong>
-              </span>
-            </div>
-            <div className="text-xs text-purple-600 dark:text-purple-300">
-              Confidence: {(realtimeIntent.confidence * 100).toFixed(0)}%
             </div>
           </div>
         )}
 
         {/* Recorded Steps - Show only during recording (hide during post_recording and execution) */}
         {workflowSteps.length > 0 && teachingMode !== 'post_recording' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
-          <div className="mb-6 p-4 bg-card rounded-lg border border-border">
-            <h3 className="font-medium mb-3 text-card-foreground">
+          <div className="mb-6 p-5 bg-card rounded-2xl border border-border/60 shadow-soft">
+            <h3 className="font-semibold mb-4 text-card-foreground tracking-tight">
               I learned {workflowSteps.length} action{workflowSteps.length !== 1 ? 's' : ''}
             </h3>
-            
-            <div className="space-y-1 max-h-64 overflow-y-auto">
+
+            <div className="space-y-2 max-h-64 overflow-y-auto">
               {workflowSteps.map((step, index) => (
-                  <div 
-                    key={index} 
-                    className="py-2 border-b border-border last:border-0 text-sm flex items-start gap-2"
+                  <div
+                    key={index}
+                    className="py-2.5 px-3 bg-muted/30 rounded-xl text-sm flex items-start gap-3"
                   >
-                    <span className="text-muted-foreground flex-shrink-0">{index + 1}.</span>
+                    <span className="text-muted-foreground font-medium flex-shrink-0">{index + 1}.</span>
                     <span className="flex-1 text-foreground">{getHumanDescription(step)}</span>
                   </div>
               ))}
@@ -2014,16 +1954,17 @@ function App() {
 
         {/* Save Dialog */}
         {showSaveDialog && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-card p-6 rounded-lg border border-border max-w-md w-full mx-4">
-              <h2 className="text-xl font-semibold mb-2 text-card-foreground">Got it!</h2>
-              <p className="text-sm text-muted-foreground mb-4">What should I call this task?</p>
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={() => !isDetectingVariables && setShowSaveDialog(false)} />
+            <div className="relative bg-card p-7 rounded-3xl border border-border/50 shadow-soft-xl max-w-md w-full mx-4 animate-scale-in">
+              <h2 className="text-xl font-semibold mb-2 text-card-foreground tracking-tight">Got it!</h2>
+              <p className="text-sm text-muted-foreground mb-5">What should I call this task?</p>
               <input
                 type="text"
                 value={workflowName}
                 onChange={(e) => setWorkflowName(e.target.value)}
                 placeholder={`Task ${new Date().toLocaleString()}`}
-                className="w-full px-3 py-2 border border-border rounded-md mb-4 bg-background text-foreground"
+                className="w-full px-4 py-3 bg-muted/30 border border-border/60 rounded-xl mb-5 text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
                 autoFocus
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
@@ -2033,10 +1974,10 @@ function App() {
                   }
                 }}
               />
-              <div className="flex gap-2">
+              <div className="flex gap-3">
                 <button
                   onClick={handleSaveWorkflow}
-                  className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
+                  className="flex-1 px-5 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft disabled:opacity-50 transition-all duration-200"
                   disabled={!workflowName.trim() || isDetectingVariables}
                 >
                   {isDetectingVariables ? (
@@ -2054,7 +1995,7 @@ function App() {
                     setShowSaveDialog(false);
                     setWorkflowName('');
                   }}
-                  className="flex-1 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                  className="flex-1 px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
                   disabled={isDetectingVariables}
                 >
                   Cancel
@@ -2078,22 +2019,23 @@ function App() {
 
         {/* Safety Confirmation Dialog (Gemini Computer Use) */}
         {safetyConfirmation.show && safetyConfirmation.decision && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-card p-6 rounded-lg border border-border max-w-md w-full mx-4">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-yellow-100 rounded-full">
-                  <svg className="w-6 h-6 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+            <div className="relative bg-card p-7 rounded-3xl border border-border/50 shadow-soft-xl max-w-md w-full mx-4 animate-scale-in">
+              <div className="flex items-center gap-3 mb-5">
+                <div className="p-2.5 bg-amber-100 rounded-xl">
+                  <svg className="w-6 h-6 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                 </div>
-                <h2 className="text-xl font-semibold text-card-foreground">Confirmation Required</h2>
+                <h2 className="text-xl font-semibold text-card-foreground tracking-tight">Confirmation Required</h2>
               </div>
-              
-              <p className="text-sm text-muted-foreground mb-3">
+
+              <p className="text-sm text-muted-foreground mb-4">
                 The AI wants to perform an action that may be sensitive:
               </p>
-              
-              <div className="bg-muted p-3 rounded-md mb-4">
+
+              <div className="bg-muted/50 p-4 rounded-xl mb-5">
                 <p className="text-sm font-medium text-foreground mb-2">
                   {safetyConfirmation.actionDescription}
                 </p>
@@ -2101,18 +2043,18 @@ function App() {
                   {safetyConfirmation.decision.explanation}
                 </p>
               </div>
-              
-              <p className="text-xs text-muted-foreground mb-4">
+
+              <p className="text-xs text-muted-foreground mb-5">
                 Please confirm you want to proceed with this action.
               </p>
-              
-              <div className="flex gap-2">
+
+              <div className="flex gap-3">
                 <button
                   onClick={() => {
                     safetyConfirmation.onConfirm?.();
                     setSafetyConfirmation({ show: false, decision: null, actionDescription: '', onConfirm: null, onDeny: null });
                   }}
-                  className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                  className="flex-1 px-5 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
                 >
                   Yes, Proceed
                 </button>
@@ -2121,7 +2063,7 @@ function App() {
                     safetyConfirmation.onDeny?.();
                     setSafetyConfirmation({ show: false, decision: null, actionDescription: '', onConfirm: null, onDeny: null });
                   }}
-                  className="flex-1 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                  className="flex-1 px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
                 >
                   Cancel
                 </button>
@@ -2132,22 +2074,23 @@ function App() {
 
         {/* Refresh Warning Dialog */}
         {showRefreshDialog && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-card p-6 rounded-lg border border-border max-w-md w-full mx-4">
-              <h2 className="text-xl font-semibold mb-4 text-card-foreground">Refresh Page to Start Recording</h2>
-              <p className="text-sm text-muted-foreground mb-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={handleRefreshCancel} />
+            <div className="relative bg-card p-7 rounded-3xl border border-border/50 shadow-soft-xl max-w-md w-full mx-4 animate-scale-in">
+              <h2 className="text-xl font-semibold mb-4 text-card-foreground tracking-tight">Refresh Page to Start Recording</h2>
+              <p className="text-sm text-muted-foreground mb-5">
                 The page needs to be refreshed to initialize recording properly. Recording will start automatically after refresh. Any unsaved work may be lost. Continue?
               </p>
-              <div className="flex gap-2">
+              <div className="flex gap-3">
                 <button
                   onClick={handleRefreshConfirm}
-                  className="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90"
+                  className="flex-1 px-5 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
                 >
                   Continue
                 </button>
                 <button
                   onClick={handleRefreshCancel}
-                  className="flex-1 px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                  className="flex-1 px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
                 >
                   Cancel
                 </button>
