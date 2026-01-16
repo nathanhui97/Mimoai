@@ -80,6 +80,11 @@ export interface Tier1ExecutionResult {
       allOptions: string[];
       fieldName: string;
     };
+
+    // For multi_select action
+    selectedCount?: number;
+    elements?: Element[];
+    selectionMode?: 'first' | 'all' | 'matching' | 'count';
   };
   message?: string;
 }
@@ -109,7 +114,10 @@ export class Tier1Executor {
         
         case 'select':
           return await this.executeSelect(action);
-        
+
+        case 'multi_select':
+          return await this.executeMultiSelect(action);
+
         case 'scroll':
           return await this.executeScroll(action);
         
@@ -1035,6 +1043,188 @@ export class Tier1Executor {
       status: 'success',
       details: { element: matchedOption },
     };
+  }
+
+  /**
+   * Execute multi-select operation
+   * Handles selecting multiple items based on different selection modes:
+   * - first: Click first matching element (default)
+   * - all: Click ALL matching elements (checkboxes, multi-select lists)
+   * - matching: Click elements whose text matches a pattern
+   * - count: Click exactly N items
+   */
+  private static async executeMultiSelect(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target, selectionMode = 'first', matchPattern = 'contains', selectCount, option } = action.params;
+
+    console.log('[Tier1] 🎯 Executing MULTI_SELECT');
+    console.log('[Tier1] Selection mode:', selectionMode);
+    console.log('[Tier1] Match pattern:', matchPattern);
+    console.log('[Tier1] Select count:', selectCount);
+    console.log('[Tier1] Target value:', option || target?.text || target?.name);
+
+    // Find all candidate elements
+    const candidates = await this.findMultiSelectCandidates(target, option);
+    console.log(`[Tier1] Found ${candidates.length} candidates`);
+
+    if (candidates.length === 0) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: { triedStrategies: ['multi-select candidate search'] },
+        message: 'No matching elements found for multi-select',
+      };
+    }
+
+    let selectedCount = 0;
+    const selectedElements: Element[] = [];
+
+    switch (selectionMode) {
+      case 'first':
+        // Click first match only
+        this.clickElement(candidates[0]);
+        selectedCount = 1;
+        selectedElements.push(candidates[0]);
+        console.log('[Tier1] ✅ Selected first item');
+        break;
+
+      case 'all':
+        // Click ALL matching elements
+        for (const candidate of candidates) {
+          this.clickElement(candidate);
+          selectedElements.push(candidate);
+          selectedCount++;
+          await this.sleep(100); // Brief pause between clicks
+        }
+        console.log(`[Tier1] ✅ Selected all ${selectedCount} items`);
+        break;
+
+      case 'matching':
+        // Click elements whose text matches the pattern
+        const targetText = option || target?.text || target?.name || '';
+        const matchingElements = this.filterByPattern(candidates, targetText, matchPattern);
+
+        for (const match of matchingElements) {
+          this.clickElement(match);
+          selectedElements.push(match);
+          selectedCount++;
+          await this.sleep(100);
+        }
+        console.log(`[Tier1] ✅ Selected ${selectedCount} matching items (pattern: ${matchPattern})`);
+        break;
+
+      case 'count':
+        // Click exactly N items
+        const count = selectCount || 1;
+        const maxToSelect = Math.min(count, candidates.length);
+
+        for (let i = 0; i < maxToSelect; i++) {
+          this.clickElement(candidates[i]);
+          selectedElements.push(candidates[i]);
+          selectedCount++;
+          await this.sleep(100);
+        }
+        console.log(`[Tier1] ✅ Selected ${selectedCount}/${count} items`);
+        break;
+
+      default:
+        // Default to first
+        this.clickElement(candidates[0]);
+        selectedCount = 1;
+        selectedElements.push(candidates[0]);
+    }
+
+    await StateWaitEngine.waitForStability({
+      domQuietMs: 150,
+      maxWaitMs: 2000,
+    });
+
+    return {
+      status: 'success',
+      details: {
+        selectedCount,
+        elements: selectedElements,
+        selectionMode,
+      },
+    };
+  }
+
+  /**
+   * Find candidate elements for multi-select operations
+   */
+  private static async findMultiSelectCandidates(
+    target: SemanticTarget | undefined,
+    optionText: string | undefined
+  ): Promise<Element[]> {
+    const candidates: Element[] = [];
+
+    // Common selectors for multi-select patterns
+    const selectors = [
+      '[role="checkbox"]',
+      '[role="option"]',
+      '[role="listitem"]',
+      'input[type="checkbox"]',
+      'li[data-selectable]',
+      '[data-selectable="true"]',
+    ];
+
+    // If target has a scope hint, search within that container
+    const scopeContainer = target?.scopeHint
+      ? document.querySelector(`[aria-label*="${target.scopeHint}"], [data-testid*="${target.scopeHint.toLowerCase().replace(/\s+/g, '-')}"]`)
+      : document.body;
+
+    for (const selector of selectors) {
+      const elements = (scopeContainer || document.body).querySelectorAll(selector);
+      candidates.push(...Array.from(elements));
+    }
+
+    // Filter by option text if provided
+    if (optionText) {
+      const normalizedOption = optionText.toLowerCase().trim();
+      return candidates.filter(el => {
+        const text = el.textContent?.toLowerCase().trim() || '';
+        const ariaLabel = el.getAttribute('aria-label')?.toLowerCase().trim() || '';
+        return text.includes(normalizedOption) || ariaLabel.includes(normalizedOption);
+      });
+    }
+
+    // Remove duplicates
+    return [...new Set(candidates)];
+  }
+
+  /**
+   * Filter elements by text pattern match
+   */
+  private static filterByPattern(
+    elements: Element[],
+    pattern: string,
+    matchType: 'exact' | 'contains' | 'startsWith' | 'regex'
+  ): Element[] {
+    const normalizedPattern = pattern.toLowerCase().trim();
+
+    return elements.filter(el => {
+      const text = el.textContent?.toLowerCase().trim() || '';
+      const ariaLabel = el.getAttribute('aria-label')?.toLowerCase().trim() || '';
+      const combined = `${text} ${ariaLabel}`;
+
+      switch (matchType) {
+        case 'exact':
+          return text === normalizedPattern || ariaLabel === normalizedPattern;
+        case 'contains':
+          return combined.includes(normalizedPattern);
+        case 'startsWith':
+          return text.startsWith(normalizedPattern) || ariaLabel.startsWith(normalizedPattern);
+        case 'regex':
+          try {
+            const regex = new RegExp(pattern, 'i');
+            return regex.test(text) || regex.test(ariaLabel);
+          } catch {
+            console.warn('[Tier1] Invalid regex pattern:', pattern);
+            return combined.includes(normalizedPattern);
+          }
+        default:
+          return combined.includes(normalizedPattern);
+      }
+    });
   }
 
   /**

@@ -460,6 +460,207 @@ export function interpretChanges(changes: PageChanges['changes']): ChangeInterpr
 }
 
 // ============================================================================
+// Enhanced Modal Detection (for skill execution decision making)
+// ============================================================================
+
+/**
+ * Detailed modal information for AI decision making
+ */
+export interface ModalInfo {
+  isVisible: boolean;
+  title?: string;
+  hasConfirmButton: boolean;
+  hasCancelButton: boolean;
+  isErrorModal: boolean;
+  buttons: Array<{ text: string; role: 'confirm' | 'cancel' | 'other' }>;
+}
+
+/**
+ * Detect detailed modal state for AI decision making
+ */
+export function detectModal(): ModalInfo | null {
+  try {
+    const modalSelectors = [
+      '[role="dialog"]:not([hidden])',
+      '[role="alertdialog"]:not([hidden])',
+      '[aria-modal="true"]:not([hidden])',
+      '.modal:not([hidden])',
+      '[class*="modal"]:not([hidden])',
+    ];
+
+    let modalElement: Element | null = null;
+    for (const selector of modalSelectors) {
+      modalElement = document.body?.querySelector(selector) || null;
+      if (modalElement) {
+        const style = modalElement.getAttribute('style');
+        if (style && style.includes('display: none')) {
+          modalElement = null;
+          continue;
+        }
+        break;
+      }
+    }
+
+    if (!modalElement) {
+      return null;
+    }
+
+    // Extract title
+    const title = modalElement.querySelector('h1, h2, h3, [role="heading"]')?.textContent?.trim();
+
+    // Find all buttons in the modal
+    const buttonElements = modalElement.querySelectorAll('button, [role="button"]');
+    const buttons: ModalInfo['buttons'] = [];
+
+    // Common patterns for confirm/cancel buttons
+    const confirmPatterns = /confirm|ok|yes|submit|save|accept|continue|proceed|done/i;
+    const cancelPatterns = /cancel|close|no|dismiss|back|abort|discard/i;
+
+    let hasConfirmButton = false;
+    let hasCancelButton = false;
+
+    buttonElements.forEach(btn => {
+      const text = btn.textContent?.trim() || '';
+      const ariaLabel = btn.getAttribute('aria-label') || '';
+      const combined = `${text} ${ariaLabel}`;
+
+      let role: 'confirm' | 'cancel' | 'other' = 'other';
+
+      if (confirmPatterns.test(combined)) {
+        role = 'confirm';
+        hasConfirmButton = true;
+      } else if (cancelPatterns.test(combined)) {
+        role = 'cancel';
+        hasCancelButton = true;
+      }
+
+      buttons.push({ text, role });
+    });
+
+    // Check if this is an error modal
+    const isErrorModal = !!(
+      modalElement.querySelector('[class*="error"], [class*="danger"], [role="alert"]') ||
+      modalElement.textContent?.toLowerCase().includes('error') ||
+      modalElement.textContent?.toLowerCase().includes('failed')
+    );
+
+    return {
+      isVisible: true,
+      title,
+      hasConfirmButton,
+      hasCancelButton,
+      isErrorModal,
+      buttons,
+    };
+  } catch (error) {
+    console.error('[PostActionObserver] detectModal failed:', error);
+    return null;
+  }
+}
+
+/**
+ * Wait for page to stabilize (no DOM mutations for specified duration)
+ * Useful after actions that trigger async updates
+ */
+export function waitForStability(options?: {
+  quietMs?: number;      // How long with no mutations to consider stable (default: 200)
+  maxWaitMs?: number;    // Maximum total wait time (default: 5000)
+  pollInterval?: number; // How often to check (default: 50)
+}): Promise<{ stable: boolean; waitedMs: number }> {
+  const quietMs = options?.quietMs ?? 200;
+  const maxWaitMs = options?.maxWaitMs ?? 5000;
+  const pollInterval = options?.pollInterval ?? 50;
+
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+    let lastMutationTime = startTime;
+    let resolved = false;
+
+    const observer = new MutationObserver(() => {
+      lastMutationTime = Date.now();
+    });
+
+    // Start observing
+    if (document.body) {
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        characterData: true,
+      });
+    }
+
+    const checkStability = () => {
+      if (resolved) return;
+
+      const now = Date.now();
+      const timeSinceLastMutation = now - lastMutationTime;
+      const totalElapsed = now - startTime;
+
+      // Check for stability
+      if (timeSinceLastMutation >= quietMs) {
+        resolved = true;
+        observer.disconnect();
+        resolve({ stable: true, waitedMs: totalElapsed });
+        return;
+      }
+
+      // Check for timeout
+      if (totalElapsed >= maxWaitMs) {
+        resolved = true;
+        observer.disconnect();
+        resolve({ stable: false, waitedMs: totalElapsed });
+        return;
+      }
+
+      // Keep polling
+      setTimeout(checkStability, pollInterval);
+    };
+
+    // Start checking after initial delay
+    setTimeout(checkStability, pollInterval);
+  });
+}
+
+/**
+ * Wait for a specific state change to occur
+ */
+export function waitForStateChange(
+  predicate: (state: PageState) => boolean,
+  options?: { maxWaitMs?: number; pollInterval?: number }
+): Promise<{ matched: boolean; state: PageState | null; waitedMs: number }> {
+  const maxWaitMs = options?.maxWaitMs ?? 5000;
+  const pollInterval = options?.pollInterval ?? 100;
+
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+
+    const checkState = () => {
+      const elapsed = Date.now() - startTime;
+
+      // Check current state
+      const state = captureQuickState();
+      if (state && predicate(state)) {
+        resolve({ matched: true, state, waitedMs: elapsed });
+        return;
+      }
+
+      // Check for timeout
+      if (elapsed >= maxWaitMs) {
+        resolve({ matched: false, state, waitedMs: elapsed });
+        return;
+      }
+
+      // Keep polling
+      setTimeout(checkState, pollInterval);
+    };
+
+    // Initial check
+    checkState();
+  });
+}
+
+// ============================================================================
 // Convenience API
 // ============================================================================
 
@@ -470,4 +671,7 @@ export class PostActionObserver {
   static captureQuickState = captureQuickState;
   static detectChanges = detectChanges;
   static interpretChanges = interpretChanges;
+  static detectModal = detectModal;
+  static waitForStability = waitForStability;
+  static waitForStateChange = waitForStateChange;
 }

@@ -43,6 +43,7 @@ export type AgentActionType =
   | 'click'
   | 'type'
   | 'select'
+  | 'multi_select' // Multi-select operations (checkboxes, list items)
   | 'scroll'
   | 'navigate'
   | 'wait'
@@ -144,6 +145,11 @@ export interface AgentActionParams {
     selectedIndex?: number;
     options?: string[];
   };
+
+  // For multi-select operations (checkboxes, list items)
+  selectionMode?: 'first' | 'all' | 'matching' | 'count';  // How to select items
+  matchPattern?: 'exact' | 'contains' | 'startsWith' | 'regex';  // For matching mode
+  selectCount?: number;     // For count mode: how many items to select
   
   // For scroll
   direction?: 'up' | 'down' | 'left' | 'right';

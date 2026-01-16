@@ -19,6 +19,10 @@ import { OptionConfirmationModal } from './OptionConfirmationModal';
 import { SkillsLibrary } from './SkillsLibrary';
 import { SkillBoundaryEditor } from './SkillBoundaryEditor';
 import { AnnotationInput } from './AnnotationInput';
+import { SkillTeacher } from './SkillTeacher';
+import { ChatExecutor } from './ChatExecutor';
+import { TeachableSkillLibrary } from '../lib/skill-storage';
+import type { TeachableSkill } from '../types/skill';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep, SavedWorkflow, TeachingIntent, LearnedSkill } from '../types/workflow';
@@ -156,6 +160,14 @@ function App() {
   // Recording annotations - used by AnnotationInput during recording
   const [recordingAnnotations, setRecordingAnnotations] = useState<StepAnnotation[]>([]);
 
+  // Main navigation tab state
+  const [activeTab, setActiveTab] = useState<'chat' | 'skills'>('skills');
+
+  // Skill teaching state (new skill-based orchestration system)
+  const [showSkillTeacher, setShowSkillTeacher] = useState(false);
+  const [_skillTeachingPending, _setSkillTeachingPending] = useState<{ name: string; description: string; usageContext: string } | null>(null);
+  const [_teachableSkills, setTeachableSkills] = useState<TeachableSkill[]>([]);  // Used by ChatExecutor
+
   // Ping content script on mount
   useEffect(() => {
     const performPing = async () => {
@@ -204,6 +216,19 @@ function App() {
 
     performPing();
   }, [setState, setConnectionStatus, setError, setLastPingTime]);
+
+  // Load teachable skills on mount
+  useEffect(() => {
+    const loadTeachableSkills = async () => {
+      try {
+        const skills = await TeachableSkillLibrary.getSkills();
+        setTeachableSkills(skills);
+      } catch (err) {
+        console.error('[App] Failed to load teachable skills:', err);
+      }
+    };
+    loadTeachableSkills();
+  }, []);
 
   // Real-time intent inference during recording
   useEffect(() => {
@@ -915,6 +940,37 @@ function App() {
     setTeachingIntent(null);
     setPendingLearnedSkill(null);
     clearWorkflowSteps();
+  };
+
+  // ============================================================================
+  // Skill Teaching Handlers (AI Orchestration System)
+  // ============================================================================
+
+  /**
+   * Start recording for skill teaching
+   */
+  const handleSkillRecordingStart = async () => {
+    console.log('[App] 🧠 Starting skill recording');
+    await handleStartRecording();
+  };
+
+  /**
+   * Stop recording for skill teaching
+   */
+  const handleSkillRecordingStop = async () => {
+    console.log('[App] 🧠 Stopping skill recording');
+    await handleStopRecording();
+  };
+
+  /**
+   * Called when a skill is saved from the SkillTeacher
+   */
+  const handleSkillSaved = (skill: TeachableSkill) => {
+    console.log('[App] 🧠 Skill saved:', skill.name);
+    setTeachableSkills(prev => [...prev, skill]);
+    setShowSkillTeacher(false);
+    setLearningFeedback(`✅ Learned skill: "${skill.name}"`);
+    setTimeout(() => setLearningFeedback(null), 3000);
   };
 
   /**
@@ -1927,92 +1983,132 @@ function App() {
             />
           )}
 
-          {/* Greeting - Only show when not recording, no steps, not in teaching mode, and no workflow selected */}
+          {/* Main Tab Navigation - Only show when idle */}
           {!selectedWorkflow && !isRecording && workflowSteps.length === 0 && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && teachingMode === 'idle' && (
-            <div className="mb-8 animate-fade-in">
-              <h2 className="text-2xl font-semibold text-foreground mb-2 tracking-tight">
-                How can I help you?
-              </h2>
-              <p className="text-sm text-muted-foreground mb-6">
-                Choose a task below or type what you'd like to do
-              </p>
+            <>
+              {/* Tab Buttons */}
+              <div className="flex gap-2 mb-6">
+                <button
+                  onClick={() => setActiveTab('chat')}
+                  className={`flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2 ${
+                    activeTab === 'chat'
+                      ? 'bg-primary text-primary-foreground shadow-soft'
+                      : 'bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground'
+                  }`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                  </svg>
+                  Chat
+                </button>
+                <button
+                  onClick={() => setActiveTab('skills')}
+                  className={`flex-1 py-3 px-4 rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2 ${
+                    activeTab === 'skills'
+                      ? 'bg-primary text-primary-foreground shadow-soft'
+                      : 'bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground'
+                  }`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  Skills
+                </button>
+              </div>
 
-              {/* Task Cards */}
-              {savedWorkflows.length > 0 && (
-                <div className="mb-4">
-                  <div className="space-y-3 mb-4">
-                    {savedWorkflows.map((workflow, index) => (
+              {/* Chat Tab Content */}
+              {activeTab === 'chat' && (
+                <div className="flex-1 -mx-6 -mb-6">
+                  <ChatExecutor
+                    onTeachSkill={() => {
+                      setActiveTab('skills');
+                      handleTeachMeClick();
+                    }}
+                  />
+                </div>
+              )}
+
+              {/* Skills Tab Content */}
+              {activeTab === 'skills' && (
+                <div className="animate-fade-in">
+                  {/* Skills List */}
+                  {savedWorkflows.length > 0 && (
+                    <div className="mb-4">
+                      <div className="space-y-3 mb-4">
+                        {savedWorkflows.map((workflow, index) => (
+                          <button
+                            key={workflow.id}
+                            onClick={() => handleTaskSelect(workflow)}
+                            onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
+                            disabled={isExecuting}
+                            className="w-full text-left p-5 bg-card border border-border/60 rounded-2xl shadow-soft hover:shadow-soft-lg hover:border-primary/30 hover:-translate-y-0.5 active:translate-y-0 active:shadow-soft transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed group animate-slide-up"
+                            style={{ animationDelay: `${index * 50}ms` }}
+                          >
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="flex-1 min-w-0">
+                                <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors tracking-tight">
+                                  {workflow.name}
+                                </h3>
+                                {workflow.description && (
+                                  <p className="text-sm text-muted-foreground mt-1 line-clamp-1">
+                                    {workflow.description}
+                                  </p>
+                                )}
+                              </div>
+                              <div className="w-8 h-8 rounded-full bg-muted/50 flex items-center justify-center group-hover:bg-primary/10 transition-colors">
+                                <svg className="w-4 h-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                </svg>
+                              </div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Teach New Skill Button */}
                       <button
-                        key={workflow.id}
-                        onClick={() => handleTaskSelect(workflow)}
+                        onClick={handleTeachMeClick}
                         onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
-                        disabled={isExecuting}
-                        className="w-full text-left p-5 bg-card border border-border/60 rounded-2xl shadow-soft hover:shadow-soft-lg hover:border-primary/30 hover:-translate-y-0.5 active:translate-y-0 active:shadow-soft transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed group animate-slide-up"
-                        style={{ animationDelay: `${index * 50}ms` }}
+                        disabled={state === 'CONNECTING'}
+                        className="w-full px-5 py-4 bg-gradient-to-r from-primary/10 to-accent text-primary border border-primary/15 rounded-2xl font-medium hover:from-primary/15 hover:to-primary/10 hover:shadow-soft active:scale-[0.98] transition-all duration-200 disabled:opacity-50"
+                        title="Right-click for quick record"
                       >
-                        <div className="flex items-center justify-between gap-4">
-                          <div className="flex-1 min-w-0">
-                            <h3 className="font-semibold text-foreground group-hover:text-primary transition-colors tracking-tight">
-                              {workflow.name}
-                            </h3>
-                            {workflow.description && (
-                              <p className="text-sm text-muted-foreground mt-1 line-clamp-1">
-                                {workflow.description}
-                              </p>
-                            )}
-                          </div>
-                          <div className="w-8 h-8 rounded-full bg-muted/50 flex items-center justify-center group-hover:bg-primary/10 transition-colors">
-                            <svg className="w-4 h-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                        <span className="flex items-center justify-center gap-2.5">
+                          <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                             </svg>
                           </div>
-                        </div>
+                          Teach new skill
+                        </span>
                       </button>
-                    ))}
-                  </div>
+                    </div>
+                  )}
 
-                  {/* Teach New Task Button */}
-                  <button
-                    onClick={handleTeachMeClick}
-                    onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
-                    disabled={state === 'CONNECTING'}
-                    className="w-full px-5 py-4 bg-gradient-to-r from-primary/10 to-accent text-primary border border-primary/15 rounded-2xl font-medium hover:from-primary/15 hover:to-primary/10 hover:shadow-soft active:scale-[0.98] transition-all duration-200 disabled:opacity-50"
-                    title="Right-click for quick record"
-                  >
-                    <span className="flex items-center justify-center gap-2.5">
-                      <div className="w-6 h-6 rounded-full bg-primary/10 flex items-center justify-center">
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  {/* No skills state */}
+                  {savedWorkflows.length === 0 && (
+                    <div className="py-12 text-center animate-fade-in">
+                      <div className="w-14 h-14 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-primary/10 to-accent flex items-center justify-center">
+                        <svg className="w-7 h-7 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
                         </svg>
                       </div>
-                      Teach me something new
-                    </span>
-                  </button>
+                      <p className="text-muted-foreground mb-5">
+                        No skills yet. Teach me what you'd like automated.
+                      </p>
+                      <button
+                        onClick={handleTeachMeClick}
+                        onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
+                        className="px-6 py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft-lg transition-all duration-200"
+                        title="Right-click for quick record"
+                      >
+                        Teach me a skill
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
-
-              {/* No tasks state */}
-              {savedWorkflows.length === 0 && (
-                <div className="py-16 text-center animate-fade-in">
-                  <div className="w-14 h-14 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-primary/10 to-accent flex items-center justify-center">
-                    <svg className="w-7 h-7 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                  </div>
-                  <p className="text-muted-foreground mb-5">
-                    No tasks yet. Teach me what you'd like automated.
-                  </p>
-                  <button
-                    onClick={handleTeachMeClick}
-                    onContextMenu={(e) => { e.preventDefault(); handleQuickRecordClick(); }}
-                    className="px-6 py-3.5 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft-lg transition-all duration-200"
-                    title="Right-click for quick record"
-                  >
-                    Teach me something new
-                  </button>
-                </div>
-              )}
-            </div>
+            </>
           )}
 
         {/* After recording: Show save workflow UI */}
@@ -2292,6 +2388,24 @@ function App() {
         {showSkillsLibrary && (
           <SkillsLibrary
             onClose={() => setShowSkillsLibrary(false)}
+          />
+        )}
+
+        {/* Skill Teacher Modal (AI Orchestration) */}
+        {showSkillTeacher && (
+          <SkillTeacher
+            onClose={() => {
+              setShowSkillTeacher(false);
+              if (isRecording) {
+                handleStopRecording();
+              }
+              clearWorkflowSteps();
+            }}
+            onStartRecording={handleSkillRecordingStart}
+            onStopRecording={handleSkillRecordingStop}
+            isRecording={isRecording}
+            recordedSteps={workflowSteps}
+            onSkillSaved={handleSkillSaved}
           />
         )}
 

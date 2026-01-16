@@ -240,3 +240,145 @@ export interface SkillExecutionResult {
     error?: string;
   }>;
 }
+
+// ============================================================================
+// Teachable Skill Types (User-Taught Skills for AI Orchestration)
+// ============================================================================
+
+/**
+ * A skill that users teach by recording + naming
+ * These skills are used by the AI orchestrator to plan and execute tasks
+ */
+export interface TeachableSkill {
+  id: string;
+  name: string;                    // "Add item to promotion"
+  description: string;             // What it does
+  usageContext: string;            // When to use it (e.g., "When adding products to a deal")
+
+  // From recording
+  steps: WorkflowStep[];
+  variables: SkillVariable[];
+
+  // For AI matching
+  synonyms: string[];              // ["add product", "include item"]
+  requiredContext: string[];       // ["promotion page", "deal editor"]
+
+  // Dependencies and prerequisites
+  prerequisites: SkillPrerequisite[];
+  provides: string[];              // What this skill "unlocks" for other skills
+
+  // Metadata
+  userId?: string;                 // Owner (for Supabase)
+  createdAt: number;
+  lastUsed?: number;
+  successCount: number;
+  failureCount: number;
+
+  // Examples (learned from successful executions)
+  examples: SkillExample[];
+}
+
+/**
+ * Variable in a teachable skill with enhanced selection behavior
+ */
+export interface SkillVariable {
+  name: string;                    // "itemName"
+  type: 'text' | 'number' | 'option' | 'date';
+  description: string;             // "The product to add"
+  required: boolean;
+  defaultValue?: string;
+  options?: string[];              // For dropdowns
+
+  // Selection behavior for list/dropdown actions
+  selectionMode?: 'first' | 'all' | 'matching' | 'count';
+  matchPattern?: 'exact' | 'contains' | 'startsWith' | 'regex';
+  countSource?: string;            // For 'count' mode: which parameter specifies count
+
+  // Validation
+  validation?: string;             // Regex or constraint
+}
+
+/**
+ * Example of a successful skill execution (for AI learning)
+ */
+export interface SkillExample {
+  userRequest: string;             // "add honey mustard"
+  variableValues: Record<string, string>;
+  success: boolean;
+  timestamp: number;
+}
+
+/**
+ * Prerequisite for a skill to execute
+ */
+export interface SkillPrerequisite {
+  type: 'page' | 'element' | 'skill' | 'state';
+
+  // For 'page' type - must be on this URL pattern
+  urlPattern?: string;             // e.g., "/promotions/*/edit"
+
+  // For 'element' type - element must exist
+  elementSelector?: string;
+  elementText?: string;
+
+  // For 'skill' type - another skill must have run
+  skillId?: string;
+
+  // For 'state' type - custom state check
+  stateCheck?: string;             // e.g., "hasItemsInCart"
+
+  // Error message if prerequisite not met
+  errorMessage: string;
+}
+
+/**
+ * State for teaching a new skill (UI flow)
+ */
+export interface SkillTeachingState {
+  mode: 'naming' | 'describing' | 'recording' | 'reviewing' | 'saved';
+  skillName: string;
+  skillDescription: string;
+  usageContext: string;
+  recordedSteps: WorkflowStep[];
+  detectedVariables: SkillVariable[];
+  error?: string;
+}
+
+/**
+ * Parsed intent from user's natural language request
+ */
+export interface ParsedIntent {
+  action: string;                  // "create", "add", "submit"
+  objects: string[];               // ["promotion", "item"]
+  parameters: Record<string, string>;  // { itemName: "honey mustard", count: "3" }
+  context: string[];               // Inferred context
+  selectionMode?: 'first' | 'all' | 'matching' | 'count';
+  count?: number;                  // For count mode
+
+  // Off-topic detection (for non-automation requests)
+  isOffTopic?: boolean;            // True if request is not browser automation related
+  offTopicReason?: string;         // Why the request was rejected
+}
+
+/**
+ * Execution plan built from matched skills
+ */
+export interface ExecutionPlan {
+  type: 'single' | 'chain';
+  skill?: TeachableSkill;
+  skills?: Array<{
+    skill: TeachableSkill;
+    variables: Record<string, string>;
+  }>;
+  variables: Record<string, string>;
+  repetition?: { count: number } | { until: string } | { forEach: string };
+}
+
+/**
+ * Execution state tracking across skill chain
+ */
+export interface ExecutionState {
+  completedSkills: string[];       // Skill IDs that have run
+  flags: string[];                 // State flags from skill.provides
+  variables: Record<string, string>;  // Accumulated variables
+}
