@@ -150,8 +150,19 @@ export class ElementFinder {
     }
     
     // 3. Standard interactive tags
-    if (['button', 'a', 'select', 'textarea'].includes(tagName) ||
-        (tagName === 'input' && ['button', 'submit', 'checkbox', 'radio'].includes((htmlEl as HTMLInputElement).type))) {
+    // CRITICAL FIX: Include ALL input types (text, email, number, etc.) except hidden
+    // Previously only included button/submit/checkbox/radio which caused text inputs to be ignored
+    if (['button', 'a', 'select', 'textarea'].includes(tagName)) {
+      return true;
+    }
+    
+    // All input types are interactive except hidden
+    if (tagName === 'input' && (htmlEl as HTMLInputElement).type !== 'hidden') {
+      return true;
+    }
+    
+    // Contenteditable elements are interactive (rich text editors, etc.)
+    if (htmlEl.isContentEditable) {
       return true;
     }
     
