@@ -78,13 +78,11 @@ import type { WorkflowStep } from '../types/workflow';
 })();
 
 // ============================================================================
-// Agent Auto-Resume System - DISABLED
+// Agent Auto-Resume System - Re-enabled for tab switch support
 // ============================================================================
-// This old auto-resume system used chrome.storage.local['agentState']
-// It's now replaced by the ExecutionController which uses chrome.storage.session
-// Kept here for reference but commented out to prevent conflicts
+// This system resumes agent execution after tab switches and navigation
+// It reads saved state from chrome.storage.local['agentState']
 
-/*
 // Track if agent is currently resuming to prevent duplicate resumptions
 let isResumingAgent = false;
 
@@ -214,7 +212,6 @@ document.addEventListener('visibilitychange', async () => {
     await checkAndResumeAgent('tab_visible');
   }
 });
-*/
 
 // Full message handler with all message types
 function handleFullMessage(

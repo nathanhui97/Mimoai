@@ -38,6 +38,8 @@ export interface VariableDefinition {
   // For spreadsheet cells: column context
   columnHeader?: string;    // Column header (e.g., "Name", "Email", "Phone")
   cellReference?: string;   // Cell reference (e.g., "A2", "B3")
+  // Source hint for UI clarity (how the variable was captured)
+  sourceHint?: 'user_input' | 'external_paste' | 'dropdown_selection';
 }
 
 /**
@@ -450,11 +452,14 @@ export class VariableDetector {
 
     // Regular input field
     const fieldName = payload.label || 'Input Field';
-    
+
+    // Check if this INPUT came from an external paste (demo value - should be variable)
+    const isExternalPaste = payload.clipboardDetails?.isExternalPaste === true;
+
     // Check if this INPUT is actually a dropdown (has decisionSpace with options)
-    const hasDropdownOptions = payload.context?.decisionSpace?.options && 
+    const hasDropdownOptions = payload.context?.decisionSpace?.options &&
                                payload.context.decisionSpace.options.length > 0;
-    
+
     if (hasDropdownOptions) {
       console.log('[VariableDetector] 📋 INPUT step has dropdown options:', {
         fieldName,
@@ -462,7 +467,28 @@ export class VariableDetector {
         options: payload.context!.decisionSpace!.options!.slice(0, 5),
       });
     }
-    
+
+    if (isExternalPaste) {
+      console.log('[VariableDetector] 📋 INPUT step from external paste (demo value):', {
+        fieldName,
+        value: payload.value?.substring(0, 30),
+      });
+    }
+
+    // Determine source hint for UI clarity
+    let sourceHint: 'user_input' | 'external_paste' | 'dropdown_selection' = 'user_input';
+    if (isExternalPaste) {
+      sourceHint = 'external_paste';
+    } else if (hasDropdownOptions) {
+      sourceHint = 'dropdown_selection';
+    }
+
+    // Adjust confidence and reasoning based on source
+    const confidence = isExternalPaste ? 0.95 : 0.9;
+    const reasoning = isExternalPaste
+      ? 'External paste detected - user should provide their own value at runtime'
+      : (hasDropdownOptions ? 'User selected option from dropdown' : 'User typed value in input field');
+
     return {
       stepIndex,
       stepId: `${payload.timestamp}`,
@@ -472,8 +498,9 @@ export class VariableDetector {
       defaultValue: payload.value,
       inputType: payload.inputDetails?.type,
       isVariable: true,
-      confidence: 0.9,
-      reasoning: hasDropdownOptions ? 'User selected option from dropdown' : 'User typed value in input field',
+      confidence,
+      reasoning,
+      sourceHint,
       // Include dropdown data if available
       isDropdown: hasDropdownOptions,
       options: hasDropdownOptions ? payload.context!.decisionSpace!.options : undefined,

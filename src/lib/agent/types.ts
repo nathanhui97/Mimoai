@@ -251,9 +251,9 @@ export interface AgentHint {
   // Iframe context - for cross-frame execution
   iframeContext?: IframeContext;
   
-  // TAB_SWITCH context
-  stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION';
-  recordedPayload?: any; // Full recorded payload for TAB_SWITCH steps
+  // Step type context (for fast-path execution of deterministic steps)
+  stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION' | 'COPY' | 'PASTE';
+  recordedPayload?: any; // Full recorded payload for TAB_SWITCH, COPY, PASTE steps
   
   // Decision space from recording (for dropdown validation/fallback)
   // Contains all options that were available when the dropdown was recorded

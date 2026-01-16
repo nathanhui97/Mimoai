@@ -39,20 +39,22 @@ import { StuckDetector, type StuckContext } from './stuck-detector';
 // ============================================================================
 
 /** Actions the agent can take */
-export type AgentActionType = 
-  | 'click' 
-  | 'type' 
-  | 'select' 
-  | 'scroll' 
-  | 'navigate' 
-  | 'wait' 
-  | 'assert' 
-  | 'done' 
-  | 'fail' 
-  | 'skip' 
-  | 'read' 
-  | 'keyboard' 
+export type AgentActionType =
+  | 'click'
+  | 'type'
+  | 'select'
+  | 'scroll'
+  | 'navigate'
+  | 'wait'
+  | 'assert'
+  | 'done'
+  | 'fail'
+  | 'skip'
+  | 'read'
+  | 'keyboard'
   | 'hover'
+  | 'copy'      // Copy text to clipboard
+  | 'paste'     // Paste text from clipboard
   | 'tab_switch' // Multi-tab workflow support (for recorded TAB_SWITCH steps)
   | 'open_tab' // Open a new tab and navigate to URL
   // Spreadsheet-specific actions
@@ -180,7 +182,14 @@ export interface AgentActionParams {
   // For hover - reveal menus
   hoverDuration?: number;      // How long to hover (ms)
   waitForMenu?: boolean;        // Wait for menu to appear
-  
+
+  // For copy - select and copy text
+  selectAll?: boolean;           // Select all content (default true)
+  selectionRange?: { start: number; end: number }; // Select specific range
+
+  // For paste - linked copy/paste flow
+  linkedCopyStepId?: string;     // Links to source COPY step (data transfer intent)
+
   // For spreadsheet actions
   cellRef?: string;            // Cell reference like "B5", "A10"
   column?: string;             // Column letter like "A", "B"
@@ -269,9 +278,9 @@ export interface AgentHint {
   // Iframe context - for cross-frame execution
   iframeContext?: import('../types/workflow').IframeContext;
   
-  // TAB_SWITCH context
-  stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION';
-  recordedPayload?: any; // Full recorded payload for TAB_SWITCH steps
+  // Step type context (for fast-path execution of deterministic steps)
+  stepType?: 'TAB_SWITCH' | 'CLICK' | 'INPUT' | 'SCROLL' | 'KEYBOARD' | 'NAVIGATION' | 'COPY' | 'PASTE';
+  recordedPayload?: any; // Full recorded payload for TAB_SWITCH, COPY, PASTE steps
   
   // Decision space from recording (for dropdown validation/fallback)
   decisionSpace?: {
@@ -978,9 +987,107 @@ export class AIAgent {
           }
         }
 
+        // 1.2 Handle COPY hints - FAST PATH (deterministic execution)
+        if (currentHint?.stepType === 'COPY') {
+          console.log(`[AIAgent] 📋 FAST COPY: Executing deterministically`);
+
+          const copyPayload = currentHint.recordedPayload;
+          const copyAction: AgentAction = {
+            type: 'copy',
+            params: {
+              target: {
+                // Use recorded selectors as fallback selectors for reliable matching
+                recordedFallbackSelectors: [
+                  copyPayload?.selector,
+                  ...(copyPayload?.fallbackSelectors || []),
+                ].filter(Boolean),
+              },
+              text: copyPayload?.clipboardDetails?.text,
+              selectAll: copyPayload?.clipboardDetails?.selectAll,
+              selectionRange: copyPayload?.clipboardDetails?.selectionRange,
+              cellRef: copyPayload?.clipboardDetails?.cellRef, // For spreadsheet COPY
+              description: currentHint.description,
+            },
+            reasoning: `Copying text: "${(copyPayload?.clipboardDetails?.text || '').substring(0, 30)}..."`,
+            confidence: 1.0,
+            hintStepIndex: this.state.currentHintIndex,
+          };
+
+          this.onProgress?.(this.state.currentHintIndex, copyAction, 'acting');
+          const copyResult = await this.act(copyAction);
+
+          this.state.history.push({
+            stepNumber: currentHint.stepNumber,
+            action: copyAction,
+            observation: { url: window.location.href, title: document.title } as any,
+            result: copyResult.success ? 'success' : 'failed',
+            error: copyResult.error,
+            timestamp: Date.now(),
+          });
+
+          if (copyResult.success) {
+            this.state.hints[this.state.currentHintIndex].completed = true;
+            this.state.currentHintIndex++;
+            this.notifyProgress();
+            console.log(`[AIAgent] ✅ COPY completed, advanced to hint ${this.state.currentHintIndex}`);
+          } else {
+            console.error(`[AIAgent] ❌ COPY failed: ${copyResult.error}`);
+            this.state.hints[this.state.currentHintIndex].failureCount = (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
+          }
+          continue;
+        }
+
+        // 1.3 Handle PASTE hints - FAST PATH (deterministic execution)
+        if (currentHint?.stepType === 'PASTE') {
+          console.log(`[AIAgent] 📋 FAST PASTE: Executing deterministically`);
+
+          const pastePayload = currentHint.recordedPayload;
+          const pasteAction: AgentAction = {
+            type: 'paste',
+            params: {
+              target: {
+                // Use recorded selectors as fallback selectors for reliable matching
+                recordedFallbackSelectors: [
+                  pastePayload?.selector,
+                  ...(pastePayload?.fallbackSelectors || []),
+                ].filter(Boolean),
+              },
+              text: pastePayload?.clipboardDetails?.text,
+              linkedCopyStepId: pastePayload?.clipboardDetails?.linkedCopyStepId, // For data transfer intent
+              description: currentHint.description,
+            },
+            reasoning: `Pasting text: "${(pastePayload?.clipboardDetails?.text || '').substring(0, 30)}..."`,
+            confidence: 1.0,
+            hintStepIndex: this.state.currentHintIndex,
+          };
+
+          this.onProgress?.(this.state.currentHintIndex, pasteAction, 'acting');
+          const pasteResult = await this.act(pasteAction);
+
+          this.state.history.push({
+            stepNumber: currentHint.stepNumber,
+            action: pasteAction,
+            observation: { url: window.location.href, title: document.title } as any,
+            result: pasteResult.success ? 'success' : 'failed',
+            error: pasteResult.error,
+            timestamp: Date.now(),
+          });
+
+          if (pasteResult.success) {
+            this.state.hints[this.state.currentHintIndex].completed = true;
+            this.state.currentHintIndex++;
+            this.notifyProgress();
+            console.log(`[AIAgent] ✅ PASTE completed, advanced to hint ${this.state.currentHintIndex}`);
+          } else {
+            console.error(`[AIAgent] ❌ PASTE failed: ${pasteResult.error}`);
+            this.state.hints[this.state.currentHintIndex].failureCount = (this.state.hints[this.state.currentHintIndex].failureCount || 0) + 1;
+          }
+          continue;
+        }
+
         // ============================================================================
         // 2. OBSERVE (for all non-fast-path hints)
-        // SCROLL and TAB_SWITCH skip this via continue above
+        // SCROLL, TAB_SWITCH, COPY, PASTE skip this via continue above
         // ============================================================================
         const observation = await this.observe();
         console.log(`[AIAgent] Observed: ${observation.url}`);

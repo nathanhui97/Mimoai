@@ -36,7 +36,7 @@ export class StepEnricher {
    */
   enrichStep(
     element: Element,
-    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD',
+    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
     value?: string,
     key?: string
   ): StepEnrichmentResult | null {
@@ -59,6 +59,14 @@ export class StepEnricher {
           break;
         case 'KEYBOARD':
           intent = inferKeyboardIntent(key || 'Enter');
+          break;
+        case 'COPY':
+          // For COPY, we use a READ intent since we're extracting text
+          intent = { kind: 'READ' };
+          break;
+        case 'PASTE':
+          // For PASTE, we use a TYPE intent since we're inserting text
+          intent = { kind: 'TYPE', valueVar: value || 'pastedText' };
           break;
       }
       

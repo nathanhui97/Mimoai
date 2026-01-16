@@ -71,7 +71,7 @@ export class HintExtractor {
         const tabSwitchPayload = step.payload;
         const toTitle = (tabSwitchPayload as any).toTitle;
         const toUrl = (tabSwitchPayload as any).toUrl;
-        
+
         return {
           stepNumber: index + 1,
           description: step.description || `Switch to tab: ${toTitle || toUrl}`,
@@ -81,7 +81,35 @@ export class HintExtractor {
           recordedPayload: tabSwitchPayload,
         } as AgentHint;
       }
-      
+
+      // Handle COPY steps specially (deterministic execution)
+      if (step.type === 'COPY') {
+        const copyPayload = step.payload as WorkflowStepPayload;
+        return {
+          stepNumber: index + 1,
+          description: step.description || `Copy text from element`,
+          actionType: 'other',
+          completed: false,
+          stepType: 'COPY',
+          recordedPayload: copyPayload,
+          targetSelector: copyPayload.selector,
+        } as AgentHint;
+      }
+
+      // Handle PASTE steps specially (deterministic execution)
+      if (step.type === 'PASTE') {
+        const pastePayload = step.payload as WorkflowStepPayload;
+        return {
+          stepNumber: index + 1,
+          description: step.description || `Paste text to element`,
+          actionType: 'other',
+          completed: false,
+          stepType: 'PASTE',
+          recordedPayload: pastePayload,
+          targetSelector: pastePayload.selector,
+        } as AgentHint;
+      }
+
       const payload = step.payload as WorkflowStepPayload;
       
       // Extract element text from original steps for optimized NAVIGATION steps

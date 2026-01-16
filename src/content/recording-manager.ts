@@ -101,6 +101,21 @@ export class RecordingManager {
   // private initialFullPageSnapshot: string | null = null;
   // private initialSnapshotPromise: Promise<void> | null = null;
 
+  // Copy/Paste Intent Detection: Track COPY steps in session for PASTE matching
+  private copyStepsInSession: Map<string, {
+    stepId: string;
+    text: string;           // Original text (preserved for execution)
+    normalizedText: string; // Normalized for matching
+    sourceSelector: string;
+    timestamp: number;
+    stepIndex: number;
+  }> = new Map();
+
+  // Deduplication for copy/paste events (we listen on both document and window)
+  private lastCopyEventTime: number = 0;
+  private lastPasteEventTime: number = 0;
+  private readonly CLIPBOARD_EVENT_DEDUP_MS = 50; // Ignore same event within 50ms
+
   constructor() {
     // Initialize extracted modules
     this.elementFinder = new ElementFinder();
@@ -126,6 +141,11 @@ export class RecordingManager {
     this.currentTabUrl = window.location.href;
     this.currentTabTitle = document.title;
     this.currentTabIndex = tabIndex !== undefined ? tabIndex : null;
+
+    // Clear copy tracker for new recording session (intent detection)
+    this.copyStepsInSession.clear();
+    this.lastCopyEventTime = 0;
+    this.lastPasteEventTime = 0;
 
     // Add visual indicator
     if (document.body) {
@@ -163,29 +183,6 @@ export class RecordingManager {
     // Wrap in async handler since handleKeyboard is now async
     // Use capture phase (true) to catch events even if they're stopped from bubbling
     this.keyboardHandler = ((event: KeyboardEvent) => {
-      // Debug logging for copy/paste shortcuts to help diagnose issues
-      const key = event.key?.toLowerCase();
-      const hasCopyPasteKey = (key === 'c' || key === 'v') && (event.ctrlKey || event.metaKey);
-      
-      // TEMPORARY: Log ALL keyboard events with modifiers to debug
-      if (event.ctrlKey || event.metaKey) {
-        console.log('⌨️ GhostWriter: Keyboard event with modifier:', {
-          key: event.key,
-          code: event.code,
-          ctrlKey: event.ctrlKey,
-          metaKey: event.metaKey,
-          shiftKey: event.shiftKey,
-          altKey: event.altKey,
-          target: (event.target as HTMLElement)?.tagName,
-          isRecording: this.isRecording,
-          isCopyPaste: hasCopyPasteKey
-        });
-      }
-      
-      if (hasCopyPasteKey) {
-        console.log('⌨️ GhostWriter: Copy/paste shortcut detected! Processing...');
-      }
-      
       this.handleKeyboard(event).catch((error) => {
         console.error('Error in keyboard handler:', error);
       });
@@ -209,12 +206,24 @@ export class RecordingManager {
     window.addEventListener('scroll', this.scrollHandler, true); // Capture phase for all scroll events
 
     // Setup copy handler to track clipboard operations (Phase 6: Data lineage)
-    this.copyHandler = this.handleCopy.bind(this);
-    document.addEventListener('copy', this.copyHandler, false);
+    // Use capture phase (true) to ensure we catch events even if page stops propagation
+    // Wrap in async handler with proper error catching (like keyboard handler)
+    this.copyHandler = ((event: ClipboardEvent) => {
+      this.handleCopy(event).catch((error) => {
+        console.error('📋 GhostWriter: Error in copy handler:', error);
+      });
+    }) as (event: ClipboardEvent) => void;
+    document.addEventListener('copy', this.copyHandler, true);
 
     // Setup paste handler to track paste operations (for additional context)
-    this.pasteHandler = this.handlePaste.bind(this);
-    document.addEventListener('paste', this.pasteHandler, false);
+    // Use capture phase (true) to ensure we catch events even if page stops propagation
+    // Wrap in async handler with proper error catching (like keyboard handler)
+    this.pasteHandler = ((event: ClipboardEvent) => {
+      this.handlePaste(event).catch((error) => {
+        console.error('📋 GhostWriter: Error in paste handler:', error);
+      });
+    }) as (event: ClipboardEvent) => void;
+    document.addEventListener('paste', this.pasteHandler, true);
 
     console.log('Recording started');
   }
@@ -414,12 +423,12 @@ export class RecordingManager {
     }
 
     if (this.copyHandler) {
-      document.removeEventListener('copy', this.copyHandler, false);
+      document.removeEventListener('copy', this.copyHandler, true);
       this.copyHandler = null;
     }
 
     if (this.pasteHandler) {
-      document.removeEventListener('paste', this.pasteHandler, false);
+      document.removeEventListener('paste', this.pasteHandler, true);
       this.pasteHandler = null;
     }
 
@@ -2189,35 +2198,27 @@ export class RecordingManager {
                     (event.ctrlKey || event.metaKey) &&
                     !event.shiftKey && !event.altKey; // Only pure Ctrl+V/Cmd+V
     
-    // Debug logging for copy/paste detection
+    // Copy/paste shortcuts are handled by dedicated copy/paste handlers
+    // Skip creating KEYBOARD steps for these - the COPY/PASTE steps will be created instead
     if (isCopy || isPaste) {
-      console.log('⌨️ GhostWriter: Copy/paste shortcut detected:', {
-        key: event.key,
-        code: event.code,
-        ctrlKey: event.ctrlKey,
-        metaKey: event.metaKey,
-        shiftKey: event.shiftKey,
-        altKey: event.altKey,
-        isCopy,
-        isPaste,
-        target: event.target
-      });
+      console.log('⌨️ GhostWriter: Copy/paste shortcut detected - letting copy/paste handler create step');
+      return;
     }
-    
-    // Only capture specific important keys OR copy/paste shortcuts
+
+    // Only capture specific important keys
     const importantKeys = ['Enter', 'Tab', 'Escape'];
     const isImportantKey = importantKeys.includes(event.key);
-    
-    if (!isImportantKey && !isCopy && !isPaste) {
+
+    if (!isImportantKey) {
       return;
     }
 
     // Don't capture if user is typing in an input (that's handled by input handler)
-    // EXCEPTION: Allow paste in inputs (Ctrl+V/Cmd+V) and copy from inputs
+    // EXCEPTION: Allow Enter in inputs (for form submission)
     const target = event.target as HTMLElement;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
-      // Only capture Enter in inputs (for form submission) or paste/copy shortcuts
-      if (event.key !== 'Enter' && !isPaste && !isCopy) {
+      // Only capture Enter in inputs (for form submission)
+      if (event.key !== 'Enter') {
         return;
       }
     }
@@ -2397,69 +2398,6 @@ export class RecordingManager {
             : undefined
         } : undefined,
       };
-
-      // Add clipboard metadata for copy/paste operations
-      if (isCopy) {
-        // Wait longer for handleCopy() to store clipboard data (copy event fires slightly after keyboard event)
-        await new Promise(resolve => setTimeout(resolve, 200));
-        try {
-          const result = await chrome.storage.local.get('ghostwriter_clipboard');
-          const clipboardData = result.ghostwriter_clipboard as {
-            text: string;
-            sourceSelector: string;
-            timestamp: number;
-          } | undefined;
-          
-          if (clipboardData && clipboardData.text) {
-            console.log('📋 GhostWriter: Copy keyboard shortcut detected, adding clipboard metadata');
-            stepPayload.aiEvidence = {
-              ...stepPayload.aiEvidence,
-              clipboardMetadata: {
-                sourceSelector: clipboardData.sourceSelector,
-                copiedValue: clipboardData.text.length > 500 
-                  ? clipboardData.text.substring(0, 500) + '...' 
-                  : clipboardData.text,
-                timestamp: clipboardData.timestamp
-              }
-            };
-          }
-        } catch (error) {
-          console.warn('GhostWriter: Failed to get clipboard data for copy step:', error);
-        }
-      } else if (isPaste) {
-        // Check for recent clipboard data
-        try {
-          const result = await chrome.storage.local.get('ghostwriter_clipboard');
-          const clipboardData = result.ghostwriter_clipboard as {
-            text: string;
-            sourceSelector: string;
-            timestamp: number;
-          } | undefined;
-          
-          if (clipboardData && clipboardData.text) {
-            const age = Date.now() - clipboardData.timestamp;
-            const tenMinutesInMs = 10 * 60 * 1000;
-            
-            if (age < tenMinutesInMs) {
-              console.log('📋 GhostWriter: Paste keyboard shortcut detected, adding clipboard metadata');
-              stepPayload.aiEvidence = {
-                ...stepPayload.aiEvidence,
-                clipboardMetadata: {
-                  sourceSelector: clipboardData.sourceSelector,
-                  copiedValue: clipboardData.text.length > 500 
-                    ? clipboardData.text.substring(0, 500) + '...' 
-                    : clipboardData.text,
-                  timestamp: clipboardData.timestamp
-                }
-              };
-            } else {
-              console.log('📋 GhostWriter: Clipboard data too old for paste operation');
-            }
-          }
-        } catch (error) {
-          console.warn('GhostWriter: Failed to get clipboard data for paste step:', error);
-        }
-      }
 
       // Enrich with reliable replayer data (LocatorBundle, Intent, Success Conditions)
       const reliableData = this.enrichStepWithReliableData(actualElement, 'KEYBOARD', undefined, keyboardDetails.key);
@@ -2747,26 +2685,58 @@ export class RecordingManager {
   }
 
   /**
-   * Handle copy events to track data lineage (Phase 6)
+   * Handle copy events - creates COPY workflow step
    */
-  private handleCopy(_event: ClipboardEvent): void {
-    if (!this.isRecording) return;
+  private async handleCopy(_event: ClipboardEvent): Promise<void> {
+    if (!this.isRecording) {
+      return;
+    }
+
+    // Deduplication: Ignore duplicate events
+    const now = Date.now();
+    if (now - this.lastCopyEventTime < this.CLIPBOARD_EVENT_DEDUP_MS) {
+      return;
+    }
+    this.lastCopyEventTime = now;
+
+    console.log('📋 GhostWriter: Processing copy event');
 
     try {
       let selectedText: string | undefined;
       let actualElement: Element | null = null;
+      let selectionRange: { start: number; end: number } | undefined;
+      let selectAll = false;
 
-      // Better Text Extraction: Check if active element is input/textarea first
+      // Try multiple methods to get the copied text
+      // Method 1: Get from clipboardData (most reliable)
+      const clipboardText = _event.clipboardData?.getData('text/plain');
+
+      // Method 2: Check if active element is input/textarea
       const activeElement = document.activeElement;
-      if (activeElement && 
+
+      if (activeElement &&
           (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
         const inputElement = activeElement as HTMLInputElement | HTMLTextAreaElement;
         const selectionStart = inputElement.selectionStart || 0;
         const selectionEnd = inputElement.selectionEnd || 0;
-        
+
         if (selectionStart !== selectionEnd) {
           selectedText = inputElement.value.substring(selectionStart, selectionEnd);
           actualElement = activeElement as Element;
+
+          // Check if entire content was selected
+          if (selectionStart === 0 && selectionEnd === inputElement.value.length) {
+            selectAll = true;
+          } else {
+            selectionRange = { start: selectionStart, end: selectionEnd };
+          }
+        } else {
+          // No selection in input - try clipboardData
+          if (clipboardText) {
+            selectedText = clipboardText;
+            actualElement = activeElement as Element;
+            selectAll = true;
+          }
         }
       }
 
@@ -2774,91 +2744,342 @@ export class RecordingManager {
       if (!selectedText || selectedText.trim().length === 0) {
         const selection = window.getSelection();
         selectedText = selection?.toString();
-        
+
+        // If still no text, try clipboardData as final fallback
+        if ((!selectedText || selectedText.trim().length === 0) && clipboardText) {
+          selectedText = clipboardText;
+          actualElement = _event.target as Element;
+          selectAll = true;
+        }
+
+        // GOOGLE SHEETS FALLBACK: If still no text, try navigator.clipboard.readText()
+        // Google Sheets and similar apps use custom clipboard handling that doesn't populate standard APIs
         if (!selectedText || selectedText.trim().length === 0) {
-          return; // Nothing selected
+          try {
+            // Small delay to let the clipboard be populated
+            await new Promise(resolve => setTimeout(resolve, 50));
+            const clipboardApiText = await navigator.clipboard.readText();
+            if (clipboardApiText && clipboardApiText.trim().length > 0) {
+              selectedText = clipboardApiText;
+              actualElement = _event.target as Element || activeElement as Element;
+              selectAll = true;
+            }
+          } catch {
+            // Clipboard API failed - will abort below
+          }
+        }
+
+        if (!selectedText || selectedText.trim().length === 0) {
+          return; // Nothing to copy
         }
 
         // Get the source element (where the copy happened)
-        if (!selection || selection.rangeCount === 0) {
-          return;
+        if (!actualElement) {
+          if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            const sourceElement = range.commonAncestorContainer;
+
+            // Get actual element (text nodes don't have methods we need)
+            actualElement = sourceElement.nodeType === Node.TEXT_NODE
+              ? sourceElement.parentElement
+              : sourceElement as Element;
+          } else {
+            // Use event target as fallback
+            actualElement = _event.target as Element;
+          }
         }
 
-        const range = selection.getRangeAt(0);
-        const sourceElement = range.commonAncestorContainer;
-        
-        // Get actual element (text nodes don't have methods we need)
-        actualElement = sourceElement.nodeType === Node.TEXT_NODE 
-          ? sourceElement.parentElement 
-          : sourceElement as Element;
+        // For non-input elements, we typically select all visible text
+        selectAll = true;
       }
-      
+
       if (!actualElement) {
         return;
       }
 
       // Generate selector for source element
       const selectors = SelectorEngine.generateSelectors(actualElement);
-      
-      // Store to chrome.storage.local
+
+      // Store to chrome.storage.local for CROSS-TAB paste matching
+      // This is critical because each tab has its own content script instance
+      const normalizedForStorage = this.normalizeClipboardText(selectedText);
       const clipboardData = {
         text: selectedText,
+        normalizedText: normalizedForStorage,
         sourceSelector: selectors.primary,
         timestamp: Date.now(),
         url: window.location.href
       };
 
-      console.log('📋 GhostWriter Copy Detected:', selectedText, 'from', selectors.primary);
+      chrome.storage.local.set({ ghostwriter_clipboard: clipboardData });
 
-      chrome.storage.local.set({ ghostwriter_clipboard: clipboardData }, () => {
-        console.log('GhostWriter: Clipboard data stored:', {
-          textLength: selectedText.length,
-          sourceSelector: selectors.primary.substring(0, 50),
-          url: window.location.href
-        });
+      // Create COPY workflow step
+      const stepTimestamp = Date.now();
+
+      // For spreadsheets, capture the active cell reference for reliable replay
+      let spreadsheetCellRef: string | undefined;
+      if (SheetStateExtractor.isSpreadsheetDomain()) {
+        try {
+          const sheetState = await SheetStateExtractor.extract();
+          spreadsheetCellRef = sheetState?.activeCell?.reference;
+          console.log('📋 GhostWriter: COPY on spreadsheet - captured cell ref:', spreadsheetCellRef);
+        } catch (e) {
+          console.warn('📋 GhostWriter: Failed to capture spreadsheet cell ref for COPY:', e);
+        }
+      }
+
+      const stepPayload: WorkflowStep['payload'] = {
+        selector: selectors.primary,
+        fallbackSelectors: selectors.fallbacks.length > 0 ? selectors.fallbacks : [selectors.primary],
+        xpath: selectors.xpath,
+        timestamp: stepTimestamp,
+        url: window.location.href,
+        tabUrl: this.currentTabUrl || undefined,
+        tabTitle: this.currentTabTitle || undefined,
+        tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+        tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
+        shadowPath: selectors.shadowPath,
+        elementText: actualElement.textContent?.substring(0, 100) || undefined,
+        clipboardDetails: {
+          text: selectedText,
+          sourceSelector: selectors.primary,
+          selectAll,
+          selectionRange,
+          cellRef: spreadsheetCellRef, // For spreadsheet COPY - cell reference for reliable replay
+        },
+      };
+
+      // Capture visual snapshot
+      try {
+        const visuals = await VisualSnapshotService.capture(actualElement);
+        if (visuals) {
+          const rect = actualElement.getBoundingClientRect();
+          stepPayload.visualSnapshot = {
+            viewport: visuals.viewport,
+            elementSnippet: visuals.elementSnippet,
+            timestamp: Date.now(),
+            viewportSize: {
+              width: window.innerWidth,
+              height: window.innerHeight
+            },
+            elementBounds: {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+            }
+          };
+        }
+      } catch (snapshotError) {
+        console.warn('📸 GhostWriter: Failed to capture snapshot for copy event:', snapshotError);
+      }
+
+      // Enrich with reliable replayer data
+      const reliableData = this.enrichStepWithReliableData(actualElement, 'COPY');
+      if (reliableData) {
+        stepPayload.locatorBundle = reliableData.locatorBundle;
+        stepPayload.intent = reliableData.intent;
+        stepPayload.scope = reliableData.locatorBundle.scope;
+        stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+      }
+
+      const step: WorkflowStep = {
+        type: 'COPY',
+        payload: stepPayload,
+        description: `Copy "${selectedText.substring(0, 30)}${selectedText.length > 30 ? '...' : ''}"`,
+      };
+
+      this.sendStep(step);
+      this.lastStep = step;
+
+      // Track COPY for intent detection when PASTE happens
+      const normalizedText = this.normalizeClipboardText(selectedText);
+      this.copyStepsInSession.set(normalizedText, {
+        stepId: `${stepTimestamp}`,
+        text: selectedText,
+        normalizedText,
+        sourceSelector: selectors.primary,
+        timestamp: stepTimestamp,
+        stepIndex: this.copyStepsInSession.size, // Approximate index
       });
+
+      console.log('📋 GhostWriter: COPY step created');
     } catch (error) {
       console.warn('GhostWriter: Failed to handle copy event:', error);
     }
   }
 
   /**
-   * Handle paste events to track data lineage (Phase 6)
-   * This provides additional context for paste operations
+   * Handle paste events with INTENT DETECTION:
+   * - If pasted text matches a COPY in this session → Create linked PASTE step (data transfer)
+   * - If no matching COPY → Create INPUT step with isExternalPaste flag (variable)
    */
-  private handlePaste(_event: ClipboardEvent): void {
-    if (!this.isRecording) return;
+  private async handlePaste(_event: ClipboardEvent): Promise<void> {
+    if (!this.isRecording) {
+      return;
+    }
+
+    // Deduplication: Ignore duplicate events
+    const now = Date.now();
+    if (now - this.lastPasteEventTime < this.CLIPBOARD_EVENT_DEDUP_MS) {
+      return;
+    }
+    this.lastPasteEventTime = now;
 
     try {
       // Get the target element where paste is happening
       const target = _event.target as HTMLElement;
-      
+
       if (!target) {
         return;
       }
 
       // Try to get clipboard data from the event
       const pastedText = _event.clipboardData?.getData('text/plain');
-      
+
       if (!pastedText || pastedText.trim().length === 0) {
-        console.log('📋 GhostWriter: Paste event detected but no text data available');
         return;
       }
 
+      console.log('📋 GhostWriter: Processing paste event');
+
       // Generate selector for target element
       const selectors = SelectorEngine.generateSelectors(target);
-      
-      console.log('📋 GhostWriter: Paste detected:', {
-        textLength: pastedText.length,
-        targetSelector: selectors.primary.substring(0, 50),
-        targetTag: target.tagName
-      });
 
-      // Note: We don't create a workflow step here - the keyboard handler (Ctrl+V/Cmd+V) creates the step
-      // This handler just provides additional logging and could be used for future enhancements
-      
+      // INTENT DETECTION: Check if this paste matches a COPY from this session (cross-tab aware)
+      const matchingCopy = await this.findMatchingCopy(pastedText);
+      const stepTimestamp = Date.now();
+
+      if (matchingCopy) {
+        // DATA TRANSFER: Linked COPY+PASTE pair (user copied from within recording session)
+
+        const stepPayload: WorkflowStep['payload'] = {
+          selector: selectors.primary,
+          fallbackSelectors: selectors.fallbacks.length > 0 ? selectors.fallbacks : [selectors.primary],
+          xpath: selectors.xpath,
+          timestamp: stepTimestamp,
+          url: window.location.href,
+          tabUrl: this.currentTabUrl || undefined,
+          tabTitle: this.currentTabTitle || undefined,
+          tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+          tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
+          shadowPath: selectors.shadowPath,
+          label: target.getAttribute('aria-label') || target.getAttribute('placeholder') || undefined,
+          value: pastedText,
+          clipboardDetails: {
+            text: pastedText,
+            linkedCopyStepId: matchingCopy.stepId,
+            linkedCopyStepIndex: matchingCopy.stepIndex,
+            isExternalPaste: false,
+          },
+        };
+
+        // Capture visual snapshot
+        await this.captureVisualSnapshotForStep(target, stepPayload);
+
+        // Enrich with reliable replayer data
+        const reliableData = this.enrichStepWithReliableData(target, 'PASTE');
+        if (reliableData) {
+          stepPayload.locatorBundle = reliableData.locatorBundle;
+          stepPayload.intent = reliableData.intent;
+          stepPayload.scope = reliableData.locatorBundle.scope;
+          stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+        }
+
+        const step: WorkflowStep = {
+          type: 'PASTE',
+          payload: stepPayload,
+          description: `Paste "${pastedText.substring(0, 30)}${pastedText.length > 30 ? '...' : ''}" (from copied data)`,
+        };
+
+        this.sendStep(step);
+        this.lastStep = step;
+        console.log('📋 GhostWriter: PASTE step created (linked to COPY)');
+
+      } else {
+        // EXTERNAL PASTE: Convert to INPUT with variable hint (user pasted from external source)
+
+        const stepPayload: WorkflowStep['payload'] = {
+          selector: selectors.primary,
+          fallbackSelectors: selectors.fallbacks.length > 0 ? selectors.fallbacks : [selectors.primary],
+          xpath: selectors.xpath,
+          timestamp: stepTimestamp,
+          url: window.location.href,
+          tabUrl: this.currentTabUrl || undefined,
+          tabTitle: this.currentTabTitle || undefined,
+          tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+          tabInfo: this.currentTabUrl ? { url: this.currentTabUrl, title: this.currentTabTitle || '' } : undefined,
+          shadowPath: selectors.shadowPath,
+          label: target.getAttribute('aria-label') || target.getAttribute('placeholder') || undefined,
+          value: pastedText,
+          // Mark as external paste for variable detection
+          clipboardDetails: {
+            text: pastedText,
+            isExternalPaste: true,
+          },
+          // Add input details for proper variable detection
+          inputDetails: {
+            type: (target as HTMLInputElement).type || 'text',
+            required: (target as HTMLInputElement).required,
+          },
+        };
+
+        // Capture visual snapshot
+        await this.captureVisualSnapshotForStep(target, stepPayload);
+
+        // Enrich with reliable replayer data (as INPUT, not PASTE)
+        const reliableData = this.enrichStepWithReliableData(target, 'INPUT');
+        if (reliableData) {
+          stepPayload.locatorBundle = reliableData.locatorBundle;
+          stepPayload.intent = reliableData.intent;
+          stepPayload.scope = reliableData.locatorBundle.scope;
+          stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+        }
+
+        const step: WorkflowStep = {
+          type: 'INPUT',  // NOT PASTE - treat as variable input
+          payload: stepPayload,
+          description: `Enter "${pastedText.substring(0, 30)}${pastedText.length > 30 ? '...' : ''}" (example value)`,
+        };
+
+        this.sendStep(step);
+        this.lastStep = step;
+        console.log('📋 GhostWriter: INPUT step created from external paste (will be variable)');
+      }
     } catch (error) {
       console.warn('GhostWriter: Failed to handle paste event:', error);
+    }
+  }
+
+  /**
+   * Helper to capture visual snapshot for a step payload
+   */
+  private async captureVisualSnapshotForStep(
+    target: HTMLElement,
+    stepPayload: WorkflowStepPayload
+  ): Promise<void> {
+    try {
+      const visuals = await VisualSnapshotService.capture(target);
+      if (visuals) {
+        const rect = target.getBoundingClientRect();
+        stepPayload.visualSnapshot = {
+          viewport: visuals.viewport,
+          elementSnippet: visuals.elementSnippet,
+          timestamp: Date.now(),
+          viewportSize: {
+            width: window.innerWidth,
+            height: window.innerHeight
+          },
+          elementBounds: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          }
+        };
+      }
+    } catch (snapshotError) {
+      console.warn('📸 GhostWriter: Failed to capture snapshot:', snapshotError);
     }
   }
 
@@ -3597,6 +3818,121 @@ export class RecordingManager {
     this.stepPublisher.sendStep(step);
   }
 
+  // ============================================================
+  // Copy/Paste Intent Detection Helpers
+  // ============================================================
+
+  /**
+   * Normalize text for clipboard matching (handles whitespace, formatting artifacts)
+   */
+  private normalizeClipboardText(text: string): string {
+    return text
+      .trim()
+      .replace(/\s+/g, ' ')                         // Collapse multiple whitespace
+      .replace(/[\u200B-\u200D\uFEFF]/g, '');       // Remove zero-width chars
+  }
+
+  /**
+   * Find a matching COPY step for the given pasted text
+   * Uses cached clipboard data for CROSS-TAB matching
+   */
+  private async findMatchingCopy(pastedText: string | undefined): Promise<{
+    stepId: string;
+    text: string;
+    normalizedText: string;
+    sourceSelector: string;
+    timestamp: number;
+    stepIndex: number;
+  } | null> {
+    if (!pastedText) return null;
+
+    const normalized = this.normalizeClipboardText(pastedText);
+    if (!normalized) return null;
+
+    // Check cached clipboard from chrome.storage (set during COPY)
+    // Use Promise with timeout to prevent hanging
+    try {
+      const storedClipboard = await Promise.race([
+        chrome.storage.local.get('ghostwriter_clipboard').then(r => r.ghostwriter_clipboard as {
+          text: string;
+          normalizedText: string;
+          sourceSelector: string;
+          timestamp: number;
+          url: string;
+        } | undefined),
+        new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 100)) // 100ms timeout
+      ]);
+
+      if (storedClipboard?.normalizedText) {
+        // Check exact match
+        if (storedClipboard.normalizedText === normalized) {
+          console.log('📋 GhostWriter: Found COPY match!');
+          return {
+            stepId: `${storedClipboard.timestamp}`,
+            text: storedClipboard.text,
+            normalizedText: storedClipboard.normalizedText,
+            sourceSelector: storedClipboard.sourceSelector,
+            timestamp: storedClipboard.timestamp,
+            stepIndex: 0,
+          };
+        }
+
+        // Check fuzzy match (>95% similarity)
+        if (this.textSimilarity(normalized, storedClipboard.normalizedText) > 0.95) {
+          console.log('📋 GhostWriter: Found COPY match (fuzzy)!');
+          return {
+            stepId: `${storedClipboard.timestamp}`,
+            text: storedClipboard.text,
+            normalizedText: storedClipboard.normalizedText,
+            sourceSelector: storedClipboard.sourceSelector,
+            timestamp: storedClipboard.timestamp,
+            stepIndex: 0,
+          };
+        }
+      }
+    } catch {
+      // Storage read failed - continue without match
+    }
+
+    // Fallback: check local Map (same-tab scenario)
+    const exactMatch = this.copyStepsInSession.get(normalized);
+    if (exactMatch) return exactMatch;
+
+    for (const [, copyInfo] of this.copyStepsInSession) {
+      if (this.textSimilarity(normalized, copyInfo.normalizedText) > 0.95) {
+        return copyInfo;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Calculate text similarity using Dice coefficient (bigram overlap)
+   * Returns 0-1 where 1 is identical
+   */
+  private textSimilarity(a: string, b: string): number {
+    if (a === b) return 1;
+    if (a.length < 2 || b.length < 2) return 0;
+
+    const bigrams = (s: string): Set<string> => {
+      const set = new Set<string>();
+      for (let i = 0; i < s.length - 1; i++) {
+        set.add(s.slice(i, i + 2));
+      }
+      return set;
+    };
+
+    const aBigrams = bigrams(a);
+    const bBigrams = bigrams(b);
+    let intersection = 0;
+    for (const bg of aBigrams) {
+      if (bBigrams.has(bg)) intersection++;
+    }
+
+    return (2 * intersection) / (aBigrams.size + bBigrams.size);
+  }
+
   /**
    * Get current recording state
    */
@@ -3743,7 +4079,7 @@ export class RecordingManager {
    */
   private enrichStepWithReliableData(
     element: Element,
-    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD',
+    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
     value?: string,
     key?: string
   ): {

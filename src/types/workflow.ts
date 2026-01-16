@@ -17,7 +17,7 @@ import type { Intent, StepGoal } from './intent';
 import type { Scope } from './scope';
 import type { SuggestedCondition } from './conditions';
 
-export type WorkflowStepType = 'CLICK' | 'INPUT' | 'NAVIGATION' | 'KEYBOARD' | 'SCROLL' | 'TAB_SWITCH';
+export type WorkflowStepType = 'CLICK' | 'INPUT' | 'NAVIGATION' | 'KEYBOARD' | 'SCROLL' | 'TAB_SWITCH' | 'COPY' | 'PASTE';
 
 export interface ElementState {
   visible: boolean;
@@ -375,6 +375,26 @@ export interface WorkflowStepPayload {
   // Unified Interaction Type Detection
   // Detected once during recording to eliminate fragmented detection logic
   interactionType?: import('../content/interaction-detector').InteractionType;
+
+  /** Clipboard operation details (for COPY and PASTE steps) */
+  clipboardDetails?: {
+    /** The text that was copied/pasted */
+    text: string;
+    /** Source element selector (for COPY) - where text was copied from */
+    sourceSelector?: string;
+    /** Whether the entire element content was selected */
+    selectAll?: boolean;
+    /** Selection range if partial selection (for COPY) */
+    selectionRange?: { start: number; end: number };
+    /** Links PASTE to source COPY step (data transfer intent) */
+    linkedCopyStepId?: string;
+    /** Step index of linked COPY for easier reference */
+    linkedCopyStepIndex?: number;
+    /** True if this paste came from external clipboard (demo/variable intent) */
+    isExternalPaste?: boolean;
+    /** Cell reference for spreadsheet COPY (e.g., "A5") - enables reliable replay */
+    cellRef?: string;
+  };
 }
 
 export interface Pattern {

@@ -20,6 +20,8 @@ import type { LocatorBundle, LocatorStrategy } from '../types/locator';
 import type { Intent } from '../types/intent';
 import { SelectorReliability } from './selector-reliability';
 import { findBestMatch } from './fuzzy-option-matcher';
+import { SheetStateExtractor } from '../content/sheet-state-extractor';
+import { SpreadsheetExecutor } from './spreadsheet-executor';
 
 // ============================================================================
 // Types
@@ -128,7 +130,13 @@ export class Tier1Executor {
         
         case 'hover':
           return await this.executeHover(action);
-        
+
+        case 'copy':
+          return await this.executeCopy(action);
+
+        case 'paste':
+          return await this.executePaste(action);
+
         case 'done':
           return { status: 'success', details: {} };
         
@@ -1526,6 +1534,277 @@ export class Tier1Executor {
   }
 
   /**
+   * Write text to clipboard with fallback for content scripts
+   * Uses Clipboard API first, falls back to execCommand with temp textarea
+   */
+  private static async writeToClipboard(text: string): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      console.log('[Tier1] 📋 Text written to clipboard via Clipboard API');
+      return true;
+    } catch {
+      console.log('[Tier1] 📋 Clipboard API failed, using execCommand fallback');
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      const success = document.execCommand('copy');
+      document.body.removeChild(textarea);
+      console.log(`[Tier1] 📋 execCommand copy result: ${success}`);
+      return success;
+    }
+  }
+
+  /**
+   * Execute copy action - select text and copy to clipboard
+   */
+  private static async executeCopy(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target, text, selectAll, selectionRange, cellRef } = action.params;
+
+    // SPREADSHEET FAST PATH: If we have a cell reference, use SpreadsheetExecutor
+    if (cellRef && SheetStateExtractor.isSpreadsheetDomain()) {
+      console.log(`[Tier1] 📋 COPY with cellRef ${cellRef} - using SpreadsheetExecutor`);
+      try {
+        const spreadsheetResult = await SpreadsheetExecutor.execute({
+          action: 'read_cell',
+          cellRef: cellRef,
+        });
+
+        if (spreadsheetResult.success && spreadsheetResult.value) {
+          // Write the cell value to clipboard
+          const cellValue = spreadsheetResult.value;
+          console.log(`[Tier1] 📋 Read cell ${cellRef} value: "${cellValue.substring(0, 50)}"`);
+
+          await this.writeToClipboard(cellValue);
+          return { status: 'success', details: { value: cellValue } };
+        } else {
+          console.warn('[Tier1] 📋 SpreadsheetExecutor read_cell failed:', spreadsheetResult.error);
+          // Fall through to element-based copy
+        }
+      } catch (error) {
+        console.warn('[Tier1] 📋 SpreadsheetExecutor error:', error);
+        // Fall through to element-based copy
+      }
+    }
+
+    if (!target && !text) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No target or text specified for copy action',
+      };
+    }
+
+    let element: HTMLElement | null = null;
+
+    // Resolve target element if specified
+    if (target) {
+      const bundle = this.buildLocatorBundle(target);
+      const result = await this.resolveElement(bundle, { kind: 'CLICK' });
+      if (result.status === 'success' && result.details.element instanceof HTMLElement) {
+        element = result.details.element;
+      } else {
+        // Element not found - for spreadsheets, try using keyboard shortcut on current selection
+        const isSpreadsheet = window.location.hostname.includes('docs.google.com') ||
+                              window.location.hostname.includes('sheets.google.com') ||
+                              window.location.hostname.includes('excel.');
+        if (isSpreadsheet && text) {
+          console.log('[Tier1] 📋 COPY element not found on spreadsheet - using Ctrl+C on current selection');
+          // Try keyboard copy on current selection
+          document.execCommand('copy');
+          await this.sleep(100);
+          // Verify clipboard has content
+          try {
+            const clipboardText = await navigator.clipboard.readText();
+            if (clipboardText && clipboardText.trim()) {
+              console.log('[Tier1] 📋 Keyboard copy succeeded:', clipboardText.substring(0, 30));
+              return { status: 'success', details: { value: clipboardText } };
+            }
+          } catch {
+            // Clipboard read failed, continue to use stored text
+          }
+          // If keyboard copy didn't work, fall back to stored text
+          console.log('[Tier1] 📋 Falling back to stored text for clipboard');
+          await this.writeToClipboard(text);
+          return { status: 'success', details: { value: text } };
+        }
+        return result;
+      }
+    }
+
+    // If we have an element, focus it and select text
+    if (element) {
+      element.focus();
+      await this.sleep(50);
+
+      // Select text based on selection mode
+      if (selectAll !== false) {
+        // Select all content by default
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          element.select();
+        } else {
+          // Use Selection API for other elements
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          window.getSelection()?.removeAllRanges();
+          window.getSelection()?.addRange(range);
+        }
+      } else if (selectionRange) {
+        // Select specific range
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+          element.setSelectionRange(selectionRange.start, selectionRange.end);
+        }
+      }
+      await this.sleep(50);
+    }
+
+    // Copy to clipboard
+    const textToCopy = text || window.getSelection()?.toString() || '';
+
+    if (!textToCopy) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No text to copy',
+      };
+    }
+
+    console.log(`[Tier1] 📋 Copying text: "${textToCopy.substring(0, 50)}${textToCopy.length > 50 ? '...' : ''}"`);
+
+    // Use universal clipboard helper (handles Clipboard API + execCommand fallback)
+    await this.writeToClipboard(textToCopy);
+
+    // Wait for stability
+    await StateWaitEngine.waitForStability({
+      domQuietMs: 100,
+      maxWaitMs: 1000,
+    });
+
+    return {
+      status: 'success',
+      details: { value: textToCopy },
+    };
+  }
+
+  /**
+   * Execute paste action
+   * - Linked PASTE (has linkedCopyStepId): Read from system clipboard (COPY step should have populated it)
+   * - Standalone PASTE: Use stored text value
+   */
+  private static async executePaste(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target, text, linkedCopyStepId } = action.params;
+
+    if (!target) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No target specified for paste action',
+      };
+    }
+
+    // Resolve target element
+    const bundle = this.buildLocatorBundle(target);
+    const result = await this.resolveElement(bundle, { kind: 'TYPE', valueVar: text || '' });
+
+    if (result.status !== 'success' || !(result.details.element instanceof HTMLElement)) {
+      return result;
+    }
+
+    const element = result.details.element;
+    element.focus();
+    await this.sleep(50);
+
+    // Get text to paste based on whether this is a linked paste or standalone
+    let textToPaste = '';
+
+    if (linkedCopyStepId) {
+      // LINKED PASTE: The preceding COPY step should have populated the clipboard
+      console.log(`[Tier1] 📋 Linked PASTE (copy step: ${linkedCopyStepId}) - reading from clipboard`);
+      try {
+        textToPaste = await navigator.clipboard.readText();
+        console.log('[Tier1] 📋 Read from clipboard:', textToPaste.substring(0, 50));
+      } catch (clipboardError) {
+        console.warn('[Tier1] 📋 Clipboard read failed for linked paste:', clipboardError);
+        // For linked paste, fall back to stored text if available
+        if (text) {
+          console.log('[Tier1] 📋 Falling back to stored text');
+          textToPaste = text;
+        } else {
+          return {
+            status: 'rejected',
+            code: 'UNSAFE_ACTION',
+            details: { dangerousPattern: 'Clipboard access denied for linked paste' },
+            message: 'Failed to read clipboard for linked paste - COPY step may not have executed',
+          };
+        }
+      }
+    } else {
+      // STANDALONE PASTE: Use stored text, fall back to clipboard
+      textToPaste = text || '';
+      if (!textToPaste) {
+        try {
+          textToPaste = await navigator.clipboard.readText();
+          console.log('[Tier1] 📋 Read text from clipboard (standalone paste)');
+        } catch (clipboardError) {
+          console.log('[Tier1] 📋 Clipboard read failed, no stored text available');
+          return {
+            status: 'rejected',
+            code: 'NOT_FOUND',
+            details: {},
+            message: 'No text available to paste (clipboard access denied and no stored text)',
+          };
+        }
+      }
+    }
+
+    console.log(`[Tier1] 📋 Pasting text: "${textToPaste.substring(0, 50)}${textToPaste.length > 50 ? '...' : ''}"`);
+
+    // Insert text based on element type
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      // For input/textarea: set value using native setter (React-friendly)
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        element instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype,
+        'value'
+      )?.set;
+
+      if (nativeSetter) {
+        nativeSetter.call(element, textToPaste);
+      } else {
+        element.value = textToPaste;
+      }
+
+      // Dispatch input events
+      element.dispatchEvent(new Event('input', { bubbles: true }));
+      element.dispatchEvent(new Event('change', { bubbles: true }));
+      element.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+    } else if (element.isContentEditable) {
+      // For contenteditable: use execCommand
+      document.execCommand('insertText', false, textToPaste);
+    } else {
+      // Generic fallback
+      element.textContent = textToPaste;
+    }
+
+    // Wait for stability
+    await StateWaitEngine.waitForStability({
+      domQuietMs: 150,
+      maxWaitMs: 2000,
+    });
+
+    return {
+      status: 'success',
+      details: { value: textToPaste },
+    };
+  }
+
+  /**
    * Execute hover action - reveal hover-activated menus
    */
   private static async executeHover(action: AgentAction): Promise<Tier1ExecutionResult> {
@@ -2641,7 +2920,24 @@ export class Tier1Executor {
         features: this.createFeatures(false, false, false),
       });
     }
-    
+
+    // Add recordedFallbackSelectors as CSS strategies if we have no other strategies
+    // These are the actual selectors captured during recording
+    if (strategies.length === 0 && target.recordedFallbackSelectors && target.recordedFallbackSelectors.length > 0) {
+      console.log('[Tier1] Using recordedFallbackSelectors as primary strategies');
+      for (const selector of target.recordedFallbackSelectors) {
+        if (selector && typeof selector === 'string' && selector.trim()) {
+          // Determine if it's XPath or CSS
+          const isXPath = selector.startsWith('//') || selector.startsWith('(//');
+          strategies.push({
+            type: isXPath ? 'xpath' : 'css',
+            value: selector,
+            features: this.createFeatures(false, false, true), // Dynamic parts likely
+          });
+        }
+      }
+    }
+
     // Final safety check - must have at least one strategy
     if (strategies.length === 0) {
       console.error('[Tier1] Cannot build locator bundle - no valid strategies for target:', target);
