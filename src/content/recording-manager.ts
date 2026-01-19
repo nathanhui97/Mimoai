@@ -1738,22 +1738,18 @@ export class RecordingManager {
             };
           }
 
-          // Enrich with PageModel context (page type, relationships, alternatives, expectations)
-          // This captures WHY this element was chosen for intelligent replay
-          try {
-            const pageModelContext = await this.enrichStepWithPageModelContext(target, 'CLICK');
-            if (pageModelContext) {
-              stepPayload.pageModelContext = pageModelContext;
-              console.log('📸 GhostWriter: PageModel context attached:', {
-                pageType: pageModelContext.pageContext.pageType,
-                hasRelationships: !!(pageModelContext.elementRelationships.labeledBy || pageModelContext.elementRelationships.triggers),
-                alternativesCount: pageModelContext.alternatives.similarElements.length,
-                expectedOutcome: pageModelContext.expectations.primary.type,
-              });
-            }
-          } catch (error) {
-            console.warn('GhostWriter: Failed to capture PageModel context:', error);
-          }
+          // DISABLED: PageModel context capture during recording causes lag
+          // AI analysis now runs AFTER recording stops (in App.tsx handleStopRecording)
+          // The post-recording analyzer provides richer analysis without impacting recording performance
+          //
+          // try {
+          //   const pageModelContext = await this.enrichStepWithPageModelContext(target, 'CLICK');
+          //   if (pageModelContext) {
+          //     stepPayload.pageModelContext = pageModelContext;
+          //   }
+          // } catch (error) {
+          //   console.warn('GhostWriter: Failed to capture PageModel context:', error);
+          // }
 
           // Determine wait conditions based on this step and previous step
           const step: WorkflowStep = {
@@ -3739,22 +3735,18 @@ export class RecordingManager {
         };
       }
 
-      // Enrich with PageModel context (page type, relationships, alternatives, expectations)
-      // This captures WHY this element was chosen for intelligent replay
-      try {
-        const pageModelContext = await this.enrichStepWithPageModelContext(element, 'INPUT', value);
-        if (pageModelContext) {
-          stepPayload.pageModelContext = pageModelContext;
-          console.log('📸 GhostWriter: PageModel context attached to INPUT:', {
-            pageType: pageModelContext.pageContext.pageType,
-            hasRelationships: !!(pageModelContext.elementRelationships.labeledBy || pageModelContext.elementRelationships.triggers),
-            alternativesCount: pageModelContext.alternatives.similarElements.length,
-            expectedOutcome: pageModelContext.expectations.primary.type,
-          });
-        }
-      } catch (error) {
-        console.warn('GhostWriter: Failed to capture PageModel context for INPUT:', error);
-      }
+      // DISABLED: PageModel context capture during recording causes lag
+      // AI analysis now runs AFTER recording stops (in App.tsx handleStopRecording)
+      // The post-recording analyzer provides richer analysis without impacting recording performance
+      //
+      // try {
+      //   const pageModelContext = await this.enrichStepWithPageModelContext(element, 'INPUT', value);
+      //   if (pageModelContext) {
+      //     stepPayload.pageModelContext = pageModelContext;
+      //   }
+      // } catch (error) {
+      //   console.warn('GhostWriter: Failed to capture PageModel context for INPUT:', error);
+      // }
 
       // Determine wait conditions based on this step and previous step
       const step: WorkflowStep = {
@@ -4125,21 +4117,21 @@ export class RecordingManager {
     return this.stepEnricher.enrichStep(element, stepType, value, key);
   }
 
-  /**
-   * Enrich step with PageModel context for intelligent replay
-   * This captures the rich understanding of WHY this element was selected
-   */
-  private async enrichStepWithPageModelContext(
-    element: Element,
-    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
-    value?: string
-  ): Promise<import('../lib/page-model/types').PageModelRecordingContext | null> {
-    try {
-      return await this.stepEnricher.enrichWithPageModelContext(element, stepType, value);
-    } catch (error) {
-      console.warn('GhostWriter: Failed to enrich step with PageModel context:', error);
-      return null;
-    }
-  }
+  // DISABLED: PageModel context capture during recording causes lag
+  // AI analysis now runs AFTER recording stops (in App.tsx handleStopRecording)
+  // Keeping this method for potential future use with lighter-weight capture
+  //
+  // private async enrichStepWithPageModelContext(
+  //   element: Element,
+  //   stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
+  //   value?: string
+  // ): Promise<import('../lib/page-model/types').PageModelRecordingContext | null> {
+  //   try {
+  //     return await this.stepEnricher.enrichWithPageModelContext(element, stepType, value);
+  //   } catch (error) {
+  //     console.warn('GhostWriter: Failed to enrich step with PageModel context:', error);
+  //     return null;
+  //   }
+  // }
 }
 
