@@ -641,7 +641,7 @@ async function callAIService(prompt: string): Promise<string> {
       return JSON.stringify(createFallbackAnalysis());
     }
 
-    const response = await fetch(`${supabaseUrl}/functions/v1/analyze-workflow`, {
+    const response = await fetch(`${supabaseUrl}/functions/v1/analyze_workflow`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
