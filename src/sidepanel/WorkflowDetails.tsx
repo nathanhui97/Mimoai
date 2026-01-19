@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { SavedWorkflow, WorkflowStep } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
+import type { StepExecutionGuidance } from '../lib/post-recording-analyzer';
 
 interface WorkflowDetailsProps {
   workflow: SavedWorkflow;
@@ -28,6 +29,16 @@ export function WorkflowDetails({
   const [editingDescription, setEditingDescription] = useState(false);
   const [editingStepIndex, setEditingStepIndex] = useState<number | null>(null);
   const [showSteps, setShowSteps] = useState(false);
+  // AI insight expansion state
+  const [expandedAIInsight, setExpandedAIInsight] = useState<number | null>(null);
+
+  // Check if workflow has AI analysis
+  const hasAIAnalysis = !!workflow.aiAnalysis?.stepGuidance?.length;
+
+  // Get AI guidance for a specific step
+  const getAIGuidance = (stepIndex: number): StepExecutionGuidance | undefined => {
+    return workflow.aiAnalysis?.stepGuidance?.find(g => g.stepIndex === stepIndex);
+  };
 
   // Temporary edit values
   const [editedName, setEditedName] = useState(workflow.name);
@@ -195,15 +206,81 @@ export function WorkflowDetails({
         )}
       </div>
 
+      {/* AI Analysis Summary - show patterns and understanding */}
+      {hasAIAnalysis && workflow.aiAnalysis && (
+        <div className="mb-5 p-4 bg-purple-50 border border-purple-200 rounded-2xl">
+          <div className="flex items-center gap-2 mb-3">
+            <svg className="w-4 h-4 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+            <h3 className="text-sm font-semibold text-purple-800">AI Analysis</h3>
+          </div>
+
+          {/* Workflow understanding */}
+          {workflow.aiAnalysis.workflowUnderstanding && (
+            <div className="mb-3">
+              <p className="text-sm text-purple-700">
+                {workflow.aiAnalysis.workflowUnderstanding.primaryGoal}
+              </p>
+              <div className="flex flex-wrap gap-2 mt-2">
+                <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded-full">
+                  {workflow.aiAnalysis.workflowUnderstanding.domain}
+                </span>
+                {workflow.aiAnalysis.workflowUnderstanding.entities.length > 0 && (
+                  <span className="px-2 py-0.5 text-xs bg-purple-100 text-purple-700 rounded-full">
+                    {workflow.aiAnalysis.workflowUnderstanding.entities.slice(0, 2).join(', ')}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Detected patterns */}
+          {workflow.aiAnalysis.patterns && workflow.aiAnalysis.patterns.length > 0 && (
+            <div className="border-t border-purple-200 pt-3 mt-3">
+              <h4 className="text-xs font-semibold text-purple-800 mb-2">Detected Patterns</h4>
+              <div className="flex flex-wrap gap-2">
+                {workflow.aiAnalysis.patterns.map((pattern, i) => (
+                  <span
+                    key={i}
+                    className="px-2 py-1 text-xs bg-white border border-purple-200 text-purple-700 rounded-lg"
+                    title={pattern.description}
+                  >
+                    {pattern.type.replace(/-/g, ' ')}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Adaptation strategies summary */}
+          {workflow.aiAnalysis.adaptationStrategies && workflow.aiAnalysis.adaptationStrategies.length > 0 && (
+            <div className="border-t border-purple-200 pt-3 mt-3">
+              <h4 className="text-xs font-semibold text-purple-800 mb-2">Adaptation Ready</h4>
+              <p className="text-xs text-purple-600">
+                This workflow can adapt to: {workflow.aiAnalysis.adaptationStrategies.map(s => s.scenario).join(', ')}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Steps list - collapsible */}
       <div className="mb-5">
         <button
           onClick={() => setShowSteps(!showSteps)}
           className="w-full flex items-center justify-between p-4 bg-muted/30 rounded-xl hover:bg-muted/50 transition-colors"
         >
-          <span className="text-sm font-medium text-foreground">
-            {workflow.steps.length} steps
-          </span>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-foreground">
+              {workflow.steps.length} steps
+            </span>
+            {hasAIAnalysis && (
+              <span className="px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-700 rounded-full">
+                AI Enhanced
+              </span>
+            )}
+          </div>
           <svg
             className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${showSteps ? 'rotate-180' : ''}`}
             fill="none"
@@ -215,49 +292,122 @@ export function WorkflowDetails({
         </button>
 
         {showSteps && (
-          <div className="mt-3 p-4 bg-card rounded-2xl border border-border/60 shadow-soft space-y-2 max-h-[300px] overflow-y-auto animate-fade-in">
+          <div className="mt-3 p-4 bg-card rounded-2xl border border-border/60 shadow-soft space-y-2 max-h-[400px] overflow-y-auto animate-fade-in">
             {workflow.steps.map((step, index) => {
               const isEditing = editingStepIndex === index;
               const currentDescription = editedSteps.get(index) ?? getHumanDescription(step);
+              const aiGuidance = getAIGuidance(index);
+              const isAIExpanded = expandedAIInsight === index;
 
               return (
-                <div
-                  key={index}
-                  className="group py-3 px-4 bg-muted/30 rounded-xl text-sm flex items-start gap-3 hover:bg-muted/50 transition-colors"
-                >
-                  <span className="text-muted-foreground flex-shrink-0 font-medium">
-                    {index + 1}.
-                  </span>
-                  {isEditing ? (
-                    <input
-                      type="text"
-                      value={currentDescription}
-                      onChange={(e) => {
-                        const newMap = new Map(editedSteps);
-                        newMap.set(index, e.target.value);
-                        setEditedSteps(newMap);
-                      }}
-                      onBlur={() => setEditingStepIndex(null)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') setEditingStepIndex(null);
-                        if (e.key === 'Escape') {
-                          const newMap = new Map(editedSteps);
-                          newMap.delete(index);
-                          setEditedSteps(newMap);
-                          setEditingStepIndex(null);
-                        }
-                      }}
-                      className="flex-1 text-foreground bg-background border border-border/60 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
-                      autoFocus
-                    />
-                  ) : (
-                    <span
-                      onClick={() => setEditingStepIndex(index)}
-                      className="flex-1 text-foreground cursor-pointer hover:text-primary transition-colors"
-                      title="Click to edit"
-                    >
-                      {currentDescription}
+                <div key={index} className="space-y-1">
+                  {/* Step row */}
+                  <div
+                    className="group py-3 px-4 bg-muted/30 rounded-xl text-sm flex items-start gap-3 hover:bg-muted/50 transition-colors"
+                  >
+                    <span className="text-muted-foreground flex-shrink-0 font-medium">
+                      {index + 1}.
                     </span>
+                    {isEditing ? (
+                      <input
+                        type="text"
+                        value={currentDescription}
+                        onChange={(e) => {
+                          const newMap = new Map(editedSteps);
+                          newMap.set(index, e.target.value);
+                          setEditedSteps(newMap);
+                        }}
+                        onBlur={() => setEditingStepIndex(null)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') setEditingStepIndex(null);
+                          if (e.key === 'Escape') {
+                            const newMap = new Map(editedSteps);
+                            newMap.delete(index);
+                            setEditedSteps(newMap);
+                            setEditingStepIndex(null);
+                          }
+                        }}
+                        className="flex-1 text-foreground bg-background border border-border/60 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+                        autoFocus
+                      />
+                    ) : (
+                      <span
+                        onClick={() => setEditingStepIndex(index)}
+                        className="flex-1 text-foreground cursor-pointer hover:text-primary transition-colors"
+                        title="Click to edit"
+                      >
+                        {currentDescription}
+                      </span>
+                    )}
+                    {/* AI insight toggle button */}
+                    {aiGuidance && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setExpandedAIInsight(isAIExpanded ? null : index);
+                        }}
+                        className={`p-1.5 rounded-lg transition-colors ${
+                          isAIExpanded
+                            ? 'bg-purple-100 text-purple-700'
+                            : 'text-muted-foreground hover:text-purple-600 hover:bg-purple-50'
+                        }`}
+                        title="View AI analysis"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* AI Insight card - expandable */}
+                  {aiGuidance && isAIExpanded && (
+                    <div className="ml-8 p-3 bg-purple-50 border border-purple-200 rounded-xl text-xs space-y-2 animate-fade-in">
+                      {/* Intent */}
+                      <div>
+                        <span className="font-semibold text-purple-800">Why: </span>
+                        <span className="text-purple-700">{aiGuidance.whyThisElement || aiGuidance.intent}</span>
+                      </div>
+
+                      {/* Expected outcome */}
+                      {aiGuidance.expectedOutcome && (
+                        <div>
+                          <span className="font-semibold text-purple-800">Expects: </span>
+                          <span className="text-purple-700">{aiGuidance.expectedOutcome}</span>
+                        </div>
+                      )}
+
+                      {/* How to find element */}
+                      {aiGuidance.elementFindingStrategy && (
+                        <div>
+                          <span className="font-semibold text-purple-800">Find by: </span>
+                          <span className="text-purple-700">
+                            {aiGuidance.elementFindingStrategy.lookingFor}
+                            {aiGuidance.elementFindingStrategy.distinguishers.length > 0 && (
+                              <> ({aiGuidance.elementFindingStrategy.distinguishers.slice(0, 2).join(', ')})</>
+                            )}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Criticality badge */}
+                      <div className="flex items-center gap-2 pt-1">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                          aiGuidance.criticality === 'critical'
+                            ? 'bg-red-100 text-red-700'
+                            : aiGuidance.criticality === 'important'
+                            ? 'bg-amber-100 text-amber-700'
+                            : 'bg-gray-100 text-gray-600'
+                        }`}>
+                          {aiGuidance.criticality}
+                        </span>
+                        {aiGuidance.dependencies.length > 0 && (
+                          <span className="text-purple-600">
+                            Depends on step{aiGuidance.dependencies.length > 1 ? 's' : ''} {aiGuidance.dependencies.map(d => d + 1).join(', ')}
+                          </span>
+                        )}
+                      </div>
+                    </div>
                   )}
                 </div>
               );
