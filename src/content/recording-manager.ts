@@ -1721,12 +1721,12 @@ export class RecordingManager {
             stepPayload.suggestedCondition = reliableData.suggestedCondition;
             stepPayload.scope = reliableData.locatorBundle.scope;
             stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
-            
+
             // Calculate locator quality metrics
             const hasStableAttributes = reliableData.locatorBundle.strategies.some(s => s.features.hasStableAttributes);
             const hasUniqueMatch = reliableData.locatorBundle.strategies.some(s => s.features.uniqueMatchAtRecordTime);
             const hasDynamicParts = reliableData.locatorBundle.strategies.some(s => s.features.hasDynamicParts);
-            
+
             stepPayload.locatorQuality = {
               hasStableAttributes,
               hasUniqueMatch,
@@ -1736,6 +1736,23 @@ export class RecordingManager {
                               hasStableAttributes || hasUniqueMatch ? 0.7 :
                               reliableData.locatorBundle.strategies.length >= 3 ? 0.5 : 0.3,
             };
+          }
+
+          // Enrich with PageModel context (page type, relationships, alternatives, expectations)
+          // This captures WHY this element was chosen for intelligent replay
+          try {
+            const pageModelContext = await this.enrichStepWithPageModelContext(target, 'CLICK');
+            if (pageModelContext) {
+              stepPayload.pageModelContext = pageModelContext;
+              console.log('📸 GhostWriter: PageModel context attached:', {
+                pageType: pageModelContext.pageContext.pageType,
+                hasRelationships: !!(pageModelContext.elementRelationships.labeledBy || pageModelContext.elementRelationships.triggers),
+                alternativesCount: pageModelContext.alternatives.similarElements.length,
+                expectedOutcome: pageModelContext.expectations.primary.type,
+              });
+            }
+          } catch (error) {
+            console.warn('GhostWriter: Failed to capture PageModel context:', error);
           }
 
           // Determine wait conditions based on this step and previous step
@@ -3705,12 +3722,12 @@ export class RecordingManager {
         stepPayload.suggestedCondition = reliableData.suggestedCondition;
         stepPayload.scope = reliableData.locatorBundle.scope;
         stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
-        
+
         // Calculate locator quality metrics
         const hasStableAttributes = reliableData.locatorBundle.strategies.some(s => s.features.hasStableAttributes);
         const hasUniqueMatch = reliableData.locatorBundle.strategies.some(s => s.features.uniqueMatchAtRecordTime);
         const hasDynamicParts = reliableData.locatorBundle.strategies.some(s => s.features.hasDynamicParts);
-        
+
         stepPayload.locatorQuality = {
           hasStableAttributes,
           hasUniqueMatch,
@@ -3720,6 +3737,23 @@ export class RecordingManager {
                           hasStableAttributes || hasUniqueMatch ? 0.7 :
                           reliableData.locatorBundle.strategies.length >= 3 ? 0.5 : 0.3,
         };
+      }
+
+      // Enrich with PageModel context (page type, relationships, alternatives, expectations)
+      // This captures WHY this element was chosen for intelligent replay
+      try {
+        const pageModelContext = await this.enrichStepWithPageModelContext(element, 'INPUT', value);
+        if (pageModelContext) {
+          stepPayload.pageModelContext = pageModelContext;
+          console.log('📸 GhostWriter: PageModel context attached to INPUT:', {
+            pageType: pageModelContext.pageContext.pageType,
+            hasRelationships: !!(pageModelContext.elementRelationships.labeledBy || pageModelContext.elementRelationships.triggers),
+            alternativesCount: pageModelContext.alternatives.similarElements.length,
+            expectedOutcome: pageModelContext.expectations.primary.type,
+          });
+        }
+      } catch (error) {
+        console.warn('GhostWriter: Failed to capture PageModel context for INPUT:', error);
       }
 
       // Determine wait conditions based on this step and previous step
@@ -4089,6 +4123,23 @@ export class RecordingManager {
     suggestedCondition: SuggestedCondition;
   } | null {
     return this.stepEnricher.enrichStep(element, stepType, value, key);
+  }
+
+  /**
+   * Enrich step with PageModel context for intelligent replay
+   * This captures the rich understanding of WHY this element was selected
+   */
+  private async enrichStepWithPageModelContext(
+    element: Element,
+    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
+    value?: string
+  ): Promise<import('../lib/page-model/types').PageModelRecordingContext | null> {
+    try {
+      return await this.stepEnricher.enrichWithPageModelContext(element, stepType, value);
+    } catch (error) {
+      console.warn('GhostWriter: Failed to enrich step with PageModel context:', error);
+      return null;
+    }
   }
 }
 

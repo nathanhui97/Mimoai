@@ -691,8 +691,9 @@ export class VisualSnapshotService {
 
   /**
    * Detect page regions using DOM heuristics
+   * Made public for PageModel signal aggregation
    */
-  private static detectPageRegions(): PageRegions {
+  static detectPageRegions(): PageRegions {
     const regions: PageRegions = {};
     const viewportWidth = window.innerWidth;
     const viewportHeight = window.innerHeight;

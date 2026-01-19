@@ -6,6 +6,8 @@ import { CorrectionMemory } from '../lib/correction-memory';
 import { VariableDetector } from '../lib/variable-detector';
 // import { NavigationOptimizer } from '../lib/navigation-optimizer'; // DISABLED - breaks AI Agent workflows
 import { IntentAnalyzer } from '../lib/intent-analyzer';
+import { analyzeWorkflowWithAI } from '../lib/post-recording-analyzer';
+import type { WorkflowAnalysis } from '../lib/post-recording-analyzer';
 import { SiteKnowledgeBase } from '../lib/site-knowledge';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
@@ -78,6 +80,9 @@ function App() {
   // Recording finalization state (flushing pending steps)
   const [isFinalizingRecording, setIsFinalizingRecording] = useState(false);
   const [currentWorkflowVariables, setCurrentWorkflowVariables] = useState<import('../lib/variable-detector').WorkflowVariables | null>(null);
+  // AI workflow analysis state (runs in background after recording stops)
+  const [currentWorkflowAIAnalysis, setCurrentWorkflowAIAnalysis] = useState<WorkflowAnalysis | null>(null);
+  const [isAnalyzingWorkflow, setIsAnalyzingWorkflow] = useState(false);
   // Variable form modal state
   const [showVariableForm, setShowVariableForm] = useState(false);
   const [pendingExecution, setPendingExecution] = useState<{
@@ -784,7 +789,35 @@ function App() {
           setIsDetectingVariables(false);
           console.log('[App] Variable detection finished, isDetectingVariables set to false');
         }
-        
+
+        // Run AI workflow analysis in background (doesn't block UI)
+        // This provides rich context for the AI agent during execution
+        console.log('[App] 🤖 Starting AI workflow analysis in background...');
+        setIsAnalyzingWorkflow(true);
+        setCurrentWorkflowAIAnalysis(null); // Clear previous analysis
+
+        // Run analysis asynchronously - don't await
+        analyzeWorkflowWithAI(currentSteps, {
+          workflowName: workflowName || undefined,
+          onProgress: (status) => {
+            console.log('[App] AI Analysis progress:', status);
+          },
+          useAI: true, // Enable AI-powered analysis for rich understanding
+        }).then((analysis) => {
+          console.log('[App] ✅ AI workflow analysis completed:', {
+            confidence: analysis.confidence,
+            stepsAnalyzed: analysis.stepGuidance.length,
+            patternsFound: analysis.patterns.length,
+            strategiesCount: analysis.adaptationStrategies.length,
+          });
+          setCurrentWorkflowAIAnalysis(analysis);
+          setIsAnalyzingWorkflow(false);
+        }).catch((err) => {
+          console.warn('[App] ⚠️ AI workflow analysis failed (non-blocking):', err);
+          setIsAnalyzingWorkflow(false);
+          // Analysis failure doesn't block the workflow - it's additive
+        });
+
         // Note: Step translations now happen during intent analysis (in handleSaveWorkflow)
         // This reduces API calls from N+1 to just 1
         console.log('[App] ✅ Recording stopped - translations will happen on save');
@@ -1249,11 +1282,26 @@ function App() {
         variables: variables.variables.length > 0 ? variables : undefined,
         // Only include optimizedSteps if actual optimization occurred (steps were removed)
         // This prevents duplicate data when optimizer is disabled
-        optimizedSteps: optimizationResult.metadata.stepsRemoved > 0 
-          ? optimizationResult.optimizedSteps 
+        optimizedSteps: optimizationResult.metadata.stepsRemoved > 0
+          ? optimizationResult.optimizedSteps
           : undefined,
         optimizationMetadata: optimizationResult.metadata.stepsRemoved > 0 ? optimizationResult.metadata : undefined,
+        // Include AI analysis if completed (runs in background after recording stops)
+        aiAnalysis: currentWorkflowAIAnalysis || undefined,
       };
+
+      // Log AI analysis status
+      if (currentWorkflowAIAnalysis) {
+        console.log('[SaveWorkflow] ✅ AI analysis attached to workflow:', {
+          confidence: currentWorkflowAIAnalysis.confidence,
+          stepsAnalyzed: currentWorkflowAIAnalysis.stepGuidance.length,
+          patternsFound: currentWorkflowAIAnalysis.patterns.length,
+        });
+      } else if (isAnalyzingWorkflow) {
+        console.log('[SaveWorkflow] ⏳ AI analysis still running - will not be included in this save');
+      } else {
+        console.log('[SaveWorkflow] ℹ️ No AI analysis available');
+      }
 
       await WorkflowStorage.saveWorkflow(workflow);
       addSavedWorkflow(workflow);
@@ -1266,6 +1314,9 @@ function App() {
       setTeachingMode('idle');
       setTeachingIntent(null);
       setPendingLearnedSkill(null);
+      // Clear AI analysis state (now stored in saved workflow)
+      setCurrentWorkflowAIAnalysis(null);
+      setIsAnalyzingWorkflow(false);
       
       // Extract site knowledge from workflow (async, non-blocking)
       SiteKnowledgeBase.learnFromWorkflow(workflow).catch(err => {

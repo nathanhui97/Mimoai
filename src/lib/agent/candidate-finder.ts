@@ -1,12 +1,19 @@
 /**
  * CandidateFinder - Finds and ranks DOM elements that match agent hints
- * 
+ *
  * Extracted from AIAgent to provide focused candidate matching logic.
  * Used during the observe-act loop to find elements to interact with.
+ *
+ * Enhanced with PageModel integration for:
+ * - Relationship-aware scoring (boost elements labeled by matching text)
+ * - Region-aware scoring (boost elements in primary action zone)
+ * - Page-type-aware scoring (boost inputs on form pages, etc.)
  */
 
 import type { DOMMap, DOMMapElement } from '../../content/dom-map';
 import type { AgentHint } from './types';
+import type { PageModel } from '../page-model/types';
+import { isLabeledBy, getRelationshipsFor } from '../page-model/relationship-graph';
 
 /**
  * CandidateFinder scores and ranks DOM elements to find the best match for a hint
@@ -15,8 +22,16 @@ export class CandidateFinder {
   /**
    * Find and rank candidates that match the current hint
    * Returns max 15 candidates sorted by score
+   *
+   * @param hint - The agent hint describing what to find
+   * @param domMap - The DOM map with all interactive elements
+   * @param pageModel - Optional PageModel for enhanced scoring
    */
-  findAndRankCandidates(hint: AgentHint, domMap: DOMMap): Array<DOMMapElement & { index: number; score: number }> {
+  findAndRankCandidates(
+    hint: AgentHint,
+    domMap: DOMMap,
+    pageModel?: PageModel
+  ): Array<DOMMapElement & { index: number; score: number }> {
     // Infer expected role from hint description if not explicit
     const expectedRole = this.inferRoleFromHint(hint);
     
@@ -162,7 +177,7 @@ export class CandidateFinder {
     
     const scored = candidatePool.map(el => ({
       ...el,
-      score: this.computeCandidateScore(el, hint, expectedRole, dropdownIsOpen),
+      score: this.computeCandidateScore(el, hint, expectedRole, dropdownIsOpen, pageModel),
     }));
     
     // Sort by score descending
@@ -224,8 +239,20 @@ export class CandidateFinder {
   /**
    * Compute score for a candidate element
    * Higher score = better match
+   *
+   * @param el - The DOM element to score
+   * @param hint - The agent hint
+   * @param expectedRole - Inferred expected role
+   * @param dropdownIsOpen - Whether a dropdown is currently open
+   * @param pageModel - Optional PageModel for enhanced scoring
    */
-  computeCandidateScore(el: DOMMapElement, hint: AgentHint, expectedRole: string | null, dropdownIsOpen: boolean = false): number {
+  computeCandidateScore(
+    el: DOMMapElement,
+    hint: AgentHint,
+    expectedRole: string | null,
+    dropdownIsOpen: boolean = false,
+    pageModel?: PageModel
+  ): number {
     let score = 0;
     
     // DEBUG: Log scoring details for first few elements
@@ -403,8 +430,164 @@ export class CandidateFinder {
         score += 10;
       }
     }
-    
+
+    // ============================================================
+    // PAGEMODEL-BASED SCORING (Enhanced matching with relationships)
+    // ============================================================
+    if (pageModel) {
+      score += this.computePageModelScore(el, hint, pageModel);
+    }
+
     return score;
+  }
+
+  /**
+   * Compute additional score based on PageModel context
+   * This provides relationship-aware and region-aware scoring
+   */
+  private computePageModelScore(
+    el: DOMMapElement,
+    hint: AgentHint,
+    pageModel: PageModel
+  ): number {
+    let score = 0;
+
+    // ============================================================
+    // RELATIONSHIP-AWARE SCORING (up to 50 points)
+    // Boost elements that have relationships matching the hint
+    // ============================================================
+    if (pageModel.elementRelationships) {
+      const elementIdentifier = {
+        id: el.attrs?.id,
+        name: el.name,
+        testId: el.attrs?.testId,
+      };
+
+      // Check if element is labeled by matching text
+      if (hint.targetText) {
+        if (isLabeledBy(pageModel.elementRelationships, elementIdentifier, hint.targetText)) {
+          score += 50;
+          console.log(`[CandidateFinder] 🔗 Relationship boost: element labeled by "${hint.targetText}" (+50 points)`);
+        }
+      }
+
+      // Check if element has a label relationship at all
+      const relationships = getRelationshipsFor(pageModel.elementRelationships, elementIdentifier);
+      if (relationships.length > 0) {
+        // Element has known relationships - small bonus for being well-structured
+        score += 5;
+      }
+
+      // Check for control relationships (e.g., tab controls tabpanel)
+      const controlsRelationship = relationships.find(r => r.relationship === 'controls');
+      if (controlsRelationship && hint.targetRole === 'tab') {
+        score += 20;
+      }
+    }
+
+    // ============================================================
+    // REGION-AWARE SCORING (up to 30 points)
+    // Boost elements in the primary action zone
+    // ============================================================
+    if (pageModel.primaryActionZone && el.attrs?.id) {
+      // We'd need element bounds for precise checking
+      // For now, we can use a heuristic based on activeContext
+      const isInExpectedContext = this.isElementInActiveContext(el, pageModel);
+      if (isInExpectedContext) {
+        score += 15;
+      }
+    }
+
+    // ============================================================
+    // PAGE-TYPE-AWARE SCORING (up to 20 points)
+    // Boost elements that match expected patterns for the page type
+    // ============================================================
+    const pageType = pageModel.pageType.type;
+
+    // Form pages: boost inputs and comboboxes
+    if (pageType === 'form' || pageType === 'wizard' || pageType === 'settings') {
+      if (el.role === 'textbox' || el.role === 'combobox' || el.role === 'spinbutton') {
+        score += 10;
+      }
+      // Boost submit-like buttons
+      if (el.role === 'button') {
+        const buttonText = (el.name || el.text || '').toLowerCase();
+        if (buttonText.includes('submit') || buttonText.includes('save') ||
+            buttonText.includes('create') || buttonText.includes('continue')) {
+          score += 15;
+        }
+      }
+    }
+
+    // Table pages: boost row actions and cells
+    if (pageType === 'data_table' || pageType === 'spreadsheet') {
+      if (el.role === 'row' || el.role === 'cell' || el.role === 'gridcell') {
+        score += 10;
+      }
+      if (el.role === 'checkbox' || el.role === 'button') {
+        // Action buttons in tables often have icons and short text
+        score += 5;
+      }
+    }
+
+    // Dashboard pages: boost widget interactions
+    if (pageType === 'dashboard') {
+      if (el.role === 'button' || el.role === 'link') {
+        // Dashboard typically has many clickable elements
+        score += 5;
+      }
+    }
+
+    // Modal context: strongly boost elements inside the modal
+    if (pageModel.activeContext === 'modal' && pageModel.uiState.hasModal) {
+      // Elements in modal should be prioritized
+      // We'd need to check if element is actually in the modal
+      score += 10;
+    }
+
+    // Dropdown context: strongly boost options
+    if (pageModel.activeContext === 'dropdown' && pageModel.uiState.hasOpenDropdown) {
+      if (el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio') {
+        score += 30;
+      }
+    }
+
+    return score;
+  }
+
+  /**
+   * Check if element is in the active context
+   */
+  private isElementInActiveContext(el: DOMMapElement, pageModel: PageModel): boolean {
+    const context = pageModel.activeContext;
+
+    switch (context) {
+      case 'form':
+        // Form fields are in form context
+        return el.role === 'textbox' || el.role === 'combobox' || el.role === 'checkbox' ||
+               el.role === 'spinbutton' || el.role === 'button';
+
+      case 'table':
+        // Table elements are in table context
+        return el.role === 'row' || el.role === 'cell' || el.role === 'gridcell' ||
+               el.role === 'checkbox' || el.role === 'button';
+
+      case 'modal':
+        // All elements could be in modal context
+        // Would need bounds checking for accurate determination
+        return true;
+
+      case 'dropdown':
+        // Options are in dropdown context
+        return el.role === 'option' || el.role === 'menuitem' || el.role === 'menuitemradio';
+
+      case 'navigation':
+        // Links and nav items are in navigation context
+        return el.role === 'link' || el.role === 'menuitem' || el.role === 'tab';
+
+      default:
+        return true;
+    }
   }
 }
 

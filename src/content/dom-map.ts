@@ -748,7 +748,11 @@ function getModalTitle(modal: Element): string | undefined {
   return modal.getAttribute('aria-label') || undefined;
 }
 
-function getPageRegions(): DOMMapRegion[] {
+/**
+ * Get page regions based on standard landmark roles
+ * Exported for use by PageModel signal aggregation
+ */
+export function getPageRegions(): DOMMapRegion[] {
   const regions: DOMMapRegion[] = [];
   
   // Standard landmark roles

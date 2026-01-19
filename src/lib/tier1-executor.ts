@@ -22,6 +22,8 @@ import { SelectorReliability } from './selector-reliability';
 import { findBestMatch } from './fuzzy-option-matcher';
 import { SheetStateExtractor } from '../content/sheet-state-extractor';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
+import { getCurrentModel } from './page-model';
+import { ExpectationEngine, generateExpectations } from './page-model/expectation-engine';
 
 // ============================================================================
 // Types
@@ -302,28 +304,21 @@ export class Tier1Executor {
       }
     }
     
-    // Wait for stability
-    await StateWaitEngine.waitForStability({
-      domQuietMs: 150,
-      networkQuietMs: 200,
-      maxWaitMs: 3000,
-    });
-    
-    // Verify outcome if specified
-    if (expectedOutcome) {
-      const outcomeResult = await this.verifyOutcome(expectedOutcome);
-      if (!outcomeResult.success) {
-        return {
-          status: 'rejected',
-          code: 'OUTCOME_FAILED',
-          details: {
-            outcomeResult: outcomeResult.message,
-            expectedOutcome,
-            element,
-          },
-          message: outcomeResult.message,
-        };
-      }
+    // Wait for stability using expectation-based verification when possible
+    const waitResult = await this.waitForOutcome(action, expectedOutcome);
+
+    // If expectation-based wait was used and failed, return the result
+    if (waitResult && !waitResult.success) {
+      return {
+        status: 'rejected',
+        code: 'OUTCOME_FAILED',
+        details: {
+          outcomeResult: waitResult.message,
+          expectedOutcome,
+          element,
+        },
+        message: waitResult.message,
+      };
     }
     
     // Track selector reliability (async, non-blocking)
@@ -3496,7 +3491,100 @@ export class Tier1Executor {
   private static sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
-  
+
+  /**
+   * Wait for expected outcome using PageModel expectation engine
+   * This provides predictive verification based on page type + action
+   *
+   * The method will:
+   * 1. Try to get the current PageModel (fast, usually cached)
+   * 2. Generate expectations based on the action and page type
+   * 3. Wait for the first matching expectation OR fall back to stability wait
+   *
+   * Returns null if expectations are soft (warnings only), or result if hard verification needed
+   */
+  private static async waitForOutcome(
+    action: AgentAction,
+    expectedOutcome?: ExpectedOutcome
+  ): Promise<{ success: boolean; message: string } | null> {
+    try {
+      // Try to get PageModel for expectation-based verification
+      const pageModel = await getCurrentModel();
+
+      // Generate expectations based on action and page type
+      const expectations = generateExpectations(action, pageModel);
+
+      if (expectations.length > 0) {
+        console.log(`[Tier1] 🔮 Generated ${expectations.length} expectations for ${action.type} action`);
+        console.log(`[Tier1] 🔮 Top expectation: ${expectations[0].expectedOutcome.type} (${(expectations[0].confidence * 100).toFixed(0)}% confidence)`);
+
+        // Use expectation engine for smart waiting
+        const expectationEngine = new ExpectationEngine({
+          cacheTTLMs: 200,
+          enableContinuousObserver: true,
+          enableRelationshipGraph: true,
+          enableExpectationEngine: true,
+          observerThrottleMs: 100,
+          maxRelationshipsPerElement: 10,
+          logLevel: 'warn',
+        });
+
+        const result = await expectationEngine.waitForExpectations(expectations, {
+          maxWaitMs: Math.max(...expectations.map(e => e.timeoutMs), 3000),
+        });
+
+        if (result.matched) {
+          console.log(`[Tier1] ✅ Expectation matched: ${result.matched.expectedOutcome.type}`);
+        } else if (result.timedOut) {
+          // Soft failure - log warning but don't fail
+          console.log(`[Tier1] ⚠️ No expectations matched within timeout, continuing anyway`);
+        }
+      } else {
+        // No expectations generated - fall back to stability wait
+        console.log(`[Tier1] 💤 No expectations for ${action.type}, using stability wait`);
+        await StateWaitEngine.waitForStability({
+          domQuietMs: 150,
+          networkQuietMs: 200,
+          maxWaitMs: 3000,
+        });
+      }
+
+      // Verify explicit outcome if specified (hard verification)
+      if (expectedOutcome) {
+        const outcomeResult = await this.verifyOutcome(expectedOutcome);
+        if (!outcomeResult.success) {
+          return {
+            success: false,
+            message: outcomeResult.message || 'Outcome verification failed',
+          };
+        }
+      }
+
+      return null; // Success or soft constraints only
+    } catch (error) {
+      // PageModel failed - fall back to stability wait
+      console.log(`[Tier1] ⚠️ PageModel unavailable, using stability wait:`, error);
+      await StateWaitEngine.waitForStability({
+        domQuietMs: 150,
+        networkQuietMs: 200,
+        maxWaitMs: 3000,
+      });
+
+      // Still verify explicit outcome if specified
+      if (expectedOutcome) {
+        const outcomeResult = await this.verifyOutcome(expectedOutcome);
+        if (!outcomeResult.success) {
+          return {
+            success: false,
+            message: outcomeResult.message || 'Outcome verification failed',
+          };
+        }
+      }
+
+      return null;
+    }
+  }
+
   /**
    * Normalize a shadow host selector by removing dynamic framework classes
    * Handles selectors like "gs-report-widget-element.ng-star-inserted" -> "gs-report-widget-element"

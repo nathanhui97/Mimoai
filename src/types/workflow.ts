@@ -376,6 +376,10 @@ export interface WorkflowStepPayload {
   // Detected once during recording to eliminate fragmented detection logic
   interactionType?: import('../content/interaction-detector').InteractionType;
 
+  // PageModel recording context - captures rich understanding of the page state
+  // and element relationships at recording time for intelligent replay
+  pageModelContext?: import('../lib/page-model/types').PageModelRecordingContext;
+
   /** Clipboard operation details (for COPY and PASTE steps) */
   clipboardDetails?: {
     /** The text that was copied/pasted */
@@ -522,6 +526,9 @@ export interface SavedWorkflow {
   };
   // Teaching Conversation: Knowledge learned through dialogue
   learnedSkill?: LearnedSkill;
+  // AI-powered post-recording analysis for intelligent execution
+  // This complements analyzedIntent with richer execution guidance
+  aiAnalysis?: import('../lib/post-recording-analyzer').WorkflowAnalysis;
 }
 
 // ============================================================================

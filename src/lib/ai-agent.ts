@@ -1746,10 +1746,22 @@ export class AIAgent {
 
   /**
    * Observe the current page state using DOM map (primary) + screenshot (optional)
+   * Enhanced with PageModel for unified page understanding
    */
   private async observe(): Promise<AgentObservation> {
     console.log('[AIAgent] 🔍 Observing page state...');
-    
+
+    // Try to get PageModel for enhanced observation (async, cached)
+    let pageModel: import('./page-model/types').PageModel | undefined;
+    try {
+      const { getCurrentModel } = await import('./page-model');
+      pageModel = await getCurrentModel();
+      console.log(`[AIAgent] 📊 PageModel: ${pageModel.pageType.type} page (${(pageModel.pageType.confidence * 100).toFixed(0)}% confidence), context: ${pageModel.activeContext}`);
+    } catch (error) {
+      // PageModel is optional enhancement
+      console.log('[AIAgent] PageModel unavailable, using standard observation');
+    }
+
     // Generate DOM map with iframe content (fast, structured, cheap for LLM)
     // This will scan iframes if we're in the main frame
     const { getCurrentFrameId } = await import('../content/content-script');
@@ -1802,45 +1814,53 @@ export class AIAgent {
       screenshot = capture?.screenshot;
     }
     
-    return {
+    // Build enhanced observation with PageModel context
+    const observation: AgentObservation = {
       url: window.location.href,
       title: document.title,
-      
+
       // DOM map (primary source)
       domMapText,
-      
-      // Modal context
-      hasModal: !!domMap.activeModal,
-      modalTitle: domMap.activeModal?.title,
-      
-      // CRITICAL: Dropdown context
-      hasOpenDropdown: !!domMap.activeDropdown,
-      dropdownOptions: domMap.activeDropdown?.options.map(o => o.name || o.text || '(unnamed)'),
-      
+
+      // Modal context - use PageModel if available (more accurate)
+      hasModal: pageModel?.uiState.hasModal ?? !!domMap.activeModal,
+      modalTitle: pageModel?.uiState.modalInfo?.title ?? domMap.activeModal?.title,
+
+      // CRITICAL: Dropdown context - use PageModel if available
+      hasOpenDropdown: pageModel?.uiState.hasOpenDropdown ?? !!domMap.activeDropdown,
+      dropdownOptions: pageModel?.uiState.dropdownInfo?.optionTexts ??
+        domMap.activeDropdown?.options.map(o => o.name || o.text || '(unnamed)'),
+
       // Form fields for context
       formFields: domMap.formFields.map(f => ({
         name: f.name,
         value: f.attrs?.value,
         type: f.attrs?.type || 'text',
       })),
-      
+
       // Counts for quick reference
       buttonCount: domMap.interactiveElements.filter(e => e.role === 'button').length,
       linkCount: domMap.interactiveElements.filter(e => e.role === 'link').length,
       inputCount: domMap.formFields.length,
-      
+
       // Headings for page structure
       headings: domMap.headings.map(h => h.text),
-      
+
       // Optional screenshot (only if VisionClicker fallback enabled)
       screenshot,
-      
+
       viewportSize: {
         width: window.innerWidth,
         height: window.innerHeight,
       },
       timestamp: Date.now(),
     };
+
+    // Store PageModel for use by candidateFinder (if available)
+    (observation as any)._pageModel = pageModel;
+    (observation as any)._domMap = domMap;
+
+    return observation;
   }
 
   /**
@@ -2592,11 +2612,20 @@ export class AIAgent {
     // This ensures we use the current modal/dropdown state, not stale observation
     const domMap = generateDOMMap();
     const freshDomMapText = domMapToText(domMap);
-    
-    // Find and rank candidates for the current hint
+
+    // Try to get PageModel for enhanced candidate scoring
+    let pageModel: import('./page-model/types').PageModel | undefined;
+    try {
+      const { getCurrentModel } = await import('./page-model');
+      pageModel = await getCurrentModel();
+    } catch {
+      // PageModel is optional
+    }
+
+    // Find and rank candidates for the current hint (with PageModel for enhanced scoring)
     let currentCandidates: Array<DOMMapElement & { index: number; score: number }> = [];
     if (nextIncompleteHint) {
-      currentCandidates = this.findAndRankCandidates(nextIncompleteHint, domMap);
+      currentCandidates = this.findAndRankCandidates(nextIncompleteHint, domMap, pageModel);
       console.log(`[AIAgent] Found ${currentCandidates.length} ranked candidates for hint ${nextIncompleteHint.stepNumber}`);
       if (currentCandidates.length > 0) {
         console.log(`[AIAgent] Top candidate: [${currentCandidates[0].role}] "${currentCandidates[0].name}" (score: ${currentCandidates[0].score})`);
@@ -3767,9 +3796,14 @@ export class AIAgent {
   /**
    * Find and rank candidates that match the current hint
    * Delegates to CandidateFinder module
+   * Enhanced with PageModel for relationship-aware and context-aware scoring
    */
-  private findAndRankCandidates(hint: AgentHint, domMap: DOMMap): Array<DOMMapElement & { index: number; score: number }> {
-    return this.candidateFinder.findAndRankCandidates(hint, domMap);
+  private findAndRankCandidates(
+    hint: AgentHint,
+    domMap: DOMMap,
+    pageModel?: import('./page-model/types').PageModel
+  ): Array<DOMMapElement & { index: number; score: number }> {
+    return this.candidateFinder.findAndRankCandidates(hint, domMap, pageModel);
   }
   
   /**
