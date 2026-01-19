@@ -795,12 +795,14 @@ function App() {
         console.log('[App] 🤖 Starting AI workflow analysis in background...');
         setIsAnalyzingWorkflow(true);
         setCurrentWorkflowAIAnalysis(null); // Clear previous analysis
+        setLearningFeedback('🤖 AI is analyzing your workflow...');
 
         // Run analysis asynchronously - don't await
         analyzeWorkflowWithAI(currentSteps, {
           workflowName: workflowName || undefined,
           onProgress: (status) => {
             console.log('[App] AI Analysis progress:', status);
+            setLearningFeedback(`🤖 ${status}`);
           },
           useAI: true, // Enable AI-powered analysis for rich understanding
         }).then((analysis) => {
@@ -809,13 +811,23 @@ function App() {
             stepsAnalyzed: analysis.stepGuidance.length,
             patternsFound: analysis.patterns.length,
             strategiesCount: analysis.adaptationStrategies.length,
+            hasAIEnhancement: analysis.confidence > 0.6,
           });
           setCurrentWorkflowAIAnalysis(analysis);
           setIsAnalyzingWorkflow(false);
+
+          // Show success feedback
+          if (analysis.confidence > 0.6) {
+            setLearningFeedback(`✨ AI analysis complete! Detected ${analysis.patterns.length} patterns, ${analysis.stepGuidance.length} step insights`);
+          } else {
+            setLearningFeedback('📝 Basic analysis complete (AI service unavailable)');
+          }
+          setTimeout(() => setLearningFeedback(null), 5000);
         }).catch((err) => {
-          console.warn('[App] ⚠️ AI workflow analysis failed (non-blocking):', err);
+          console.error('[App] ❌ AI workflow analysis failed:', err);
           setIsAnalyzingWorkflow(false);
-          // Analysis failure doesn't block the workflow - it's additive
+          setLearningFeedback('⚠️ AI analysis failed - workflow will still work but without AI insights');
+          setTimeout(() => setLearningFeedback(null), 4000);
         });
 
         // Note: Step translations now happen during intent analysis (in handleSaveWorkflow)

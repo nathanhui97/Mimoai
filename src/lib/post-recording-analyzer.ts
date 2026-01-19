@@ -628,7 +628,7 @@ async function callAIService(prompt: string): Promise<string> {
     const { aiConfig } = await import('./ai-config');
 
     if (!aiConfig.isEnabled()) {
-      console.log('[PostRecordingAnalyzer] AI disabled, using fallback analysis');
+      console.log('[PostRecordingAnalyzer] ⚠️ AI disabled in config, using fallback analysis');
       return JSON.stringify(createFallbackAnalysis());
     }
 
@@ -637,11 +637,17 @@ async function callAIService(prompt: string): Promise<string> {
     const anonKey = aiConfig.getSupabaseAnonKey();
 
     if (!supabaseUrl || !anonKey) {
-      console.warn('[PostRecordingAnalyzer] Supabase not configured, using fallback');
+      console.warn('[PostRecordingAnalyzer] ⚠️ Supabase not configured, using fallback');
+      console.warn('[PostRecordingAnalyzer] supabaseUrl:', supabaseUrl ? 'set' : 'MISSING');
+      console.warn('[PostRecordingAnalyzer] anonKey:', anonKey ? 'set' : 'MISSING');
       return JSON.stringify(createFallbackAnalysis());
     }
 
-    const response = await fetch(`${supabaseUrl}/functions/v1/analyze_workflow`, {
+    const endpoint = `${supabaseUrl}/functions/v1/analyze_workflow`;
+    console.log('[PostRecordingAnalyzer] 🔄 Calling AI service:', endpoint);
+    console.log('[PostRecordingAnalyzer] Prompt length:', prompt.length);
+
+    const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -651,13 +657,22 @@ async function callAIService(prompt: string): Promise<string> {
     });
 
     if (!response.ok) {
-      throw new Error(`AI service returned ${response.status}`);
+      const errorText = await response.text();
+      console.error('[PostRecordingAnalyzer] ❌ AI service error:', response.status, errorText);
+      throw new Error(`AI service returned ${response.status}: ${errorText}`);
     }
 
     const result = await response.json();
+    console.log('[PostRecordingAnalyzer] ✅ AI service response received');
+
+    if (result.error) {
+      console.error('[PostRecordingAnalyzer] ❌ AI service returned error:', result.error);
+      return JSON.stringify(createFallbackAnalysis());
+    }
+
     return result.analysis || JSON.stringify(createFallbackAnalysis());
   } catch (error) {
-    console.error('[PostRecordingAnalyzer] AI service call failed:', error);
+    console.error('[PostRecordingAnalyzer] ❌ AI service call failed:', error);
     // Return a fallback analysis structure
     return JSON.stringify(createFallbackAnalysis());
   }
