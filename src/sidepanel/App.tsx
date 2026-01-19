@@ -790,22 +790,25 @@ function App() {
           console.log('[App] Variable detection finished, isDetectingVariables set to false');
         }
 
-        // Run AI workflow analysis in background (doesn't block UI)
+        // Run AI workflow analysis - BLOCKING (user must wait for analysis)
         // This provides rich context for the AI agent during execution
-        console.log('[App] 🤖 Starting AI workflow analysis in background...');
+        console.log('[App] 🤖 Starting AI workflow analysis (blocking)...');
         setIsAnalyzingWorkflow(true);
         setCurrentWorkflowAIAnalysis(null); // Clear previous analysis
-        setLearningFeedback('🤖 AI is analyzing your workflow...');
 
-        // Run analysis asynchronously - don't await
-        analyzeWorkflowWithAI(currentSteps, {
-          workflowName: workflowName || undefined,
-          onProgress: (status) => {
-            console.log('[App] AI Analysis progress:', status);
-            setLearningFeedback(`🤖 ${status}`);
-          },
-          useAI: true, // Enable AI-powered analysis for rich understanding
-        }).then((analysis) => {
+        // Generate suggested name first (so it's ready when save dialog shows)
+        const suggestedName = generateTaskName(currentSteps);
+        setWorkflowName(suggestedName);
+
+        try {
+          const analysis = await analyzeWorkflowWithAI(currentSteps, {
+            workflowName: suggestedName || undefined,
+            onProgress: (status) => {
+              console.log('[App] AI Analysis progress:', status);
+            },
+            useAI: true, // Enable AI-powered analysis for rich understanding
+          });
+
           console.log('[App] ✅ AI workflow analysis completed:', {
             confidence: analysis.confidence,
             stepsAnalyzed: analysis.stepGuidance.length,
@@ -814,39 +817,27 @@ function App() {
             hasAIEnhancement: analysis.confidence > 0.6,
           });
           setCurrentWorkflowAIAnalysis(analysis);
-          setIsAnalyzingWorkflow(false);
-
-          // Show success feedback
-          if (analysis.confidence > 0.6) {
-            setLearningFeedback(`✨ AI analysis complete! Detected ${analysis.patterns.length} patterns, ${analysis.stepGuidance.length} step insights`);
-          } else {
-            setLearningFeedback('📝 Basic analysis complete (AI service unavailable)');
-          }
-          setTimeout(() => setLearningFeedback(null), 5000);
-        }).catch((err) => {
+        } catch (err) {
           console.error('[App] ❌ AI workflow analysis failed:', err);
+          // Set a minimal fallback analysis
+          setCurrentWorkflowAIAnalysis(null);
+        } finally {
           setIsAnalyzingWorkflow(false);
-          setLearningFeedback('⚠️ AI analysis failed - workflow will still work but without AI insights');
-          setTimeout(() => setLearningFeedback(null), 4000);
-        });
+        }
 
         // Note: Step translations now happen during intent analysis (in handleSaveWorkflow)
         // This reduces API calls from N+1 to just 1
-        console.log('[App] ✅ Recording stopped - translations will happen on save');
-        
+        console.log('[App] ✅ Recording stopped and AI analysis complete - showing save dialog');
+
         // Check if we're in teaching mode (with pre-recorded intent)
         if (teachingMode === 'recording_with_intent' && teachingIntent) {
           console.log('[App] 🎓 Teaching mode: Moving to post-recording chat');
           setTeachingMode('post_recording');
           // Don't show save dialog - the PostRecordingChat will handle it
         } else {
-          // Quick recording mode - use existing flow
-          setTimeout(() => {
-            const suggestedName = generateTaskName(currentSteps);
-            setWorkflowName(suggestedName);
-            setShowSaveDialog(true);
-            console.log('[App] 💡 Auto-generated task name:', suggestedName);
-          }, 500); // Small delay to let UI update
+          // Quick recording mode - show save dialog now that analysis is complete
+          setShowSaveDialog(true);
+          console.log('[App] 💡 Auto-generated task name:', suggestedName);
         }
       } else {
         console.log('[App] ⚠️ No workflow steps to analyze for variables (workflowSteps.length =', workflowSteps.length, ')');
@@ -2275,7 +2266,7 @@ function App() {
                 value={workflowName}
                 onChange={(e) => setWorkflowName(e.target.value)}
                 placeholder={`Task ${new Date().toLocaleString()}`}
-                className="w-full px-4 py-3 bg-muted/30 border border-border/60 rounded-xl mb-5 text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
+                className="w-full px-4 py-3 bg-muted/30 border border-border/60 rounded-xl mb-4 text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all"
                 autoFocus
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
@@ -2285,6 +2276,36 @@ function App() {
                   }
                 }}
               />
+
+              {/* AI Analysis Status */}
+              <div className="mb-4 p-3 rounded-xl text-sm">
+                {isAnalyzingWorkflow ? (
+                  <div className="flex items-center gap-2 text-purple-700 bg-purple-50 border border-purple-200 rounded-xl p-3">
+                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span>AI is analyzing your workflow...</span>
+                  </div>
+                ) : currentWorkflowAIAnalysis ? (
+                  <div className="flex items-center gap-2 text-purple-700 bg-purple-50 border border-purple-200 rounded-xl p-3">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span>
+                      AI analysis ready: {currentWorkflowAIAnalysis.patterns.length} patterns, {currentWorkflowAIAnalysis.stepGuidance.length} step insights
+                    </span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-gray-500 bg-gray-50 border border-gray-200 rounded-xl p-3">
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span>Basic analysis (AI service unavailable)</span>
+                  </div>
+                )}
+              </div>
+
               <div className="flex gap-3">
                 <button
                   onClick={handleSaveWorkflow}
@@ -2311,6 +2332,61 @@ function App() {
                 >
                   Cancel
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* AI Analysis Overlay - Full screen blocker while AI is thinking */}
+        {isAnalyzingWorkflow && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
+            <div className="relative bg-card p-8 rounded-3xl border border-purple-200 shadow-2xl max-w-sm w-full mx-6 animate-scale-in">
+              {/* Animated AI Brain Icon */}
+              <div className="flex justify-center mb-6">
+                <div className="relative">
+                  <div className="absolute inset-0 bg-purple-500/20 rounded-full animate-ping" />
+                  <div className="relative p-4 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-full">
+                    <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
+                  </div>
+                </div>
+              </div>
+
+              <h2 className="text-xl font-semibold text-center mb-2 text-card-foreground">AI is Thinking</h2>
+              <p className="text-sm text-center text-muted-foreground mb-6">
+                Analyzing your workflow to understand patterns and intent...
+              </p>
+
+              {/* Animated progress dots */}
+              <div className="flex justify-center gap-2 mb-4">
+                <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </div>
+
+              {/* Analysis steps indicator */}
+              <div className="space-y-2 text-xs text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span>Recording captured</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg className="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  <span>Variables detected</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <svg className="animate-spin w-4 h-4 text-purple-500" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <span className="text-purple-600 font-medium">AI analyzing intent and patterns...</span>
+                </div>
               </div>
             </div>
           </div>
