@@ -30,6 +30,51 @@ export interface ExtractionResult {
   reasoning?: string;
 }
 
+/**
+ * Enhanced extraction result with array support
+ */
+export interface EnhancedExtractionResult {
+  /**
+   * Scalar values (single items)
+   */
+  scalar: Record<string, string>;
+
+  /**
+   * Array values (multiple items parsed from comma/and-separated lists)
+   */
+  arrays: Record<string, string[]>;
+
+  /**
+   * Confidence scores for each extracted value
+   */
+  confidence: Record<string, number>;
+
+  /**
+   * Values that need user clarification
+   */
+  needsClarification: string[];
+
+  /**
+   * Reasoning for extraction decisions
+   */
+  reasoning?: string;
+}
+
+/**
+ * Variable definition with array support
+ */
+export interface ArrayCapableVariable extends VariableDefinition {
+  /**
+   * Whether this variable can accept array values
+   */
+  isArray?: boolean;
+
+  /**
+   * Custom separators for this variable
+   */
+  arraySeparators?: string[];
+}
+
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -86,7 +131,228 @@ const EXTRACTION_PATTERNS = {
 // Variable Extractor Class
 // ============================================================================
 
+// ============================================================================
+// Array Parsing Constants
+// ============================================================================
+
+/**
+ * Default separators for parsing arrays from natural language
+ */
+const DEFAULT_ARRAY_SEPARATORS = ['and', ',', 'then', ';', '&', 'plus', 'also'];
+
+/**
+ * Patterns that indicate a list of items
+ */
+const LIST_INDICATOR_PATTERNS = [
+  /\b(add|create|enter|for|named?)\s+(.+?)(?:\s+(?:and|,)\s+(.+))+/i,
+  /(.+?)(?:\s*,\s*|\s+and\s+)(.+)/i,
+];
+
 export class VariableExtractor {
+  // ============================================================================
+  // Array Extraction Methods
+  // ============================================================================
+
+  /**
+   * Extract variables with enhanced array support
+   * This method detects when a user provides multiple values and returns them as arrays
+   */
+  static async extractWithContextEnhanced(
+    query: string,
+    variables: ArrayCapableVariable[],
+    conversationHistory: ConversationMessage[] = [],
+    workflow?: SavedWorkflow
+  ): Promise<EnhancedExtractionResult> {
+    // First, get the standard extraction
+    const standardResult = await this.extractWithContext(
+      query,
+      variables,
+      conversationHistory,
+      workflow
+    );
+
+    // Now enhance with array detection
+    const scalar: Record<string, string> = {};
+    const arrays: Record<string, string[]> = {};
+
+    for (const variable of variables) {
+      const value = standardResult.values[variable.variableName];
+
+      if (!value) continue;
+
+      // Check if this variable supports arrays
+      const supportsArray = variable.isArray !== false; // Default to true
+
+      if (supportsArray) {
+        // Try to parse as array
+        const separators = variable.arraySeparators || DEFAULT_ARRAY_SEPARATORS;
+        const parsedArray = this.parseArrayFromText(value, separators);
+
+        if (parsedArray.length > 1) {
+          // Multiple values detected
+          arrays[variable.variableName] = parsedArray;
+        } else {
+          // Single value
+          scalar[variable.variableName] = value;
+        }
+      } else {
+        // Variable explicitly doesn't support arrays
+        scalar[variable.variableName] = value;
+      }
+    }
+
+    // Also try to detect arrays directly from the query for name-like variables
+    const queryArrays = this.detectArraysInQuery(query, variables);
+    for (const [varName, values] of Object.entries(queryArrays)) {
+      if (!arrays[varName] && !scalar[varName] && values.length > 0) {
+        if (values.length > 1) {
+          arrays[varName] = values;
+        } else {
+          scalar[varName] = values[0];
+        }
+      }
+    }
+
+    return {
+      scalar,
+      arrays,
+      confidence: standardResult.confidence,
+      needsClarification: standardResult.needsClarification,
+      reasoning: standardResult.reasoning,
+    };
+  }
+
+  /**
+   * Parse an array of values from text using separators
+   * @example "Alice, Bob, and Carol" → ["Alice", "Bob", "Carol"]
+   * @example "100, 200, 300" → ["100", "200", "300"]
+   */
+  static parseArrayFromText(text: string, separators: string[] = DEFAULT_ARRAY_SEPARATORS): string[] {
+    if (!text || typeof text !== 'string') {
+      return [];
+    }
+
+    // Build regex pattern from separators
+    // Handle "and" specially - it should be word-bounded
+    const separatorPatterns = separators.map(sep => {
+      if (sep === 'and' || sep === 'then' || sep === 'plus' || sep === 'also') {
+        return `\\s+${sep}\\s+`;
+      }
+      if (sep === ',') {
+        return `\\s*,\\s*`;
+      }
+      if (sep === ';') {
+        return `\\s*;\\s*`;
+      }
+      return `\\s*${sep}\\s*`;
+    });
+
+    // Create combined pattern
+    const combinedPattern = new RegExp(separatorPatterns.join('|'), 'gi');
+
+    // Split by separators
+    const parts = text.split(combinedPattern);
+
+    // Clean up each part
+    const cleaned = parts
+      .map(part => part.trim())
+      .filter(part => part.length > 0)
+      // Remove common prefixes that might be left over
+      .map(part => part.replace(/^(?:named?|called|for)\s+/i, '').trim())
+      .filter(part => part.length > 0);
+
+    return cleaned;
+  }
+
+  /**
+   * Detect arrays directly in the query text
+   * Uses patterns to find comma-separated or and-separated lists
+   */
+  static detectArraysInQuery(
+    query: string,
+    variables: ArrayCapableVariable[]
+  ): Record<string, string[]> {
+    const result: Record<string, string[]> = {};
+
+    // Find name-like variables
+    const nameVariables = variables.filter(v =>
+      v.variableName.toLowerCase().includes('name') ||
+      v.fieldName.toLowerCase().includes('name') ||
+      v.inputType === 'person_name' ||
+      v.inputType === 'text'
+    );
+
+    // Look for patterns like "add Alice, Bob, and Carol"
+    const listMatch = query.match(
+      /(?:add|create|enter|for|named?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:\s*,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)*(?:\s+and\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)?)/i
+    );
+
+    if (listMatch) {
+      const listText = listMatch[1];
+      const names = this.parseArrayFromText(listText);
+
+      if (names.length > 0 && nameVariables.length > 0) {
+        result[nameVariables[0].variableName] = names;
+      }
+    }
+
+    // Also look for quoted lists: "Alice", "Bob", "Carol"
+    const quotedMatch = query.match(/"([^"]+)"(?:\s*,?\s*"([^"]+)")+/);
+    if (quotedMatch) {
+      const allQuoted = query.match(/"([^"]+)"/g);
+      if (allQuoted && allQuoted.length > 1) {
+        const values = allQuoted.map(q => q.replace(/"/g, ''));
+        if (nameVariables.length > 0) {
+          result[nameVariables[0].variableName] = values;
+        }
+      }
+    }
+
+    // Look for number lists: "100, 200, 300" or "100 and 200 and 300"
+    const numberVariables = variables.filter(v =>
+      v.inputType === 'number' || v.inputType === 'currency'
+    );
+
+    const numberListMatch = query.match(
+      /(\d+(?:\.\d+)?(?:\s*,\s*\d+(?:\.\d+)?)+(?:\s+and\s+\d+(?:\.\d+)?)?)/
+    );
+
+    if (numberListMatch && numberVariables.length > 0) {
+      const numbers = this.parseArrayFromText(numberListMatch[1]);
+      result[numberVariables[0].variableName] = numbers;
+    }
+
+    return result;
+  }
+
+  /**
+   * Check if a query contains multiple values for any variable
+   */
+  static hasMultipleValues(query: string): boolean {
+    // Check for common multi-value patterns
+    const patterns = [
+      /,\s*and\s+/i,         // "A, B, and C"
+      /,\s*[^,]+,/,          // Multiple commas
+      /\s+and\s+.*\s+and\s+/i, // Multiple "and"s
+      /"[^"]+"\s*,\s*"[^"]+"/,  // Multiple quoted strings
+    ];
+
+    return patterns.some(pattern => pattern.test(query));
+  }
+
+  /**
+   * Get the count of items if this is a multi-value query
+   */
+  static getItemCount(query: string, separators: string[] = DEFAULT_ARRAY_SEPARATORS): number {
+    // Try to extract values and count them
+    const extracted = this.parseArrayFromText(query, separators);
+    return extracted.length || 1;
+  }
+
+  // ============================================================================
+  // Original Methods
+  // ============================================================================
+
   /**
    * Extract variables with conversation context
    */

@@ -13,6 +13,12 @@ import type {
   ComponentPattern,
   ElementSignature,
 } from '../../types/universal-types';
+import type {
+  WorkflowBlock,
+  BlockExecutionResult,
+  BlockIterationResult,
+  LoopContext,
+} from '../../lib/workflow-memory/types';
 import type { TabSwitchPayload } from '../../types/workflow';
 import { resolveElement, resolveAcrossBoundaries } from './element-resolver';
 import { waitForDOMStable } from './state-verifier';
@@ -891,6 +897,264 @@ async function executeStep(
         error: `Unknown pattern type: ${(pattern as any).type}`,
       };
   }
+}
+
+// ============================================================================
+// Block-Based Execution
+// ============================================================================
+
+/**
+ * Extended workflow options with block support
+ */
+export interface BlockWorkflowOptions extends WorkflowOptions {
+  /**
+   * Blocks detected in the workflow
+   */
+  blocks?: WorkflowBlock[];
+
+  /**
+   * Array values for iteration
+   * When a variable contains an array, blocks that iterate on it will repeat
+   */
+  arrayValues?: Record<string, string[]>;
+
+  /**
+   * Callback when a block iteration starts
+   */
+  onBlockIterationStart?: (blockId: string, iteration: number, total: number, value: string) => void;
+
+  /**
+   * Callback when a block iteration completes
+   */
+  onBlockIterationComplete?: (blockId: string, iteration: number, success: boolean) => void;
+}
+
+/**
+ * Extended workflow result with block information
+ */
+export interface BlockWorkflowResult extends WorkflowResult {
+  /**
+   * Results for each block execution
+   */
+  blockResults?: BlockExecutionResult[];
+
+  /**
+   * Total iterations across all blocks
+   */
+  totalIterations?: number;
+}
+
+/**
+ * Execute a workflow using block-based iteration
+ * This handles repeatable blocks for multi-item operations
+ */
+export async function executeWorkflowWithBlocks(
+  steps: UniversalStep[],
+  options: BlockWorkflowOptions = {}
+): Promise<BlockWorkflowResult> {
+  const {
+    blocks,
+    arrayValues = {},
+    variableValues = {},
+    onBlockIterationStart,
+    onBlockIterationComplete,
+    ...baseOptions
+  } = options;
+
+  // If no blocks defined, fall back to standard execution
+  if (!blocks || blocks.length === 0) {
+    console.log('[UniversalOrchestrator] No blocks defined, using standard execution');
+    return executeWorkflow(steps, { ...baseOptions, variableValues });
+  }
+
+  console.log(`[UniversalOrchestrator] Executing workflow with ${blocks.length} blocks`);
+
+  const startTime = Date.now();
+  const blockResults: BlockExecutionResult[] = [];
+  const allStepResults: StepResult[] = [];
+  let totalIterations = 0;
+  let overallSuccess = true;
+
+  for (const block of blocks) {
+    console.log(`[UniversalOrchestrator] Executing block: ${block.name} (${block.blockType})`);
+
+    const blockResult = await executeBlock(
+      block,
+      steps,
+      {
+        ...baseOptions,
+        variableValues,
+        arrayValues,
+      },
+      onBlockIterationStart,
+      onBlockIterationComplete
+    );
+
+    blockResults.push(blockResult);
+    totalIterations += blockResult.iterationsCompleted;
+
+    // Collect step results from all iterations
+    for (const iterResult of blockResult.iterationResults) {
+      for (const stepIdx of iterResult.stepsExecuted) {
+        allStepResults.push({
+          stepIndex: stepIdx,
+          success: iterResult.success,
+          patternType: steps[stepIdx]?.pattern?.type || 'UNKNOWN',
+          elapsedMs: iterResult.elapsedMs / iterResult.stepsExecuted.length,
+          error: iterResult.error,
+        });
+      }
+    }
+
+    if (!blockResult.success) {
+      overallSuccess = false;
+      if (baseOptions.stopOnFailure !== false) {
+        console.log(`[UniversalOrchestrator] Block ${block.name} failed, stopping workflow`);
+        break;
+      }
+    }
+  }
+
+  return {
+    success: overallSuccess,
+    stepsCompleted: allStepResults.filter(r => r.success).length,
+    totalSteps: steps.length,
+    stepResults: allStepResults,
+    totalElapsedMs: Date.now() - startTime,
+    blockResults,
+    totalIterations,
+  };
+}
+
+/**
+ * Execute a single block with iteration support
+ */
+async function executeBlock(
+  block: WorkflowBlock,
+  allSteps: UniversalStep[],
+  options: {
+    variableValues: Record<string, string>;
+    arrayValues: Record<string, string[]>;
+    stepTimeout?: number;
+    stopOnFailure?: boolean;
+    onStepProgress?: (stepIndex: number, status: 'starting' | 'completed' | 'failed') => void;
+    onStepError?: (stepIndex: number, error: string) => void;
+  },
+  onIterationStart?: (blockId: string, iteration: number, total: number, value: string) => void,
+  onIterationComplete?: (blockId: string, iteration: number, success: boolean) => void
+): Promise<BlockExecutionResult> {
+  const startTime = Date.now();
+  const iterationResults: BlockIterationResult[] = [];
+
+  // Get steps for this block
+  const blockSteps = block.stepIndices.map(i => allSteps[i]).filter(Boolean);
+
+  if (blockSteps.length === 0) {
+    return {
+      blockId: block.blockId,
+      success: true,
+      iterationsCompleted: 0,
+      totalIterations: 0,
+      iterationResults: [],
+      totalElapsedMs: 0,
+    };
+  }
+
+  // Determine iteration count
+  let iterations: string[] = [''];
+  let iterationVarName: string | undefined;
+
+  if (block.isRepeatable && block.iterationVariable) {
+    const arrayValue = options.arrayValues[block.iterationVariable];
+    if (arrayValue && arrayValue.length > 0) {
+      iterations = arrayValue;
+      iterationVarName = block.iterationVariable;
+      console.log(`[UniversalOrchestrator] Block ${block.name} will iterate ${iterations.length} times for ${iterationVarName}`);
+    }
+  }
+
+  // Execute iterations
+  for (let i = 0; i < iterations.length; i++) {
+    const iterValue = iterations[i];
+    const iterStartTime = Date.now();
+
+    // Build loop context
+    const loopContext: LoopContext = {
+      current_item: iterValue,
+      current_index: i + 1,
+      total_items: iterations.length,
+      is_first: i === 0,
+      is_last: i === iterations.length - 1,
+    };
+
+    // Notify iteration start
+    onIterationStart?.(block.blockId, i + 1, iterations.length, iterValue);
+
+    console.log(`[UniversalOrchestrator] Starting iteration ${i + 1}/${iterations.length}: ${iterValue || '(single)'}`);
+
+    // Build variable values for this iteration
+    const iterVariables = {
+      ...options.variableValues,
+      // Override the iteration variable with current item
+      ...(iterationVarName ? { [iterationVarName]: iterValue } : {}),
+      // Add loop context variables
+      current_item: loopContext.current_item,
+      current_index: String(loopContext.current_index),
+      total_items: String(loopContext.total_items),
+    };
+
+    // Execute block steps
+    const result = await executeWorkflow(blockSteps, {
+      stopOnFailure: options.stopOnFailure !== false,
+      stepTimeout: options.stepTimeout,
+      variableValues: iterVariables,
+      onStepProgress: (stepIdx, status) => {
+        // Map block step index to overall step index
+        const overallIdx = block.stepIndices[stepIdx];
+        options.onStepProgress?.(overallIdx, status);
+      },
+      onStepError: (stepIdx, error) => {
+        const overallIdx = block.stepIndices[stepIdx];
+        options.onStepError?.(overallIdx, error);
+      },
+    });
+
+    const iterResult: BlockIterationResult = {
+      iterationIndex: i,
+      iterationValue: iterValue,
+      success: result.success,
+      stepsExecuted: block.stepIndices.slice(0, result.stepsCompleted),
+      error: result.failureSummary,
+      elapsedMs: Date.now() - iterStartTime,
+    };
+
+    iterationResults.push(iterResult);
+
+    // Notify iteration complete
+    onIterationComplete?.(block.blockId, i + 1, result.success);
+
+    if (!result.success && options.stopOnFailure !== false) {
+      console.log(`[UniversalOrchestrator] Iteration ${i + 1} failed, stopping block`);
+      break;
+    }
+
+    // Delay between iterations (if not last)
+    if (i < iterations.length - 1 && block.iterationDelayMs) {
+      console.log(`[UniversalOrchestrator] Waiting ${block.iterationDelayMs}ms before next iteration`);
+      await sleep(block.iterationDelayMs);
+    }
+  }
+
+  const successfulIterations = iterationResults.filter(r => r.success).length;
+
+  return {
+    blockId: block.blockId,
+    success: successfulIterations === iterations.length,
+    iterationsCompleted: successfulIterations,
+    totalIterations: iterations.length,
+    iterationResults,
+    totalElapsedMs: Date.now() - startTime,
+  };
 }
 
 // ============================================================================

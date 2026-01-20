@@ -6,8 +6,8 @@ import { CorrectionMemory } from '../lib/correction-memory';
 import { VariableDetector } from '../lib/variable-detector';
 // import { NavigationOptimizer } from '../lib/navigation-optimizer'; // DISABLED - breaks AI Agent workflows
 import { IntentAnalyzer } from '../lib/intent-analyzer';
-import { analyzeWorkflowWithAI } from '../lib/post-recording-analyzer';
-import type { WorkflowAnalysis } from '../lib/post-recording-analyzer';
+import { analyzeWorkflowWithAI, analyzeWorkflowUnified } from '../lib/post-recording-analyzer';
+import type { WorkflowAnalysis, UnifiedAnalysisResult } from '../lib/post-recording-analyzer';
 import { SiteKnowledgeBase } from '../lib/site-knowledge';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
@@ -19,7 +19,6 @@ import { PostRecordingConfirm } from './PostRecordingConfirm';
 import { WorkflowDetails } from './WorkflowDetails';
 import { OptionConfirmationModal } from './OptionConfirmationModal';
 import { SkillsLibrary } from './SkillsLibrary';
-import { SkillBoundaryEditor } from './SkillBoundaryEditor';
 import { AnnotationInput } from './AnnotationInput';
 import { SkillTeacher } from './SkillTeacher';
 import { ChatExecutor } from './ChatExecutor';
@@ -42,8 +41,7 @@ import type {
 } from '../types/messages';
 import type { CorrectionEntry } from '../types/visual';
 import type { SafetyDecision } from '../types/ai';
-import type { StepAnnotation, SuggestedSkill, SkillDefinition } from '../types/skill';
-import { analyzeWorkflowForSkills } from '../lib/skill-extractor';
+import type { StepAnnotation, SkillDefinition } from '../types/skill';
 import { SkillStorage } from '../lib/skill-storage';
 function App() {
   const {
@@ -170,11 +168,6 @@ function App() {
 
   // Skills system state
   const [showSkillsLibrary, setShowSkillsLibrary] = useState(false);
-  const [showSkillBoundaryEditor, setShowSkillBoundaryEditor] = useState(false);
-  const [pendingSkillExtraction, setPendingSkillExtraction] = useState<{
-    workflow: SavedWorkflow;
-    suggestedSkills: SuggestedSkill[];
-  } | null>(null);
   // Recording annotations - used by AnnotationInput during recording
   const [recordingAnnotations, setRecordingAnnotations] = useState<StepAnnotation[]>([]);
 
@@ -1490,7 +1483,8 @@ function App() {
         console.log('[SaveWorkflow] Variable context for AI:', variableContext);
 
         try {
-          const analysis = await analyzeWorkflowWithAI(sortedSteps, {
+          // Use unified analysis to get both analysis AND memory in one AI call
+          const { analysis, memory: unifiedMemory } = await analyzeWorkflowUnified(sortedSteps, {
             workflowName: workflowName.trim(),
             variableContext, // Pass user-named fields to AI
             onProgress: (status) => {
@@ -1499,11 +1493,15 @@ function App() {
             useAI: true,
           });
 
-          console.log('[SaveWorkflow] ✅ Deferred AI analysis completed:', {
+          console.log('[SaveWorkflow] ✅ Unified AI analysis completed:', {
             confidence: analysis.confidence,
             stepsAnalyzed: analysis.stepGuidance.length,
             primaryGoal: analysis.workflowUnderstanding.primaryGoal,
+            hasMemory: !!unifiedMemory,
           });
+
+          // Store the memory for attaching to workflow later
+          (window as any).__pendingWorkflowMemory = unifiedMemory;
 
           // Use the AI analysis results
           setCurrentWorkflowAIAnalysis(analysis);
@@ -1564,6 +1562,10 @@ function App() {
         console.log('[SaveWorkflow] Generated description (local):', workflowDescription);
       }
 
+      // Get the memory from unified analysis if available
+      const pendingMemory = (window as any).__pendingWorkflowMemory;
+      delete (window as any).__pendingWorkflowMemory;
+
       const workflow: SavedWorkflow = {
         id: tempWorkflow.id,
         name: workflowName.trim(),
@@ -1583,9 +1585,11 @@ function App() {
         optimizationMetadata: optimizationResult.metadata.stepsRemoved > 0 ? optimizationResult.metadata : undefined,
         // Include AI analysis if completed (runs in background after recording stops)
         aiAnalysis: currentWorkflowAIAnalysis || undefined,
+        // Include memory from unified analysis (blocks, triggers, inputs, etc.)
+        memory: pendingMemory ? { ...pendingMemory, generatedAt: Date.now() } : undefined,
       };
 
-      // Log AI analysis status
+      // Log AI analysis and memory status
       if (currentWorkflowAIAnalysis) {
         console.log('[SaveWorkflow] ✅ AI analysis attached to workflow:', {
           confidence: currentWorkflowAIAnalysis.confidence,
@@ -1596,6 +1600,14 @@ function App() {
         console.log('[SaveWorkflow] ⏳ AI analysis still running - will not be included in this save');
       } else {
         console.log('[SaveWorkflow] ℹ️ No AI analysis available');
+      }
+
+      if (workflow.memory) {
+        console.log('[SaveWorkflow] ✅ Memory attached to workflow:', {
+          hasBlocks: !!(workflow.memory.understanding?.blocks),
+          blocksCount: workflow.memory.understanding?.blocks?.length || 0,
+          hasTriggers: !!(workflow.memory.triggers?.phrases),
+        });
       }
 
       await WorkflowStorage.saveWorkflow(workflow);
@@ -1737,46 +1749,11 @@ function App() {
   };
 
   /**
-   * Extract skills from a workflow
-   * Can be called from WorkflowDetails to extract skills from a saved workflow
-   */
-  const handleExtractSkills = async (workflow: SavedWorkflow) => {
-    try {
-      setLearningFeedback('Analyzing workflow for skills...');
-
-      // Get annotations if any (from the workflow steps)
-      const annotations = workflow.steps
-        .filter(step => step.annotation)
-        .map(step => step.annotation!);
-
-      const result = await analyzeWorkflowForSkills(workflow, annotations);
-
-      if (result.skills.length > 0) {
-        setPendingSkillExtraction({
-          workflow,
-          suggestedSkills: result.skills,
-        });
-        setShowSkillBoundaryEditor(true);
-        setLearningFeedback(null);
-      } else {
-        setLearningFeedback('No extractable skills found in this workflow');
-        setTimeout(() => setLearningFeedback(null), 3000);
-      }
-    } catch (error) {
-      console.error('[App] Failed to extract skills:', error);
-      setLearningFeedback('Failed to analyze workflow for skills');
-      setTimeout(() => setLearningFeedback(null), 3000);
-    }
-  };
-
-  /**
-   * Save extracted skills to library
+   * Save skills to library (used by SkillTeacher)
    */
   const handleSaveSkills = async (skills: SkillDefinition[]) => {
     try {
       await SkillStorage.saveSkills(skills);
-      setShowSkillBoundaryEditor(false);
-      setPendingSkillExtraction(null);
       setLearningFeedback(`${skills.length} skill(s) saved to library`);
       setTimeout(() => setLearningFeedback(null), 3000);
     } catch (error) {
@@ -2323,7 +2300,6 @@ function App() {
                 await handleDeleteWorkflow(selectedWorkflow.id);
                 setSelectedWorkflow(null);
               }}
-              onExtractSkills={() => handleExtractSkills(selectedWorkflow)}
               onSave={handleSaveWorkflowEdits}
               isExecuting={isExecuting}
             />
@@ -3106,18 +3082,6 @@ function App() {
           />
         )}
 
-        {/* Skill Boundary Editor Modal */}
-        {showSkillBoundaryEditor && pendingSkillExtraction && (
-          <SkillBoundaryEditor
-            workflow={pendingSkillExtraction.workflow}
-            suggestedSkills={pendingSkillExtraction.suggestedSkills}
-            onSave={handleSaveSkills}
-            onCancel={() => {
-              setShowSkillBoundaryEditor(false);
-              setPendingSkillExtraction(null);
-            }}
-          />
-        )}
         </div>
       </div>
     </div>

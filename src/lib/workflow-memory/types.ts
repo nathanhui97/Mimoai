@@ -786,3 +786,353 @@ export function summarizeMemory(memory: WorkflowMemory): WorkflowMemorySummary {
     patternType: memory.pattern.type,
   };
 }
+
+// ============================================================================
+// Block-Based Workflow Types
+// ============================================================================
+
+/**
+ * Block type classification
+ * Determines how the block should be executed
+ */
+export type BlockType =
+  | 'form_fill'        // Multiple INPUT steps filling a form
+  | 'table_row'        // Add/edit table row
+  | 'list_item'        // Add item to list
+  | 'menu_navigation'  // Click through menus
+  | 'one_time'         // Navigation, setup (non-repeatable)
+  | 'submission';      // Form submit, save
+
+/**
+ * Condition for when a block should exit its loop
+ */
+export interface BlockExitCondition {
+  /**
+   * Type of exit condition
+   */
+  type: 'item_count' | 'success_indicator' | 'error_indicator' | 'manual';
+
+  /**
+   * Description of the exit condition
+   * @example "After all items processed" or "When success toast appears"
+   */
+  description?: string;
+
+  /**
+   * Pattern to match for indicator-based exits
+   */
+  pattern?: string;
+}
+
+/**
+ * Extended phase structure with block semantics
+ * Builds on WorkflowPhase to add loop/iteration support
+ */
+export interface WorkflowBlock extends WorkflowPhase {
+  /**
+   * Unique block identifier
+   */
+  blockId: string;
+
+  /**
+   * Block classification
+   */
+  blockType: BlockType;
+
+  /**
+   * Can this block loop for multiple items?
+   * @example true for "add contact" form, false for "click save"
+   */
+  isRepeatable: boolean;
+
+  /**
+   * Variable that drives repetition
+   * When this variable contains an array, the block repeats for each item
+   * @example "name" - when user says "add Alice, Bob, Carol", this block repeats 3x
+   */
+  iterationVariable?: string;
+
+  /**
+   * Delay between iterations (ms)
+   * Useful for rate limiting or waiting for UI updates
+   * @default 500
+   */
+  iterationDelayMs?: number;
+
+  /**
+   * When should the block stop iterating?
+   */
+  exitCondition?: BlockExitCondition;
+
+  /**
+   * For nested blocks, the parent block ID
+   */
+  parentBlockId?: string;
+
+  /**
+   * Blocks that must complete before this one
+   */
+  dependsOnBlocks?: string[];
+}
+
+/**
+ * Result of executing a single block iteration
+ */
+export interface BlockIterationResult {
+  /**
+   * Which iteration (0-indexed)
+   */
+  iterationIndex: number;
+
+  /**
+   * The value used for this iteration
+   * @example "Alice" from ["Alice", "Bob", "Carol"]
+   */
+  iterationValue: string;
+
+  /**
+   * Whether this iteration succeeded
+   */
+  success: boolean;
+
+  /**
+   * Steps executed in this iteration
+   */
+  stepsExecuted: number[];
+
+  /**
+   * Error if iteration failed
+   */
+  error?: string;
+
+  /**
+   * Time taken for this iteration (ms)
+   */
+  elapsedMs: number;
+}
+
+/**
+ * Result of executing a complete block
+ */
+export interface BlockExecutionResult {
+  /**
+   * Block that was executed
+   */
+  blockId: string;
+
+  /**
+   * Overall success
+   */
+  success: boolean;
+
+  /**
+   * Number of iterations completed
+   */
+  iterationsCompleted: number;
+
+  /**
+   * Total iterations attempted
+   */
+  totalIterations: number;
+
+  /**
+   * Results for each iteration
+   */
+  iterationResults: BlockIterationResult[];
+
+  /**
+   * Total time for all iterations (ms)
+   */
+  totalElapsedMs: number;
+}
+
+/**
+ * Loop context variables available during block execution
+ */
+export interface LoopContext {
+  /**
+   * Current item being processed
+   * @example "Alice" when iterating ["Alice", "Bob"]
+   */
+  current_item: string;
+
+  /**
+   * 1-based index of current iteration
+   * @example 1, 2, 3...
+   */
+  current_index: number;
+
+  /**
+   * Total number of items
+   * @example 3 for ["Alice", "Bob", "Carol"]
+   */
+  total_items: number;
+
+  /**
+   * Is this the first iteration?
+   */
+  is_first: boolean;
+
+  /**
+   * Is this the last iteration?
+   */
+  is_last: boolean;
+}
+
+// ============================================================================
+// Extended InputField for Array Support
+// ============================================================================
+
+/**
+ * Extended input field with array support
+ */
+export interface InputFieldWithArraySupport extends InputField {
+  /**
+   * Can this field accept array values?
+   * When true, values like "Alice, Bob, Carol" are parsed as arrays
+   * @example true for "name" field in "add contacts" workflow
+   */
+  isArray?: boolean;
+
+  /**
+   * Which blocks should repeat when this field has array value
+   * @example [1] means Block 1 repeats for each item
+   */
+  iteratesBlocks?: number[];
+
+  /**
+   * Separators to use when parsing array from text
+   * @example ["and", ",", "then", ";"]
+   */
+  arraySeparators?: string[];
+
+  /**
+   * Mapping between this array and other arrays
+   * For parallel iteration: names[0] goes with emails[0]
+   * @example "email" - names and emails iterate together
+   */
+  parallelWith?: string;
+}
+
+// ============================================================================
+// Array Extraction Result
+// ============================================================================
+
+/**
+ * Result of extracting variables with array support
+ */
+export interface EnhancedExtractionResult {
+  /**
+   * Scalar values (single items)
+   * @example { name: "Alice" }
+   */
+  scalar: Record<string, string>;
+
+  /**
+   * Array values (multiple items)
+   * @example { names: ["Alice", "Bob", "Carol"] }
+   */
+  arrays: Record<string, string[]>;
+
+  /**
+   * Confidence scores for each extracted value
+   */
+  confidence: Record<string, number>;
+
+  /**
+   * Values that need user clarification
+   */
+  needsClarification: string[];
+
+  /**
+   * Reasoning for extraction decisions
+   */
+  reasoning?: string;
+}
+
+// ============================================================================
+// Workflow with Blocks
+// ============================================================================
+
+/**
+ * Extended workflow understanding with blocks
+ */
+export interface WorkflowUnderstandingWithBlocks extends WorkflowUnderstanding {
+  /**
+   * Block-based structure (extends phases)
+   * If present, phases are interpreted as blocks
+   */
+  blocks?: WorkflowBlock[];
+}
+
+/**
+ * Helper to convert legacy phases to blocks
+ */
+export function convertPhasesToBlocks(phases: WorkflowPhase[]): WorkflowBlock[] {
+  return phases.map((phase, index) => ({
+    ...phase,
+    blockId: `block_${index}`,
+    blockType: inferBlockType(phase),
+    isRepeatable: inferRepeatability(phase),
+  }));
+}
+
+/**
+ * Infer block type from phase metadata
+ */
+function inferBlockType(phase: WorkflowPhase): BlockType {
+  const name = phase.name.toLowerCase();
+  const purpose = phase.purpose.toLowerCase();
+
+  // Check for submission patterns
+  if (name.includes('save') || name.includes('submit') ||
+      purpose.includes('save') || purpose.includes('submit')) {
+    return 'submission';
+  }
+
+  // Check for navigation/setup patterns
+  if (name.includes('open') || name.includes('navigate') ||
+      name.includes('setup') || name.includes('go to')) {
+    return 'one_time';
+  }
+
+  // Check for table/row patterns
+  if (name.includes('row') || name.includes('table') ||
+      purpose.includes('row') || purpose.includes('table')) {
+    return 'table_row';
+  }
+
+  // Check for list patterns
+  if (name.includes('list') || name.includes('item') ||
+      purpose.includes('add to') || purpose.includes('list')) {
+    return 'list_item';
+  }
+
+  // Check for menu patterns
+  if (name.includes('menu') || name.includes('dropdown') ||
+      purpose.includes('select') || purpose.includes('menu')) {
+    return 'menu_navigation';
+  }
+
+  // Default to form_fill for data entry
+  if (name.includes('fill') || name.includes('enter') ||
+      name.includes('input') || name.includes('form') ||
+      purpose.includes('enter') || purpose.includes('fill')) {
+    return 'form_fill';
+  }
+
+  // Generic default
+  return 'one_time';
+}
+
+/**
+ * Infer if a phase/block is repeatable
+ */
+function inferRepeatability(phase: WorkflowPhase): boolean {
+  const blockType = inferBlockType(phase);
+
+  // These block types are typically repeatable
+  const repeatableTypes: BlockType[] = ['form_fill', 'table_row', 'list_item'];
+
+  return repeatableTypes.includes(blockType);
+}

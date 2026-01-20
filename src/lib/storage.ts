@@ -51,7 +51,10 @@ export class WorkflowStorage {
 
   /**
    * Ensure workflow has a memory, generate if missing
-   * Uses local consolidation first (instant), then enhances with AI (background)
+   *
+   * With the unified analysis flow:
+   * - If workflow.memory is already set (from unified AI call), use it as-is
+   * - If memory is missing, do local consolidation only (AI was already called)
    */
   private static async ensureMemory(workflow: SavedWorkflow): Promise<SavedWorkflow> {
     // Skip if workflow has minimal data
@@ -59,26 +62,28 @@ export class WorkflowStorage {
       return workflow;
     }
 
-    // Check if memory exists and is recent
+    // Check if memory already exists (from unified analysis during post-recording)
     if (workflow.memory && workflow.memory.generatedAt) {
-      // Memory exists - check if workflow has been updated since memory was generated
-      if (workflow.memory.generatedAt >= (workflow.updatedAt || workflow.createdAt)) {
-        return workflow; // Memory is up to date
-      }
+      console.log('[Storage] Memory already present (from unified analysis), skipping generation');
+      return workflow; // Memory already provided by unified analysis
     }
 
-    console.log('[Storage] Generating memory for workflow:', workflow.name);
+    // Check if memory exists with blocks (indicates AI-generated)
+    if (workflow.memory?.understanding?.blocks) {
+      console.log('[Storage] Memory with blocks already present, skipping generation');
+      return workflow;
+    }
+
+    console.log('[Storage] Generating local memory for workflow:', workflow.name);
 
     try {
-      // Step 1: Quick local consolidation (instant)
+      // Only do local consolidation - AI analysis is done during post-recording
       const localMemory = consolidateExistingData(workflow);
       workflow = { ...workflow, memory: localMemory };
 
-      // Step 2: Try to enhance with AI (async, non-blocking)
-      // This runs in the background and updates storage when complete
-      this.enhanceMemoryInBackground(workflow.id).catch(err => {
-        console.warn('[Storage] Background memory enhancement failed:', err);
-      });
+      // NOTE: We no longer trigger background AI enhancement here
+      // The unified flow in post-recording-analyzer handles AI analysis + memory in one call
+      // This saves an AI call and ensures consistency
 
       return workflow;
     } catch (error) {
@@ -88,15 +93,15 @@ export class WorkflowStorage {
   }
 
   /**
-   * Enhance workflow memory with AI in the background
+   * Force re-generate workflow memory with AI
+   * Use this when user explicitly requests re-analysis
    */
-  private static async enhanceMemoryInBackground(workflowId: string): Promise<void> {
+  static async regenerateMemoryWithAI(workflowId: string): Promise<void> {
     try {
-      // Small delay to let the initial save complete
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
       const workflow = await this.loadWorkflow(workflowId);
       if (!workflow) return;
+
+      console.log('[Storage] Regenerating memory with AI for:', workflow.name);
 
       // Generate full memory with AI enhancement
       const enhancedMemory = await generateWorkflowMemory(workflow, { useAI: true });
@@ -113,7 +118,8 @@ export class WorkflowStorage {
         console.log('[Storage] Enhanced memory for workflow:', workflow.name);
       }
     } catch (error) {
-      console.warn('[Storage] Background memory enhancement failed:', error);
+      console.warn('[Storage] Memory regeneration failed:', error);
+      throw error;
     }
   }
 

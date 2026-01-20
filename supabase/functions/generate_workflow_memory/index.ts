@@ -1,12 +1,16 @@
 /**
- * Generate Workflow Memory Edge Function
+ * Generate Workflow Memory Edge Function (Unified)
  *
- * Enhances a workflow memory with AI-powered analysis to fill gaps
- * and make the memory more human-like.
+ * This is the SINGLE AI endpoint for workflow analysis.
+ * It produces both:
+ * 1. WorkflowAnalysis (step guidance, patterns, adaptation strategies)
+ * 2. WorkflowMemory (identity, triggers, inputs, blocks, etc.)
+ *
+ * This consolidates what were previously two separate AI calls.
  */
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { SYSTEM_PROMPT_SHORT, getSystemPromptForTask } from '../_shared/system-prompt.ts';
+import { getSystemPromptForTask } from '../_shared/system-prompt.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
@@ -17,10 +21,29 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
+interface WorkflowStep {
+  type: string;
+  description?: string;
+  payload?: {
+    url?: string;
+    selector?: string;
+    elementText?: string;
+    elementRole?: string;
+    label?: string;
+    value?: string;
+    pageModelContext?: any;
+    context?: any;
+    spreadsheetContext?: any;
+    intent?: any;
+    stepGoal?: any;
+    scope?: any;
+  };
+}
+
 interface WorkflowData {
   name: string;
   description?: string;
-  steps: any[];
+  steps: WorkflowStep[];
   variables?: any[];
   existingAnalysis?: any;
   learnedSkill?: any;
@@ -45,18 +68,21 @@ Deno.serve(async (req) => {
   const startTime = Date.now();
 
   try {
-    const { workflow, currentMemory } = await req.json() as {
+    const body = await req.json();
+    const { workflow, currentMemory, includeAnalysis = true } = body as {
       workflow: WorkflowData;
-      currentMemory: CurrentMemory;
+      currentMemory?: CurrentMemory;
+      includeAnalysis?: boolean;
     };
 
-    console.log(`[GenerateMemory] Enhancing memory for: ${workflow.name}`);
+    console.log(`[GenerateMemory] Unified analysis for: ${workflow.name}, includeAnalysis: ${includeAnalysis}`);
 
     if (!GEMINI_API_KEY) {
       throw new Error('GEMINI_API_KEY not configured');
     }
 
-    const prompt = buildEnhancementPrompt(workflow, currentMemory);
+    // Build the unified prompt
+    const prompt = buildUnifiedPrompt(workflow, currentMemory, includeAnalysis);
 
     const geminiRequest = {
       contents: [{
@@ -64,8 +90,8 @@ Deno.serve(async (req) => {
         parts: [{ text: prompt }]
       }],
       generationConfig: {
-        temperature: 0.3,
-        maxOutputTokens: 4096,
+        temperature: 0.2,
+        maxOutputTokens: 8192,  // Larger for combined output
         responseMimeType: 'application/json',
       },
     };
@@ -85,14 +111,14 @@ Deno.serve(async (req) => {
     const geminiResult = await geminiResponse.json();
     const responseText = geminiResult.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    // Parse and merge the enhanced memory
-    const enhanced = parseEnhancedMemory(responseText, currentMemory);
+    // Parse the unified response
+    const result = parseUnifiedResponse(responseText, currentMemory, workflow.steps.length);
 
     const duration = Date.now() - startTime;
     console.log(`[GenerateMemory] Completed in ${duration}ms`);
 
     return new Response(
-      JSON.stringify(enhanced),
+      JSON.stringify(result),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
   } catch (error) {
@@ -104,21 +130,117 @@ Deno.serve(async (req) => {
   }
 });
 
-function buildEnhancementPrompt(workflow: WorkflowData, currentMemory: CurrentMemory): string {
+function buildUnifiedPrompt(workflow: WorkflowData, currentMemory: CurrentMemory | undefined, includeAnalysis: boolean): string {
   const systemContext = getSystemPromptForTask('generate_memory');
 
+  // Build detailed step descriptions with context
   const stepsDescription = workflow.steps.map((s, i) => {
-    const desc = s.description || `${s.type} on ${s.label || 'element'}`;
-    return `${i + 1}. ${desc}`;
+    const parts: string[] = [`${i + 1}. [${s.type}]`];
+
+    if (s.description) parts.push(s.description);
+
+    if (s.payload) {
+      if (s.payload.label) parts.push(`Label: "${s.payload.label}"`);
+      if (s.payload.elementText) parts.push(`Text: "${s.payload.elementText}"`);
+      if (s.payload.elementRole) parts.push(`Role: ${s.payload.elementRole}`);
+      if (s.payload.value) parts.push(`Value: "${s.payload.value}"`);
+      if (s.payload.url) {
+        try {
+          const url = new URL(s.payload.url);
+          parts.push(`URL: ${url.hostname}${url.pathname}`);
+        } catch {
+          parts.push(`URL: ${s.payload.url}`);
+        }
+      }
+      // Include context hints
+      if (s.payload.pageModelContext?.pageContext?.regionName) {
+        parts.push(`Region: ${s.payload.pageModelContext.pageContext.regionName}`);
+      }
+      if (s.payload.context?.gridCoordinates?.columnHeader) {
+        parts.push(`Column: ${s.payload.context.gridCoordinates.columnHeader}`);
+      }
+    }
+
+    return parts.join(' | ');
   }).join('\n');
 
   const variablesDescription = (workflow.variables || []).map(v =>
-    `- ${v.fieldName}: ${v.defaultValue || '(no default)'}`
+    `- ${v.fieldName} (${v.variableName}): ${v.inputType || 'text'}${v.defaultValue ? `, default: "${v.defaultValue}"` : ''}`
   ).join('\n') || 'No variables detected';
+
+  // Build the analysis section only if needed
+  const analysisInstructions = includeAnalysis ? `
+
+## Step-by-Step Analysis Instructions
+
+For EACH step, provide execution guidance:
+1. **Intent**: What is the user trying to accomplish? (semantic, not mechanical)
+2. **Why This Element**: Why was THIS element chosen over alternatives?
+3. **Element Finding**: How to find this element if selectors change
+4. **Preconditions**: What must be true before this step?
+5. **Expected Outcome**: What should happen after this step?
+6. **Criticality**: Is this step critical, important, or optional?
+
+Also identify:
+- **Patterns**: Form fills, search-and-select, navigation sequences
+- **Adaptation Strategies**: How to handle common changes (text changed, layout shifted)
+
+` : '';
+
+  const analysisOutputFormat = includeAnalysis ? `
+  "analysis": {
+    "workflowUnderstanding": {
+      "summary": "One sentence describing what this workflow does",
+      "primaryGoal": "The main thing the user is trying to accomplish",
+      "subGoals": ["Milestone 1", "Milestone 2"],
+      "domain": "Domain/context (e.g., CRM, Spreadsheet, E-commerce)",
+      "entities": ["Key entities involved"],
+      "repeatability": "one-time|repeatable|parameterized",
+      "successIndicators": ["What indicates success"],
+      "failureIndicators": ["What indicates failure"]
+    },
+    "stepGuidance": [
+      {
+        "stepIndex": 0,
+        "intent": "What the user is trying to do with this step",
+        "whyThisElement": "Why THIS element was chosen",
+        "elementFindingStrategy": {
+          "lookingFor": "Semantic description",
+          "searchContext": "Where to look",
+          "distinguishers": ["What makes it unique"],
+          "relatedElements": [],
+          "textPatterns": ["Text patterns"],
+          "elementType": "button|input|link|etc"
+        },
+        "preconditions": ["What must be true"],
+        "expectedOutcome": "What should happen",
+        "dependencies": [],
+        "criticality": "critical|important|optional",
+        "alternatives": ["Alternative approaches"]
+      }
+    ],
+    "patterns": [
+      {
+        "type": "form-fill|search-and-select|navigation-sequence|data-entry",
+        "description": "What this pattern does",
+        "stepIndices": [0, 1, 2],
+        "executionHint": "How to handle"
+      }
+    ],
+    "adaptationStrategies": [
+      {
+        "scenario": "What might change",
+        "howToAdapt": "How to handle",
+        "affectedSteps": [0]
+      }
+    ]
+  },` : '';
 
   return `${systemContext}
 
-You are an AI that creates human-like "memories" for automation workflows.
+You are an AI that analyzes automation workflows to produce:
+1. Human-like "memory" of the workflow (triggers, blocks, inputs)
+2. Detailed execution guidance for each step
 
 ## Current Workflow
 
@@ -131,100 +253,117 @@ ${stepsDescription}
 **Variables (inputs):**
 ${variablesDescription}
 
-**Existing Analysis:**
-${workflow.existingAnalysis ? JSON.stringify(workflow.existingAnalysis.workflowUnderstanding, null, 2) : 'None'}
-
-**Learned Skill:**
-${workflow.learnedSkill ? JSON.stringify({
+**Existing Data:**
+${workflow.learnedSkill ? `Learned Skill: ${JSON.stringify({
   whatItDoes: workflow.learnedSkill.whatItDoes,
   canonicalAction: workflow.learnedSkill.canonicalAction,
-  exampleQueries: workflow.learnedSkill.exampleQueries,
-}, null, 2) : 'None'}
+}, null, 2)}` : 'None'}
 
-## Current Memory (to enhance)
-${JSON.stringify(currentMemory, null, 2)}
+${currentMemory ? `**Current Memory (to enhance):**
+${JSON.stringify(currentMemory, null, 2)}` : ''}
+${analysisInstructions}
+## Block Detection Guidelines
 
-## Your Task
+Identify BLOCKS - logical groupings of steps that form a unit:
 
-Enhance the memory to be more human-like. Think about how a person would remember this task:
+**Block Boundaries** (signals that a new block starts):
+- URL changes between steps
+- Modal/dialog opens or closes
+- Form submission (save, submit, create buttons)
+- Significant pause in workflow
+- Navigation steps
 
-1. **Identity**: Is the purpose clear and concise? Improve it.
-2. **Understanding**:
-   - Write a better "elevator" pitch (one-liner)
-   - Make sure phases are logical chunks (how humans think about steps)
-   - Add relevant entities
-3. **Inputs**:
-   - Add better descriptions for each input field
-   - Add extraction hints (words that help find this value in user input)
-   - Add example values
-4. **Triggers**:
-   - Add more natural phrases users might say to invoke this
-   - Add verb/object synonyms
-5. **Pattern**:
-   - Is this truly repeatable? (can handle "add Alice, Bob, Carol")
-   - For data entry, what's the target strategy?
-6. **Success**:
-   - What specifically indicates success?
-   - What indicates failure?
+**Block Types**:
+- \`form_fill\`: Multiple INPUT steps filling a form (usually REPEATABLE)
+- \`table_row\`: Adding/editing a table row (usually REPEATABLE)
+- \`list_item\`: Adding item to a list (usually REPEATABLE)
+- \`menu_navigation\`: Clicking through menus (NOT repeatable)
+- \`one_time\`: Navigation, setup, opening forms (NOT repeatable)
+- \`submission\`: Save/submit buttons (NOT repeatable)
+
+**Repeatability**:
+- Blocks with variable inputs are repeatable
+- \`form_fill\`, \`table_row\`, \`list_item\` blocks are repeatable if they have variables
+- \`one_time\`, \`submission\` are NOT repeatable
+
+**Iteration Variable**: Which variable drives repetition?
+- Example: "add Alice, Bob, Carol" → the "name" variable drives iteration
 
 ## Response Format
 
-Return ONLY valid JSON with these fields (only include fields you want to change):
+Return ONLY valid JSON:
 
-{
-  "identity": {
-    "purpose": "improved purpose",
-    "domain": "improved domain if needed"
-  },
-  "understanding": {
-    "elevator": "improved one-liner",
-    "phases": [...],  // Only if you want to change phases
-    "entities": ["entity1", "entity2"]
-  },
-  "inputs": {
-    "required": [
-      {
-        "name": "Field Name",
-        "description": "Better description",
-        "extractionHints": ["hint1", "hint2"],
-        "exampleValues": ["example1", "example2"]
-      }
-    ]
-  },
-  "triggers": {
-    "phrases": ["phrase1", "phrase2", ...],
-    "verbSynonyms": ["verb1", "verb2"],
-    "objectSynonyms": ["obj1", "obj2"]
-  },
-  "pattern": {
-    "type": "repeatable|single_entry|etc",
-    "repetition": {
-      "supportsMultiple": true,
-      "separators": ["and", ","]
+{${analysisOutputFormat}
+  "memory": {
+    "identity": {
+      "purpose": "Clear, concise purpose statement",
+      "domain": "Application domain"
     },
-    "dataEntry": {  // Only for data entry workflows
-      "targetStrategy": "first_empty_row|fixed_location",
-      "preservesExisting": true
-    }
-  },
-  "success": {
-    "indicators": [
-      {
-        "type": "toast_appears|text_appears|url_changes|...",
-        "description": "What happens",
-        "pattern": "regex or text to match",
-        "priority": "primary|secondary|fallback"
+    "understanding": {
+      "elevator": "One-liner description",
+      "blocks": [
+        {
+          "blockId": "block_0",
+          "name": "Block Name",
+          "purpose": "What this block does",
+          "stepIndices": [0, 1],
+          "criticality": "critical|important|optional",
+          "blockType": "form_fill|table_row|list_item|menu_navigation|one_time|submission",
+          "isRepeatable": true,
+          "iterationVariable": "variableName",
+          "iterationDelayMs": 500
+        }
+      ],
+      "entities": ["entity1", "entity2"]
+    },
+    "inputs": {
+      "required": [
+        {
+          "name": "Field Name",
+          "description": "Clear description",
+          "extractionHints": ["hint1", "hint2"],
+          "exampleValues": ["example1"],
+          "isArray": true,
+          "arraySeparators": ["and", ","],
+          "iteratesBlocks": [1]
+        }
+      ]
+    },
+    "triggers": {
+      "phrases": ["natural phrase 1", "natural phrase 2"],
+      "verbSynonyms": ["add", "create", "insert"],
+      "objectSynonyms": ["contact", "person", "entry"]
+    },
+    "pattern": {
+      "type": "repeatable|single_entry|navigation",
+      "repetition": {
+        "supportsMultiple": true,
+        "separators": ["and", ","]
       }
-    ],
-    "failureIndicators": ["indicator1", "indicator2"],
-    "endState": "What the page looks like when done"
+    },
+    "success": {
+      "indicators": [
+        {
+          "type": "toast_appears|text_appears|url_changes|modal_closes|element_appears",
+          "description": "What happens on success",
+          "pattern": "text to match",
+          "priority": "primary|secondary|fallback"
+        }
+      ],
+      "failureIndicators": ["Error patterns"],
+      "endState": "What the page looks like when done"
+    }
   }
 }
 
-Think carefully about what a human would naturally say when asking to run this workflow.`;
+Think about:
+1. What would a human naturally say to trigger this workflow?
+2. Which steps logically group together?
+3. Which parts should repeat for multi-item operations?
+4. How to find elements when the UI changes?`;
 }
 
-function parseEnhancedMemory(responseText: string, currentMemory: CurrentMemory): any {
+function parseUnifiedResponse(responseText: string, currentMemory: CurrentMemory | undefined, stepCount: number): any {
   try {
     let jsonStr = responseText.trim();
 
@@ -236,13 +375,133 @@ function parseEnhancedMemory(responseText: string, currentMemory: CurrentMemory)
 
     const parsed = JSON.parse(jsonStr);
 
-    // Deep merge the enhancements into current memory
-    return deepMerge(currentMemory, parsed);
+    // Build the result
+    const result: any = {};
+
+    // Extract and normalize analysis if present
+    if (parsed.analysis) {
+      result.analysis = {
+        analyzedAt: Date.now(),
+        analysisVersion: '2.0.0',  // New unified version
+        confidence: calculateConfidence(parsed.analysis, stepCount),
+        workflowUnderstanding: parsed.analysis.workflowUnderstanding || createDefaultUnderstanding(),
+        stepGuidance: normalizeStepGuidance(parsed.analysis.stepGuidance, stepCount),
+        patterns: parsed.analysis.patterns || [],
+        adaptationStrategies: parsed.analysis.adaptationStrategies || [],
+      };
+    }
+
+    // Extract and merge memory
+    if (parsed.memory) {
+      if (currentMemory) {
+        result.memory = deepMerge(currentMemory, parsed.memory);
+      } else {
+        result.memory = parsed.memory;
+      }
+    } else if (currentMemory) {
+      // If no memory in response but we had current memory, return it enhanced
+      result.memory = currentMemory;
+    }
+
+    return result;
   } catch (error) {
     console.error('[GenerateMemory] Failed to parse response:', error);
-    console.error('[GenerateMemory] Raw response:', responseText.substring(0, 500));
-    return currentMemory; // Return unchanged on parse error
+    console.error('[GenerateMemory] Raw response:', responseText.substring(0, 1000));
+
+    // Return safe defaults
+    return {
+      memory: currentMemory || {},
+      analysis: createDefaultAnalysis(stepCount),
+    };
   }
+}
+
+function calculateConfidence(analysis: any, stepCount: number): number {
+  let score = 0;
+  let checks = 0;
+
+  checks++;
+  if (analysis.workflowUnderstanding?.summary) score++;
+
+  checks++;
+  const guidance = analysis.stepGuidance;
+  if (guidance && guidance.length >= stepCount * 0.8) score++;
+
+  checks++;
+  if (analysis.patterns && analysis.patterns.length > 0) score++;
+
+  checks++;
+  if (analysis.adaptationStrategies && analysis.adaptationStrategies.length > 0) score++;
+
+  return checks > 0 ? score / checks : 0.5;
+}
+
+function createDefaultUnderstanding(): any {
+  return {
+    summary: 'Recorded browser automation workflow',
+    primaryGoal: 'Complete the recorded task sequence',
+    subGoals: [],
+    domain: 'General',
+    entities: [],
+    repeatability: 'one-time',
+    successIndicators: ['All steps complete without errors'],
+    failureIndicators: ['Element not found', 'Unexpected page state'],
+  };
+}
+
+function normalizeStepGuidance(guidance: any[] | undefined, stepCount: number): any[] {
+  if (!guidance) return [];
+
+  // Ensure we have guidance for all steps
+  const result: any[] = [];
+  for (let i = 0; i < stepCount; i++) {
+    const existing = guidance.find(g => g.stepIndex === i);
+    if (existing) {
+      result.push({
+        ...existing,
+        elementFindingStrategy: existing.elementFindingStrategy || {
+          lookingFor: 'element',
+          searchContext: 'Page',
+          distinguishers: [],
+          relatedElements: [],
+          textPatterns: [],
+          elementType: 'element',
+        },
+      });
+    } else {
+      result.push({
+        stepIndex: i,
+        intent: 'Perform action',
+        whyThisElement: 'Matched by selector',
+        elementFindingStrategy: {
+          lookingFor: 'element',
+          searchContext: 'Page',
+          distinguishers: [],
+          relatedElements: [],
+          textPatterns: [],
+          elementType: 'element',
+        },
+        preconditions: ['Element is visible'],
+        expectedOutcome: 'Action completes',
+        dependencies: [],
+        criticality: 'important',
+        alternatives: [],
+      });
+    }
+  }
+  return result;
+}
+
+function createDefaultAnalysis(stepCount: number): any {
+  return {
+    analyzedAt: Date.now(),
+    analysisVersion: '2.0.0',
+    confidence: 0.3,
+    workflowUnderstanding: createDefaultUnderstanding(),
+    stepGuidance: normalizeStepGuidance(undefined, stepCount),
+    patterns: [],
+    adaptationStrategies: [],
+  };
 }
 
 function deepMerge(target: any, source: any): any {
@@ -254,13 +513,10 @@ function deepMerge(target: any, source: any): any {
     if (source[key] === null || source[key] === undefined) continue;
 
     if (Array.isArray(source[key])) {
-      // For arrays, replace entirely (don't merge)
       result[key] = source[key];
     } else if (typeof source[key] === 'object') {
-      // For objects, deep merge
       result[key] = deepMerge(target[key] || {}, source[key]);
     } else {
-      // For primitives, replace
       result[key] = source[key];
     }
   }

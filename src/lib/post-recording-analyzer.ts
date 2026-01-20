@@ -171,11 +171,19 @@ export interface AdaptationStrategy {
 // ============================================================================
 
 /**
+ * Extended result that includes both analysis and memory
+ */
+export interface UnifiedAnalysisResult {
+  analysis: WorkflowAnalysis;
+  memory?: any;  // WorkflowMemory from the unified endpoint
+}
+
+/**
  * Analyze a workflow to produce execution guidance
  *
  * Two modes:
  * - Fast mode (useAI=false): Build from PageModel context captured during recording (instant, no cost)
- * - Full mode (useAI=true): Also call AI for patterns and adaptation strategies (3-5 sec, costs money)
+ * - Full mode (useAI=true): Call unified AI for analysis + memory in one call
  */
 export async function analyzeWorkflowWithAI(
   steps: WorkflowStep[],
@@ -186,6 +194,23 @@ export async function analyzeWorkflowWithAI(
     useAI?: boolean; // Default: true - call AI for richer analysis
   } = {}
 ): Promise<WorkflowAnalysis> {
+  const result = await analyzeWorkflowUnified(steps, options);
+  return result.analysis;
+}
+
+/**
+ * Unified analysis that returns both WorkflowAnalysis and WorkflowMemory
+ * This is the preferred method - gets both in a single AI call
+ */
+export async function analyzeWorkflowUnified(
+  steps: WorkflowStep[],
+  options: {
+    workflowName?: string;
+    variableContext?: string;
+    onProgress?: (status: string) => void;
+    useAI?: boolean;
+  } = {}
+): Promise<UnifiedAnalysisResult> {
   const { onProgress, useAI = true, variableContext } = options;
 
   onProgress?.('Building execution guidance from recorded context...');
@@ -199,30 +224,37 @@ export async function analyzeWorkflowWithAI(
   // STEP 3: Build basic workflow understanding locally
   const workflowUnderstanding = buildWorkflowUnderstandingLocally(steps);
 
-  // STEP 4: If AI is enabled, enhance with AI analysis
+  // STEP 4: If AI is enabled, call unified AI service (analysis + memory in one call)
   if (useAI) {
     onProgress?.('Analyzing workflow with AI...');
 
     try {
-      const prompt = buildAnalysisPrompt(steps, options.workflowName, variableContext);
-      const analysisResult = await callAIService(prompt);
+      const { analysis: aiAnalysis, memory } = await callUnifiedAIService(
+        steps,
+        options.workflowName,
+        variableContext
+      );
 
       onProgress?.('Processing AI analysis...');
 
-      // Parse AI result and merge with local analysis
-      const aiAnalysis = parseAnalysisResult(analysisResult, steps);
-
       // Merge AI insights with local analysis
-      return {
+      const mergedAnalysis: WorkflowAnalysis = {
         analyzedAt: Date.now(),
-        analysisVersion: '1.0.0',
+        analysisVersion: '2.0.0',  // New unified version
         confidence: aiAnalysis.confidence,
-        workflowUnderstanding: aiAnalysis.workflowUnderstanding.summary !== 'Recorded workflow'
+        workflowUnderstanding: aiAnalysis.workflowUnderstanding?.summary !== 'Recorded workflow'
           ? aiAnalysis.workflowUnderstanding
           : workflowUnderstanding,
-        stepGuidance: mergeStepGuidance(stepGuidance, aiAnalysis.stepGuidance),
-        patterns: aiAnalysis.patterns.length > 0 ? aiAnalysis.patterns : patterns,
-        adaptationStrategies: aiAnalysis.adaptationStrategies,
+        stepGuidance: mergeStepGuidance(stepGuidance, aiAnalysis.stepGuidance || []),
+        patterns: (aiAnalysis.patterns && aiAnalysis.patterns.length > 0)
+          ? aiAnalysis.patterns
+          : patterns,
+        adaptationStrategies: aiAnalysis.adaptationStrategies || [],
+      };
+
+      return {
+        analysis: mergedAnalysis,
+        memory,  // Also return memory from unified call
       };
     } catch (error) {
       console.warn('[PostRecordingAnalyzer] AI analysis failed, using local analysis:', error);
@@ -230,16 +262,18 @@ export async function analyzeWorkflowWithAI(
     }
   }
 
-  // Return local-only analysis
+  // Return local-only analysis (no memory)
   onProgress?.('Analysis complete');
   return {
-    analyzedAt: Date.now(),
-    analysisVersion: '1.0.0',
-    confidence: 0.6, // Lower confidence without AI
-    workflowUnderstanding,
-    stepGuidance,
-    patterns,
-    adaptationStrategies: buildBasicAdaptationStrategies(steps),
+    analysis: {
+      analyzedAt: Date.now(),
+      analysisVersion: '1.0.0',
+      confidence: 0.6, // Lower confidence without AI
+      workflowUnderstanding,
+      stepGuidance,
+      patterns,
+      adaptationStrategies: buildBasicAdaptationStrategies(steps),
+    },
   };
 }
 
@@ -645,17 +679,21 @@ Respond ONLY with valid JSON, no markdown formatting.`;
 }
 
 /**
- * Call the AI service to analyze the workflow
- * Uses the existing Supabase edge function infrastructure
+ * Call the unified AI service to analyze the workflow
+ * Now uses the generate_workflow_memory endpoint which returns both analysis and memory
  */
-async function callAIService(prompt: string): Promise<string> {
+async function callUnifiedAIService(
+  steps: WorkflowStep[],
+  workflowName?: string,
+  variableContext?: string
+): Promise<{ analysis: WorkflowAnalysis; memory?: any }> {
   try {
     // Import AI config to check if enabled
     const { aiConfig } = await import('./ai-config');
 
     if (!aiConfig.isEnabled()) {
       console.log('[PostRecordingAnalyzer] ⚠️ AI disabled in config, using fallback analysis');
-      return JSON.stringify(createFallbackAnalysis());
+      return { analysis: createFallbackAnalysis(steps) };
     }
 
     // Use the existing Supabase AI infrastructure
@@ -664,14 +702,37 @@ async function callAIService(prompt: string): Promise<string> {
 
     if (!supabaseUrl || !anonKey) {
       console.warn('[PostRecordingAnalyzer] ⚠️ Supabase not configured, using fallback');
-      console.warn('[PostRecordingAnalyzer] supabaseUrl:', supabaseUrl ? 'set' : 'MISSING');
-      console.warn('[PostRecordingAnalyzer] anonKey:', anonKey ? 'set' : 'MISSING');
-      return JSON.stringify(createFallbackAnalysis());
+      return { analysis: createFallbackAnalysis(steps) };
     }
 
-    const endpoint = `${supabaseUrl}/functions/v1/analyze_workflow`;
-    console.log('[PostRecordingAnalyzer] 🔄 Calling AI service:', endpoint);
-    console.log('[PostRecordingAnalyzer] Prompt length:', prompt.length);
+    // Use the unified endpoint
+    const endpoint = `${supabaseUrl}/functions/v1/generate_workflow_memory`;
+    console.log('[PostRecordingAnalyzer] 🔄 Calling unified AI service:', endpoint);
+
+    // Build workflow data for the unified endpoint
+    const workflowData = {
+      name: workflowName || 'Recorded Workflow',
+      description: variableContext ? `Fields: ${variableContext}` : undefined,
+      steps: steps.map(step => ({
+        type: step.type,
+        description: step.description,
+        payload: isWorkflowStepPayload(step.payload) ? {
+          url: step.payload.url,
+          selector: step.payload.selector,
+          elementText: step.payload.elementText,
+          elementRole: step.payload.elementRole,
+          label: step.payload.label,
+          value: step.payload.value,
+          pageModelContext: step.payload.pageModelContext,
+          context: step.payload.context,
+          spreadsheetContext: step.payload.spreadsheetContext,
+          intent: step.payload.intent,
+          stepGoal: step.payload.stepGoal,
+          scope: step.payload.scope,
+        } : undefined,
+      })),
+      variables: [], // Will be filled by caller if available
+    };
 
     const response = await fetch(endpoint, {
       method: 'POST',
@@ -679,7 +740,10 @@ async function callAIService(prompt: string): Promise<string> {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${anonKey}`,
       },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({
+        workflow: workflowData,
+        includeAnalysis: true,
+      }),
     });
 
     if (!response.ok) {
@@ -689,19 +753,31 @@ async function callAIService(prompt: string): Promise<string> {
     }
 
     const result = await response.json();
-    console.log('[PostRecordingAnalyzer] ✅ AI service response received');
+    console.log('[PostRecordingAnalyzer] ✅ Unified AI response received');
 
     if (result.error) {
       console.error('[PostRecordingAnalyzer] ❌ AI service returned error:', result.error);
-      return JSON.stringify(createFallbackAnalysis());
+      return { analysis: createFallbackAnalysis(steps) };
     }
 
-    return result.analysis || JSON.stringify(createFallbackAnalysis());
+    return {
+      analysis: result.analysis || createFallbackAnalysis(steps),
+      memory: result.memory,
+    };
   } catch (error) {
     console.error('[PostRecordingAnalyzer] ❌ AI service call failed:', error);
-    // Return a fallback analysis structure
-    return JSON.stringify(createFallbackAnalysis());
+    return { analysis: createFallbackAnalysis(steps) };
   }
+}
+
+/**
+ * @deprecated Use callUnifiedAIService instead
+ * Kept for backward compatibility
+ */
+async function callAIService(prompt: string): Promise<string> {
+  // This is now a legacy shim - redirect to unified service is handled at higher level
+  console.warn('[PostRecordingAnalyzer] callAIService is deprecated, use callUnifiedAIService');
+  return JSON.stringify(createFallbackAnalysis());
 }
 
 /**
