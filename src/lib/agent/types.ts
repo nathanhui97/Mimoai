@@ -236,12 +236,13 @@ export interface AgentHint {
   // NEW: Spreadsheet context (minimal - full state extracted during replay)
   spreadsheetContext?: {
     recordedIntent: {
-      cellRef: string;
+      cellRef?: string;
       columnHeader?: string;
-      wasEmpty: boolean;
-      wasAppendPosition: boolean;
-      reasoning: string;
-      column: string;
+      semanticField?: string;  // Same as columnHeader, for pattern understanding
+      wasEmpty?: boolean;
+      wasAppendPosition?: boolean;
+      reasoning?: string;
+      column?: string;
       columnDataType?: 'text' | 'number' | 'date' | 'mixed' | 'empty';
       lastDataRow?: number;
       firstEmptyRow?: number;
@@ -267,6 +268,22 @@ export interface AgentHint {
   // Pre-scroll optimization: recorded scroll position
   recordedScrollY?: number;
   recordedScrollX?: number;
+
+  // Phase 3: AI Analysis context for intelligent execution
+  // Provides rich context about WHY this element was chosen and HOW to find it
+  aiAnalysisContext?: AIAnalysisContext;
+
+  // Phase 4: Learned corrections from past executions
+  // What actually worked when recovery was needed
+  learnedCorrections?: Array<{
+    strategy: string;
+    actualElement: {
+      foundBy: 'selector' | 'role+name' | 'text' | 'vision' | 'recovery';
+      selector?: string;
+      role?: string;
+      name?: string;
+    };
+  }>;
 }
 
 // ============================================================================
@@ -391,6 +408,97 @@ export interface RankedCandidate {
   attrs?: Record<string, string>;
   widgetTitle?: string;
   scopePath?: string[];
+}
+
+// ============================================================================
+// AI Analysis Context (Phase 3: Execution Intelligence)
+// ============================================================================
+
+/**
+ * Structured success criteria for verifying action outcomes
+ * The AI generates this during post-recording analysis
+ */
+export interface StructuredSuccessCriteria {
+  type: 'modal_appears' | 'text_appears' | 'text_disappears' | 'url_changes' |
+        'element_appears' | 'element_disappears' | 'input_cleared' |
+        'toast_appears' | 'count_changes' | 'dom_stabilizes';
+
+  params: {
+    // For text_appears/disappears
+    textPattern?: string;          // "Item added" or regex "/Order #\d+/"
+    inElement?: string;            // "within the cart list"
+
+    // For url_changes
+    urlPattern?: string;           // "/orders/*" or "contains=success"
+
+    // For element_appears/disappears
+    elementDescription?: string;   // "Save button becomes enabled"
+    elementRole?: string;          // "button"
+    elementName?: string;          // "Save"
+
+    // For count_changes
+    countElement?: string;         // "items in cart"
+    expectedChange?: 'increase' | 'decrease' | 'exact';
+    expectedValue?: number;
+
+    // For toast_appears
+    toastType?: 'success' | 'error' | 'warning' | 'info';
+    toastPattern?: string;         // "Successfully created"
+  };
+
+  fallback?: string;               // Human-readable fallback if check fails
+}
+
+/**
+ * AI Analysis context passed to hints for intelligent execution
+ * Provides the "why" behind each step for better recovery
+ */
+export interface AIAnalysisContext {
+  // From stepGuidance in WorkflowAnalysis
+  intent: string;                  // "Open the promotion type dropdown"
+  whyThisElement: string;          // "This is the only combobox in the form"
+  elementFindingStrategy: {
+    lookingFor: string;            // "Dropdown labeled 'Type'"
+    searchContext: string;         // "In the promotion form"
+    distinguishers: string[];      // ["Has placeholder 'Select type'", "First dropdown in form"]
+    textPatterns: string[];        // ["Type", "Select type"]
+    elementType: string;           // "combobox"
+  };
+  preconditions: string[];         // ["Form must be visible", "Previous fields filled"]
+  expectedOutcome: string;         // "Dropdown opens with options"
+  criticality: 'critical' | 'important' | 'optional';
+  alternatives: string[];          // ["Click the field label instead"]
+
+  // Structured success criteria for automated verification
+  successCriteria?: StructuredSuccessCriteria;
+}
+
+/**
+ * Execution state context for recovery
+ * Helps AI understand where we are in the workflow
+ */
+export interface ExecutionStateContext {
+  currentStep: number;             // 5
+  totalSteps: number;              // 6
+  completedSteps: number[];        // [0, 1, 2, 3, 4]
+  overallGoal: string;             // "Create new customer account"
+  progressSummary: string;         // "Almost done - just need to confirm submission"
+
+  // Recovery history (what's already been tried)
+  recoveryHistory: Array<{
+    strategy: string;
+    result: 'success' | 'failed';
+  }>;
+}
+
+/**
+ * Verification result from checking action outcomes
+ */
+export interface VerificationResult {
+  verified: boolean;
+  confidence: number;              // 0-1
+  details?: string;
+  criteriaType?: string;
 }
 
 

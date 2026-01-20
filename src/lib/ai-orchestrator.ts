@@ -21,6 +21,8 @@ import type {
 import { TeachableSkillLibrary } from './skill-storage';
 import { aiConfig } from './ai-config';
 import { SkillExecutionBridge, type SkillExecutionResult } from './skill-execution-bridge';
+import { WorkflowStorage } from './storage';
+import { SemanticMatcher, type MatchDecision } from './semantic-matcher';
 
 // ============================================================================
 // Types
@@ -32,6 +34,8 @@ export interface OrchestratorCallbacks {
   onProgress?: (current: number, total: number, description: string) => void;
   onSkillMissing?: (intent: string) => Promise<'teach' | 'try_anyway' | 'cancel'>;
   onError?: (error: string) => void;
+  onWorkflowMatch?: (decision: MatchDecision) => Promise<'execute' | 'pick' | 'cancel'>;
+  onExecuteWorkflow?: (workflowId: string, variables?: Record<string, string>) => Promise<boolean>;
 }
 
 export interface OrchestratorQuestion {
@@ -85,6 +89,12 @@ export class AIOrchestrator {
    */
   async execute(userRequest: string, pageContext?: PageContext): Promise<OrchestratorResult> {
     try {
+      // 0. FIRST: Try semantic workflow matching (Phase 1 feature)
+      const workflowResult = await this.tryMatchWorkflows(userRequest, pageContext);
+      if (workflowResult) {
+        return workflowResult;
+      }
+
       // 1. Parse user intent
       const intent = await this.parseIntent(userRequest, pageContext);
       console.log('[Orchestrator] Parsed intent:', intent);
@@ -143,6 +153,167 @@ export class AIOrchestrator {
       const errorMsg = error instanceof Error ? error.message : 'Unknown error';
       this.callbacks.onError?.(errorMsg);
       return { success: false, executedSkills: [], error: errorMsg };
+    }
+  }
+
+  /**
+   * Try to match user request against saved workflows using semantic matching
+   * Returns null if no workflow match found, result if matched and executed
+   */
+  private async tryMatchWorkflows(
+    userRequest: string,
+    pageContext?: PageContext
+  ): Promise<OrchestratorResult | null> {
+    console.log('[Orchestrator] ========== tryMatchWorkflows START ==========');
+    console.log('[Orchestrator] User request:', userRequest);
+
+    try {
+      // Load all saved workflows
+      console.log('[Orchestrator] Loading workflows from storage...');
+      const workflows = await WorkflowStorage.loadWorkflows();
+      console.log('[Orchestrator] Loaded workflows count:', workflows.length);
+
+      if (workflows.length === 0) {
+        console.log('[Orchestrator] ❌ No saved workflows to match against');
+        return null;
+      }
+
+      console.log('[Orchestrator] 🔍 Attempting semantic workflow matching...');
+      console.log('[Orchestrator] Query:', userRequest);
+      console.log('[Orchestrator] Available workflows:', workflows.map(w => ({ id: w.id, name: w.name })));
+
+      // Use semantic matcher to find matches
+      const decision = await SemanticMatcher.matchAndDecide(
+        userRequest,
+        workflows,
+        pageContext ? { url: pageContext.url, title: pageContext.title || '' } : undefined
+      );
+
+      console.log('[Orchestrator] Semantic match decision:', decision.action);
+
+      // Handle decision
+      switch (decision.action) {
+        case 'AUTO_EXECUTE': {
+          if (!decision.workflow) {
+            console.error('[Orchestrator] AUTO_EXECUTE but no workflow');
+            return null;
+          }
+
+          console.log('[Orchestrator] ✅ Auto-executing workflow:', decision.workflow.name);
+          console.log('[Orchestrator] Confidence:', decision.matches?.[0]?.confidence);
+          console.log('[Orchestrator] Extracted variables:', decision.extractedVariables);
+
+          // Show plan preview
+          this.callbacks.onPlan?.({
+            description: `Run workflow "${decision.workflow.name}"`,
+            skills: [{
+              name: decision.workflow.name,
+              variables: decision.workflow.variables?.variables?.map((v: { variableName: string }) => v.variableName) || [],
+            }],
+            estimatedSteps: decision.workflow.steps.length,
+          });
+
+          // Execute the workflow
+          if (this.callbacks.onExecuteWorkflow) {
+            const success = await this.callbacks.onExecuteWorkflow(
+              decision.workflow.id,
+              decision.extractedVariables
+            );
+
+            return {
+              success,
+              executedSkills: [decision.workflow.id],
+              error: success ? undefined : 'Workflow execution failed',
+            };
+          } else {
+            // No callback provided - signal that we found a match
+            console.warn('[Orchestrator] onExecuteWorkflow callback not provided');
+            return {
+              success: false,
+              executedSkills: [],
+              error: 'WORKFLOW_EXECUTION_NOT_CONFIGURED',
+            };
+          }
+        }
+
+        case 'SHOW_PICKER':
+        case 'CLARIFY': {
+          if (!decision.matches || decision.matches.length === 0) {
+            return null;
+          }
+
+          console.log('[Orchestrator] 🤔 Multiple matches, asking user...');
+          console.log('[Orchestrator] Matches:', decision.matches.map(m => ({
+            name: m.workflow.name,
+            confidence: m.confidence,
+          })));
+
+          // Ask user via callback or question
+          if (this.callbacks.onWorkflowMatch) {
+            const userChoice = await this.callbacks.onWorkflowMatch(decision);
+            if (userChoice === 'cancel') {
+              return { success: false, executedSkills: [], error: 'User cancelled' };
+            }
+            // 'execute' or 'pick' - would need to get the selected workflow
+            // For now, execute the top match
+            if (userChoice === 'execute' && decision.matches[0]) {
+              const workflow = decision.matches[0].workflow;
+              if (this.callbacks.onExecuteWorkflow) {
+                const success = await this.callbacks.onExecuteWorkflow(
+                  workflow.id,
+                  decision.matches[0].extractedVariables
+                );
+                return {
+                  success,
+                  executedSkills: [workflow.id],
+                  error: success ? undefined : 'Workflow execution failed',
+                };
+              }
+            }
+          }
+
+          // If callback exists for questions, ask via question
+          if (this.callbacks.onQuestion && decision.clarification) {
+            const answer = await this.callbacks.onQuestion({
+              id: 'workflow-clarify',
+              text: decision.clarification.question,
+              type: 'select',
+              options: decision.clarification.options.map(o => o.label),
+            });
+
+            // Find selected workflow
+            const selectedOption = decision.clarification.options.find(o => o.label === answer);
+            if (selectedOption && this.callbacks.onExecuteWorkflow) {
+              const selectedMatch = decision.matches.find(m => m.workflowId === selectedOption.workflowId);
+              const success = await this.callbacks.onExecuteWorkflow(
+                selectedOption.workflowId,
+                selectedMatch?.extractedVariables
+              );
+              return {
+                success,
+                executedSkills: [selectedOption.workflowId],
+                error: success ? undefined : 'Workflow execution failed',
+              };
+            }
+          }
+
+          // No handler - fall through to skill matching
+          return null;
+        }
+
+        case 'OFFER_TEACH':
+        case 'NO_MATCH':
+          // No workflow match - fall through to skill matching
+          console.log('[Orchestrator] No semantic workflow match, trying skills...');
+          return null;
+
+        default:
+          return null;
+      }
+    } catch (error) {
+      console.error('[Orchestrator] Error in semantic workflow matching:', error);
+      // Fall through to skill matching
+      return null;
     }
   }
 

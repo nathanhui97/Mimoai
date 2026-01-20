@@ -10,7 +10,7 @@
  * - "agent": Decide next action in workflow (replaces visual_agent)
  * 
  * Features:
- * - Gemini Computer Use model (gemini-2.5-computer-use-preview)
+ * - Gemini Computer Use model (gemini-3-flash-preview)
  * - Normalized coordinate handling (0-999 grid)
  * - Built-in safety decision system
  * - Reference screenshot comparison
@@ -21,7 +21,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 const VERSION = 'v1.0.0-computer-use';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
 // Use the specialized Computer Use model
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-computer-use-preview:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
 
 console.log('computer_use Edge Function', VERSION, 'starting...');
 

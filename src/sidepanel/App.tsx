@@ -45,10 +45,9 @@ import type { SafetyDecision } from '../types/ai';
 import type { StepAnnotation, SuggestedSkill, SkillDefinition } from '../types/skill';
 import { analyzeWorkflowForSkills } from '../lib/skill-extractor';
 import { SkillStorage } from '../lib/skill-storage';
-
 function App() {
-  const { 
-    state, 
+  const {
+    state,
     workflowSteps,
     savedWorkflows,
     isRecording,
@@ -83,6 +82,20 @@ function App() {
   // AI workflow analysis state (runs in background after recording stops)
   const [currentWorkflowAIAnalysis, setCurrentWorkflowAIAnalysis] = useState<WorkflowAnalysis | null>(null);
   const [isAnalyzingWorkflow, setIsAnalyzingWorkflow] = useState(false);
+  // Variable naming page state (shown after recording data-entry workflows)
+  const [showVariableNamingPage, setShowVariableNamingPage] = useState(false);
+  // AI clarifying questions state
+  const [showAIQuestionsPage, setShowAIQuestionsPage] = useState(false);
+  const [aiQuestions, setAiQuestions] = useState<Array<{
+    id: string;
+    question: string;
+    why: string;
+    options: Array<{ label: string; text: string; value: string }>;
+    allowCustom: boolean;
+    category: string;
+  }>>([]);
+  const [aiQuestionAnswers, setAiQuestionAnswers] = useState<Record<string, { selected: string; customText?: string }>>({});
+  const [_isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
   // Variable form modal state
   const [showVariableForm, setShowVariableForm] = useState(false);
   const [pendingExecution, setPendingExecution] = useState<{
@@ -715,56 +728,67 @@ function App() {
       await new Promise(resolve => setTimeout(resolve, 100));
       
       // Get current workflow steps (might have been updated by RECORDED_STEP messages)
-      const currentSteps = workflowSteps.length > 0 ? workflowSteps : [];
-      
+      let currentSteps = workflowSteps.length > 0 ? workflowSteps : [];
+
       console.log('[App] Checking for variable detection:', {
         workflowStepsLength: workflowSteps.length,
         currentStepsLength: currentSteps.length,
         willDetect: currentSteps.length > 0,
         hasInitialSnapshot: !!initialFullPageSnapshot,
       });
-      
+
+      // Note: Column headers for spreadsheets are now user-provided via the variable rename UI
+      // This is more reliable than trying to auto-detect from DOM navigation
+      // The user renames "A13" → "Name", "B13" → "Email", etc. and those names are used for AI pattern understanding
+
       if (currentSteps.length > 0) {
         console.log('[App] ✅ Starting variable detection for', currentSteps.length, 'steps');
-        console.log('[App] Step types:', currentSteps.map(s => ({ 
-          type: s.type, 
+        console.log('[App] Step types:', currentSteps.map(s => ({
+          type: s.type,
           hasValue: isWorkflowStepPayload(s.payload) ? !!s.payload.value : false,
           hasLabel: isWorkflowStepPayload(s.payload) ? !!s.payload.label : false,
           hasSnapshot: isWorkflowStepPayload(s.payload) ? !!(s.payload.visualSnapshot?.viewport || s.payload.visualSnapshot?.elementSnippet) : false
         })));
-        
+
         // Show loading state immediately
         setIsDetectingVariables(true);
         setLearningFeedback('🔍 Analyzing workflow steps for variables...');
-        
+
+        // Declare variables outside try block so we can access it later
+        let detectedVariables: import('../lib/variable-detector').WorkflowVariables = {
+          variables: [],
+          detectedAt: Date.now(),
+          analysisCount: 0,
+        };
+
         try {
           // For spreadsheets, use cell references as variable names (users can rename in UI)
           // This is more reliable than trying to detect headers programmatically
           console.log('[App] 📊 Spreadsheet variable detection will use cell references as default names');
-          
+
           // Use simplified variable detection (no AI needed)
           console.log('[App] Calling simplified VariableDetector.detectVariablesSimplified...');
-          const variables = VariableDetector.detectVariablesSimplified(currentSteps);
+          detectedVariables = VariableDetector.detectVariablesSimplified(currentSteps);
           console.log('[App] ✅ Simplified variable detection completed:', {
-            totalVariables: variables.variables.length,
-            analysisCount: variables.analysisCount,
-            variables: variables.variables.map(v => ({
+            totalVariables: detectedVariables.variables.length,
+            analysisCount: detectedVariables.analysisCount,
+            variables: detectedVariables.variables.map(v => ({
               fieldName: v.fieldName,
               variableName: v.variableName,
               isVariable: v.isVariable,
               confidence: v.confidence,
             })),
           });
-          
+
           // Store variables for display (even if empty, so UI shows the section)
-          setCurrentWorkflowVariables(variables);
-          
-          if (variables.variables.length > 0) {
-            setLearningFeedback(`✨ Detected ${variables.variables.length} variable${variables.variables.length > 1 ? 's' : ''} in recorded workflow`);
+          setCurrentWorkflowVariables(detectedVariables);
+
+          if (detectedVariables.variables.length > 0) {
+            setLearningFeedback(`✨ Detected ${detectedVariables.variables.length} variable${detectedVariables.variables.length > 1 ? 's' : ''} in recorded workflow`);
             setTimeout(() => setLearningFeedback(null), 4000);
           } else {
-            console.log('[App] ⚠️ No variables detected. Analysis count:', variables.analysisCount);
-            if (variables.analysisCount === 0) {
+            console.log('[App] ⚠️ No variables detected. Analysis count:', detectedVariables.analysisCount);
+            if (detectedVariables.analysisCount === 0) {
               setLearningFeedback('ℹ️ No steps were analyzed for variables. Make sure INPUT steps have values.');
               setTimeout(() => setLearningFeedback(null), 3000);
             } else {
@@ -780,54 +804,72 @@ function App() {
           setLearningFeedback(`❌ Variable detection failed: ${errorMessage}`);
           setTimeout(() => setLearningFeedback(null), 5000);
           // Still set empty variables so UI shows the section
-          setCurrentWorkflowVariables({
-            variables: [],
-            detectedAt: Date.now(),
-            analysisCount: 0,
-          });
+          setCurrentWorkflowVariables(detectedVariables);
         } finally {
           setIsDetectingVariables(false);
           console.log('[App] Variable detection finished, isDetectingVariables set to false');
         }
 
-        // Run AI workflow analysis - BLOCKING (user must wait for analysis)
-        // This provides rich context for the AI agent during execution
-        console.log('[App] 🤖 Starting AI workflow analysis (blocking)...');
-        setIsAnalyzingWorkflow(true);
-        setCurrentWorkflowAIAnalysis(null); // Clear previous analysis
-
         // Generate suggested name first (so it's ready when save dialog shows)
         const suggestedName = generateTaskName(currentSteps);
         setWorkflowName(suggestedName);
 
-        try {
-          const analysis = await analyzeWorkflowWithAI(currentSteps, {
-            workflowName: suggestedName || undefined,
-            onProgress: (status) => {
-              console.log('[App] AI Analysis progress:', status);
-            },
-            useAI: true, // Enable AI-powered analysis for rich understanding
-          });
+        // Check if this is a data-entry workflow with variables
+        const hasVariables = detectedVariables.variables.length > 0;
+        const isDataEntryWorkflow = hasVariables && currentSteps.some(s => s.type === 'INPUT');
 
-          console.log('[App] ✅ AI workflow analysis completed:', {
-            confidence: analysis.confidence,
-            stepsAnalyzed: analysis.stepGuidance.length,
-            patternsFound: analysis.patterns.length,
-            strategiesCount: analysis.adaptationStrategies.length,
-            hasAIEnhancement: analysis.confidence > 0.6,
-          });
-          setCurrentWorkflowAIAnalysis(analysis);
-        } catch (err) {
-          console.error('[App] ❌ AI workflow analysis failed:', err);
-          // Set a minimal fallback analysis
-          setCurrentWorkflowAIAnalysis(null);
-        } finally {
-          setIsAnalyzingWorkflow(false);
+        if (isDataEntryWorkflow) {
+          // For data-entry workflows: Show variable naming page FIRST
+          // AI will run AFTER user names the variables
+          console.log('[App] 📊 Data-entry workflow detected with', detectedVariables.variables.length, 'variables');
+          console.log('[App] 📝 Showing variable naming page...');
+          setCurrentWorkflowAIAnalysis(null); // Clear any previous analysis
+          setLearningFeedback('✏️ Name your input fields to help AI understand the workflow');
+          // Show variable naming page (not save dialog yet)
+          setShowVariableNamingPage(true);
+          // Don't show save dialog - will show after variables are named and AI runs
+        } else {
+          // For non-data-entry workflows: Run AI analysis immediately (blocking)
+          console.log('[App] 🤖 Starting AI workflow analysis (blocking)...');
+          setIsAnalyzingWorkflow(true);
+          setCurrentWorkflowAIAnalysis(null); // Clear previous analysis
+
+          let analysis: WorkflowAnalysis | null = null;
+          try {
+            analysis = await analyzeWorkflowWithAI(currentSteps, {
+              workflowName: suggestedName || undefined,
+              onProgress: (status) => {
+                console.log('[App] AI Analysis progress:', status);
+              },
+              useAI: true,
+            });
+
+            console.log('[App] ✅ AI workflow analysis completed');
+            setCurrentWorkflowAIAnalysis(analysis);
+          } catch (err) {
+            console.error('[App] ❌ AI workflow analysis failed:', err);
+            setCurrentWorkflowAIAnalysis(null);
+          } finally {
+            setIsAnalyzingWorkflow(false);
+          }
+
+          // Fetch clarifying questions for non-data-entry workflows too
+          const questionsResult = await fetchClarifyingQuestions(analysis);
+
+          if (questionsResult.hasQuestions && questionsResult.questions.length > 0) {
+            // Show questions page
+            console.log('[App] Showing', questionsResult.questions.length, 'clarifying questions');
+            setAiQuestions(questionsResult.questions);
+            setAiQuestionAnswers({});
+            setShowAIQuestionsPage(true);
+            setLearningFeedback(null);
+          } else {
+            // No questions - show save dialog
+            setShowSaveDialog(true);
+          }
         }
 
-        // Note: Step translations now happen during intent analysis (in handleSaveWorkflow)
-        // This reduces API calls from N+1 to just 1
-        console.log('[App] ✅ Recording stopped and AI analysis complete - showing save dialog');
+        console.log('[App] ✅ Recording stopped');
 
         // Check if we're in teaching mode (with pre-recorded intent)
         if (teachingMode === 'recording_with_intent' && teachingIntent) {
@@ -934,7 +976,7 @@ function App() {
         }),
       };
 
-      // Create the workflow
+      // Create the workflow with AI analysis
       const workflow: SavedWorkflow = {
         id: `workflow-${Date.now()}`,
         name: name,
@@ -943,7 +985,14 @@ function App() {
         updatedAt: Date.now(),
         steps: workflowSteps,
         variables: updatedVariables,
+        aiAnalysis: currentWorkflowAIAnalysis || undefined,
       };
+
+      console.log('[App] 🎓 Including AI analysis in saved workflow:', {
+        hasAIAnalysis: !!currentWorkflowAIAnalysis,
+        primaryGoal: currentWorkflowAIAnalysis?.workflowUnderstanding?.primaryGoal,
+        stepGuidanceCount: currentWorkflowAIAnalysis?.stepGuidance?.length,
+      });
 
       // Save to storage
       await WorkflowStorage.saveWorkflow(workflow);
@@ -955,6 +1004,7 @@ function App() {
       setTeachingIntent(null);
       setPendingLearnedSkill(null);
       setCurrentWorkflowVariables(null);
+      setCurrentWorkflowAIAnalysis(null);
       setIsDetectingVariables(false);
 
       setLearningFeedback(`✅ Got it! I saved "${name}".`);
@@ -1082,6 +1132,170 @@ function App() {
     return consolidated;
   };
 
+  /**
+   * Fetch clarifying questions from AI based on workflow context
+   */
+  const fetchClarifyingQuestions = async (analysis: WorkflowAnalysis | null) => {
+    console.log('[AIQuestions] Fetching clarifying questions...');
+    setIsGeneratingQuestions(true);
+    setLearningFeedback('🤔 AI is thinking of questions...');
+
+    try {
+      const { aiConfig } = await import('../lib/ai-config');
+      const supabaseUrl = aiConfig.getSupabaseUrl();
+      const anonKey = aiConfig.getSupabaseAnonKey();
+
+      if (!supabaseUrl || !anonKey) {
+        console.warn('[AIQuestions] Supabase not configured, skipping questions');
+        return { questions: [], hasQuestions: false };
+      }
+
+      // Build workflow context for question generation
+      const variableFields = currentWorkflowVariables?.variables.map(v => v.fieldName) || [];
+      const stepSummary = workflowSteps.slice(0, 5).map(s => {
+        if (s.type === 'CLICK') return 'Click';
+        if (s.type === 'INPUT') return 'Type text';
+        if (s.type === 'NAVIGATION') return 'Navigate';
+        return s.type;
+      }).join(' → ') + (workflowSteps.length > 5 ? ' → ...' : '');
+
+      const workflowContext = {
+        name: workflowName || 'Untitled workflow',
+        description: analysis?.workflowUnderstanding.summary,
+        stepCount: workflowSteps.length,
+        stepSummary,
+        domain: analysis?.workflowUnderstanding.domain,
+        primaryGoal: analysis?.workflowUnderstanding.primaryGoal,
+        variableFields: variableFields.length > 0 ? variableFields : undefined,
+        patterns: analysis?.patterns.map(p => p.type),
+      };
+
+      console.log('[AIQuestions] Workflow context:', workflowContext);
+
+      const response = await fetch(`${supabaseUrl}/functions/v1/generate_clarifying_questions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${anonKey}`,
+        },
+        body: JSON.stringify({ workflow: workflowContext }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch questions: ${response.status}`);
+      }
+
+      const result = await response.json();
+      console.log('[AIQuestions] Received:', result);
+
+      return result;
+    } catch (err) {
+      console.error('[AIQuestions] Failed to fetch questions:', err);
+      return { questions: [], hasQuestions: false };
+    } finally {
+      setIsGeneratingQuestions(false);
+    }
+  };
+
+  /**
+   * Handle completion of variable naming page
+   * Runs AI analysis with user-named variables, then fetches questions or shows save dialog
+   */
+  const handleVariableNamingComplete = async () => {
+    console.log('[VariableNaming] ✅ User completed naming variables');
+
+    // Get user-named variables from state
+    const namedVariables = currentWorkflowVariables?.variables || [];
+    const variableContext = namedVariables.map(v => v.fieldName).join(', ');
+
+    console.log('[VariableNaming] Variable context for AI:', variableContext);
+
+    // Hide variable naming page, show AI analysis loading
+    setShowVariableNamingPage(false);
+    setIsAnalyzingWorkflow(true);
+    setLearningFeedback('🤖 AI is analyzing your workflow...');
+
+    let analysis: WorkflowAnalysis | null = null;
+
+    try {
+      // Run AI analysis with user-named variables
+      analysis = await analyzeWorkflowWithAI(workflowSteps, {
+        workflowName: workflowName || generateTaskName(workflowSteps),
+        variableContext,
+        onProgress: (status) => {
+          console.log('[VariableNaming] AI Analysis progress:', status);
+        },
+        useAI: true,
+      });
+
+      console.log('[VariableNaming] ✅ AI analysis completed');
+      setCurrentWorkflowAIAnalysis(analysis);
+    } catch (err) {
+      console.error('[VariableNaming] ❌ AI analysis failed:', err);
+      setCurrentWorkflowAIAnalysis(null);
+    } finally {
+      setIsAnalyzingWorkflow(false);
+    }
+
+    // Fetch clarifying questions
+    const questionsResult = await fetchClarifyingQuestions(analysis);
+
+    if (questionsResult.hasQuestions && questionsResult.questions.length > 0) {
+      // Show questions page
+      console.log('[VariableNaming] Showing', questionsResult.questions.length, 'clarifying questions');
+      setAiQuestions(questionsResult.questions);
+      setAiQuestionAnswers({});
+      setShowAIQuestionsPage(true);
+      setLearningFeedback(null);
+    } else {
+      // No questions - go directly to save dialog
+      console.log('[VariableNaming] No questions, showing save dialog');
+      setLearningFeedback('✅ AI analysis complete!');
+      setShowSaveDialog(true);
+    }
+  };
+
+  /**
+   * Handle completion of AI questions page
+   * Stores answers and shows save dialog
+   */
+  const handleAIQuestionsComplete = () => {
+    console.log('[AIQuestions] ✅ User completed questions');
+    console.log('[AIQuestions] Answers:', aiQuestionAnswers);
+
+    // Format answers for display in save dialog and storage
+    const formattedAnswers = aiQuestions.map(q => {
+      const answer = aiQuestionAnswers[q.id];
+      if (!answer) return null;
+
+      const selectedOption = answer.selected === 'custom'
+        ? null
+        : q.options.find(opt => opt.value === answer.selected);
+
+      return {
+        questionId: q.id,
+        category: q.category as 'intent' | 'behavior' | 'scope' | 'error_handling' | 'triggers',
+        question: q.question,
+        answerValue: answer.selected,
+        answerText: selectedOption?.text || answer.customText || answer.selected,
+        customAnswer: answer.selected === 'custom' ? answer.customText : undefined,
+      };
+    }).filter(Boolean);
+
+    console.log('[AIQuestions] Formatted answers:', formattedAnswers);
+
+    // Store the formatted answers for use when saving
+    // We'll attach them to the workflow's memory.clarifications
+    setAiQuestionAnswers(prev => ({
+      ...prev,
+      _formatted: formattedAnswers as any, // Temporary storage for save
+    }));
+
+    setShowAIQuestionsPage(false);
+    setLearningFeedback('✅ Got it! Ready to save.');
+    setShowSaveDialog(true);
+  };
+
   const handleSaveWorkflow = async () => {
     console.log('[SaveWorkflow] 🚀 Save button clicked', {
       hasName: !!workflowName.trim(),
@@ -1114,34 +1328,28 @@ function App() {
         sortedSteps.map(s => `${s.type}@${s.payload.timestamp}`).join(' → ')
       );
       
-      // Start variable detection
-      setIsDetectingVariables(true);
-      
-      // Detect variables using simplified deterministic rules (no AI needed)
-      // NEW: Use simplified detection - all INPUT steps with values are variables
-      console.log('[SaveWorkflow] ========================================');
-      console.log('[SaveWorkflow] Starting simplified variable detection for', sortedSteps.length, 'steps');
-      console.log('[SaveWorkflow] Step breakdown:', sortedSteps.map((s, i) => ({ 
-        index: i,
-        type: s.type, 
-        hasPayload: isWorkflowStepPayload(s.payload),
-        hasValue: isWorkflowStepPayload(s.payload) ? !!s.payload.value : false,
-        value: isWorkflowStepPayload(s.payload) ? s.payload.value?.substring(0, 30) : 'N/A',
-        label: isWorkflowStepPayload(s.payload) ? s.payload.label : 'N/A',
-      })));
-      
-      const variables = VariableDetector.detectVariablesSimplified(sortedSteps);
-      
-      console.log('[SaveWorkflow] ========================================');
-      console.log('[SaveWorkflow] VARIABLE DETECTION COMPLETE');
-      console.log('[SaveWorkflow] Total variables detected:', variables.variables.length);
-      console.log('[SaveWorkflow] Variables:', variables.variables.map(v => ({
-        fieldName: v.fieldName,
-        variableName: v.variableName,
-        defaultValue: v.defaultValue?.substring(0, 30),
-        stepIndex: v.stepIndex,
-      })));
-      console.log('[SaveWorkflow] ========================================');
+      // Use existing variables from state (which may have user-renamed field names)
+      // or detect fresh if not available
+      let variables: import('../lib/variable-detector').WorkflowVariables;
+
+      if (currentWorkflowVariables && currentWorkflowVariables.variables.length > 0) {
+        // Use existing variables from state (user may have renamed them)
+        console.log('[SaveWorkflow] ✅ Using existing variables from state (with user-renamed field names)');
+        variables = currentWorkflowVariables;
+        console.log('[SaveWorkflow] Variables:', variables.variables.map(v => ({
+          fieldName: v.fieldName,
+          variableName: v.variableName,
+          defaultValue: v.defaultValue?.substring(0, 30),
+          stepIndex: v.stepIndex,
+        })));
+      } else {
+        // Detect variables fresh (for non-data-entry workflows)
+        setIsDetectingVariables(true);
+        console.log('[SaveWorkflow] 🔍 Detecting variables from steps...');
+        variables = VariableDetector.detectVariablesSimplified(sortedSteps);
+        console.log('[SaveWorkflow] Detected', variables.variables.length, 'variables');
+        setIsDetectingVariables(false);
+      }
 
       // OPTIMIZATION DISABLED - Breaks AI Agent workflows
       // The optimizer removes "redundant" clicks that are actually ESSENTIAL for UI flow
@@ -1199,77 +1407,161 @@ function App() {
         console.log('[SaveWorkflow] Sample naturalLanguage:', (sortedSteps[0] as any)?.naturalLanguage);
       }
 
-      // Generate task summary AND step translations using IntentAnalyzer
-      console.log('[SaveWorkflow] Analyzing workflow intent (includes step translations)...');
-      setLearningFeedback('📝 Analyzing workflow with AI...');
+      // Generate task summary using existing AI analysis (no duplicate API call)
       let workflowDescription: string | undefined;
       let analyzedIntent: import('../lib/intent-analyzer').AnalyzedIntent | undefined;
       let stepsWithTranslations = sortedSteps;
-      
-      try {
-        const intentAnalysis = await IntentAnalyzer.analyzeWorkflowIntent(tempWorkflow);
-        if (intentAnalysis?.intent) {
-          // Store full intent for AI agent
-          analyzedIntent = intentAnalysis.intent;
-          workflowDescription = IntentAnalyzer.formatIntentAsSummary(intentAnalysis.intent);
-          console.log('[SaveWorkflow] Generated description:', workflowDescription);
-          
-          // Use AI primary goal as name if it's more concise than user's input
-          if (intentAnalysis.intent.primaryGoal && intentAnalysis.intent.primaryGoal.length < 60) {
-            const aiName = intentAnalysis.intent.primaryGoal;
-            const userName = workflowName.trim();
-            // If user kept the auto-generated name or it's generic, use AI name
-            if (userName.startsWith('Click') || userName.startsWith('Type') || aiName.length < userName.length) {
-              console.log('[SaveWorkflow] 💡 Using AI-generated name instead:', aiName);
-              tempWorkflow.name = aiName;
-            }
+
+      // OPTIMIZATION: Reuse currentWorkflowAIAnalysis instead of calling IntentAnalyzer again
+      // The post-recording analysis already ran and contains all the data we need
+      if (currentWorkflowAIAnalysis) {
+        console.log('[SaveWorkflow] ✅ Using existing AI analysis (no duplicate API call)');
+        setLearningFeedback('📝 Preparing workflow...');
+
+        // Convert WorkflowAnalysis to AnalyzedIntent format
+        const understanding = currentWorkflowAIAnalysis.workflowUnderstanding;
+        analyzedIntent = {
+          primaryGoal: understanding.primaryGoal,
+          subGoals: understanding.subGoals,
+          expectedOutcome: understanding.successIndicators.join('; ') || 'Complete the workflow successfully',
+          confidence: currentWorkflowAIAnalysis.confidence,
+          // Convert string[] failureIndicators to proper format
+          failurePatterns: understanding.failureIndicators.map(desc => ({ description: desc })),
+          // Convert stepGuidance to stepTranslations format
+          stepTranslations: currentWorkflowAIAnalysis.stepGuidance.map(g => ({
+            stepIndex: g.stepIndex,
+            intent: g.intent,
+            precondition: g.preconditions.join('; ') || 'None',
+            expectedOutcome: g.expectedOutcome,
+            dependencies: g.dependencies,
+          })),
+        };
+
+        workflowDescription = understanding.summary || understanding.primaryGoal;
+        console.log('[SaveWorkflow] Generated description from existing analysis:', workflowDescription);
+
+        // Use AI primary goal as name if it's more concise than user's input
+        if (understanding.primaryGoal && understanding.primaryGoal.length < 60) {
+          const aiName = understanding.primaryGoal;
+          const userName = workflowName.trim();
+          if (userName.startsWith('Click') || userName.startsWith('Type') || aiName.length < userName.length) {
+            console.log('[SaveWorkflow] 💡 Using AI-generated name instead:', aiName);
+            tempWorkflow.name = aiName;
           }
-          
-          // Apply step translations if available
-          if (intentAnalysis.intent.stepTranslations && intentAnalysis.intent.stepTranslations.length > 0) {
-            console.log('[SaveWorkflow] ✨ Applying', intentAnalysis.intent.stepTranslations.length, 'step translations');
+        }
+
+        // Apply step translations from existing analysis
+        if (currentWorkflowAIAnalysis.stepGuidance.length > 0) {
+          console.log('[SaveWorkflow] ✨ Applying', currentWorkflowAIAnalysis.stepGuidance.length, 'step translations from existing analysis');
+          stepsWithTranslations = sortedSteps.map((step, index) => {
+            const guidance = currentWorkflowAIAnalysis.stepGuidance.find(g => g.stepIndex === index);
+            if (guidance) {
+              return {
+                ...step,
+                naturalLanguage: {
+                  intent: guidance.intent,
+                  precondition: guidance.preconditions.join('; ') || 'None',
+                  expectedOutcome: guidance.expectedOutcome,
+                  dependencies: guidance.dependencies,
+                },
+              };
+            }
+            return step;
+          });
+          console.log('[SaveWorkflow] Sample translation:', stepsWithTranslations[0]?.naturalLanguage);
+        }
+
+        console.log('[SaveWorkflow] 📊 Intent from existing analysis:', {
+          primaryGoal: understanding.primaryGoal,
+          expectedOutcome: understanding.successIndicators.join('; '),
+          confidence: currentWorkflowAIAnalysis.confidence,
+          subGoalsCount: understanding.subGoals?.length,
+          stepTranslationsCount: currentWorkflowAIAnalysis.stepGuidance.length,
+        });
+      } else if (variables.variables.length > 0) {
+        // Data-entry workflow: AI analysis was DEFERRED until user named variables
+        // Now run AI analysis with the user-provided field names
+        console.log('[SaveWorkflow] 🤖 Running deferred AI analysis with user-named variables...');
+        setLearningFeedback('🤖 AI is analyzing your workflow with field names...');
+        setIsAnalyzingWorkflow(true);
+
+        // Build variable context string for AI (e.g., "Name, Email, Phone")
+        const variableContext = variables.variables.map(v => v.fieldName).join(', ');
+        console.log('[SaveWorkflow] Variable context for AI:', variableContext);
+
+        try {
+          const analysis = await analyzeWorkflowWithAI(sortedSteps, {
+            workflowName: workflowName.trim(),
+            variableContext, // Pass user-named fields to AI
+            onProgress: (status) => {
+              console.log('[SaveWorkflow] AI Analysis progress:', status);
+            },
+            useAI: true,
+          });
+
+          console.log('[SaveWorkflow] ✅ Deferred AI analysis completed:', {
+            confidence: analysis.confidence,
+            stepsAnalyzed: analysis.stepGuidance.length,
+            primaryGoal: analysis.workflowUnderstanding.primaryGoal,
+          });
+
+          // Use the AI analysis results
+          setCurrentWorkflowAIAnalysis(analysis);
+
+          const understanding = analysis.workflowUnderstanding;
+          analyzedIntent = {
+            primaryGoal: understanding.primaryGoal,
+            subGoals: understanding.subGoals,
+            expectedOutcome: understanding.successIndicators.join('; ') || 'Complete the workflow successfully',
+            confidence: analysis.confidence,
+            failurePatterns: understanding.failureIndicators.map(desc => ({ description: desc })),
+            stepTranslations: analysis.stepGuidance.map(g => ({
+              stepIndex: g.stepIndex,
+              intent: g.intent,
+              precondition: g.preconditions.join('; ') || 'None',
+              expectedOutcome: g.expectedOutcome,
+              dependencies: g.dependencies,
+            })),
+          };
+
+          workflowDescription = understanding.summary || understanding.primaryGoal;
+          console.log('[SaveWorkflow] Generated description from deferred analysis:', workflowDescription);
+
+          // Apply step translations
+          if (analysis.stepGuidance.length > 0) {
             stepsWithTranslations = sortedSteps.map((step, index) => {
-              const translation = intentAnalysis.intent.stepTranslations?.find(t => t.stepIndex === index);
-              if (translation) {
+              const guidance = analysis.stepGuidance.find(g => g.stepIndex === index);
+              if (guidance) {
                 return {
                   ...step,
                   naturalLanguage: {
-                    intent: translation.intent,
-                    precondition: translation.precondition,
-                    expectedOutcome: translation.expectedOutcome,
-                    dependencies: translation.dependencies,
+                    intent: guidance.intent,
+                    precondition: guidance.preconditions.join('; ') || 'None',
+                    expectedOutcome: guidance.expectedOutcome,
+                    dependencies: guidance.dependencies,
                   },
                 };
               }
               return step;
             });
-            console.log('[SaveWorkflow] Sample translation:', stepsWithTranslations[0]?.naturalLanguage);
-          } else {
-            console.warn('[SaveWorkflow] ⚠️ No stepTranslations received from analyze_intent');
           }
-          
-          // Log full intent for verification
-          console.log('[SaveWorkflow] 📊 Full Intent Analysis:', {
-            primaryGoal: analyzedIntent.primaryGoal,
-            expectedOutcome: analyzedIntent.expectedOutcome,
-            confidence: analyzedIntent.confidence,
-            subGoalsCount: analyzedIntent.subGoals?.length,
-            failurePatternsCount: analyzedIntent.failurePatterns?.length,
-            stepTranslationsCount: analyzedIntent.stepTranslations?.length,
-          });
-        } else {
+        } catch (err) {
+          console.error('[SaveWorkflow] ❌ Deferred AI analysis failed:', err);
           // Fallback to local analysis
           const localIntent = IntentAnalyzer.analyzeIntentLocally(sortedSteps);
           analyzedIntent = localIntent;
           workflowDescription = IntentAnalyzer.formatIntentAsSummary(localIntent);
-          console.log('[SaveWorkflow] Generated description (local):', workflowDescription);
+        } finally {
+          setIsAnalyzingWorkflow(false);
         }
-      } catch (error) {
-        console.warn('[SaveWorkflow] Failed to generate description:', error);
-        // Fallback to local analysis
+      } else {
+        // Fallback: No existing analysis and no variables, use local analysis (fast, no API call)
+        console.log('[SaveWorkflow] ⚠️ No existing AI analysis, using local analysis');
+        setLearningFeedback('📝 Analyzing workflow...');
         const localIntent = IntentAnalyzer.analyzeIntentLocally(sortedSteps);
         analyzedIntent = localIntent;
         workflowDescription = IntentAnalyzer.formatIntentAsSummary(localIntent);
+        console.log('[SaveWorkflow] Generated description (local):', workflowDescription);
       }
 
       const workflow: SavedWorkflow = {
@@ -2078,6 +2370,18 @@ function App() {
                       setActiveTab('skills');
                       handleTeachMeClick();
                     }}
+                    onExecuteWorkflow={async (workflow, variables) => {
+                      try {
+                        console.log('[App] ChatExecutor requesting workflow execution:', workflow.name);
+                        console.log('[App] With extracted variables:', variables);
+                        // Use the existing handleExecuteWorkflow which handles variables/execution
+                        await handleExecuteWorkflow(workflow);
+                        return true;
+                      } catch (err) {
+                        console.error('[App] ChatExecutor workflow execution failed:', err);
+                        return false;
+                      }
+                    }}
                   />
                 </div>
               )}
@@ -2166,7 +2470,7 @@ function App() {
           )}
 
         {/* After recording: Show save workflow UI */}
-        {workflowSteps.length > 0 && !isRecording && (
+        {workflowSteps.length > 0 && !isRecording && !showSaveDialog && (
           <div className="mb-6 animate-fade-in">
             <div className="flex gap-3">
               <button
@@ -2190,23 +2494,67 @@ function App() {
           </div>
         )}
 
-        {/* Recorded Steps - Show only during recording (hide during post_recording and execution) */}
+        {/* Recorded Steps with AI Insights */}
         {workflowSteps.length > 0 && teachingMode !== 'post_recording' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
           <div className="mb-6 p-5 bg-card rounded-2xl border border-border/60 shadow-soft">
-            <h3 className="font-semibold mb-4 text-card-foreground tracking-tight">
-              I learned {workflowSteps.length} action{workflowSteps.length !== 1 ? 's' : ''}
-            </h3>
+            {/* Header with AI badge */}
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-semibold text-card-foreground tracking-tight">
+                I learned {workflowSteps.length} action{workflowSteps.length !== 1 ? 's' : ''}
+              </h3>
+              {currentWorkflowAIAnalysis && (
+                <span className="px-2 py-0.5 text-xs font-medium bg-purple-100 text-purple-700 rounded-full flex items-center gap-1">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  AI Enhanced
+                </span>
+              )}
+            </div>
 
-            <div className="space-y-2 max-h-64 overflow-y-auto">
-              {workflowSteps.map((step, index) => (
-                  <div
-                    key={index}
-                    className="py-2.5 px-3 bg-muted/30 rounded-xl text-sm flex items-start gap-3"
-                  >
-                    <span className="text-muted-foreground font-medium flex-shrink-0">{index + 1}.</span>
-                    <span className="flex-1 text-foreground">{getHumanDescription(step)}</span>
+            {/* AI Analysis Summary Card */}
+            {currentWorkflowAIAnalysis && (
+              <div className="mb-4 p-4 bg-purple-50 border border-purple-200 rounded-xl">
+                <div className="flex items-start gap-3">
+                  <div className="p-2 bg-purple-100 rounded-lg flex-shrink-0">
+                    <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
                   </div>
-              ))}
+                  <div className="flex-1">
+                    <h4 className="font-medium text-purple-800 text-sm mb-1">AI Understanding</h4>
+                    <p className="text-purple-700 text-sm">{currentWorkflowAIAnalysis.workflowUnderstanding.primaryGoal}</p>
+                    {currentWorkflowAIAnalysis.patterns.length > 0 && (
+                      <p className="text-purple-600 text-xs mt-2">
+                        Detected: {currentWorkflowAIAnalysis.patterns.map(p => p.type.replace(/-/g, ' ')).join(', ')}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Steps with AI insights */}
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {workflowSteps.map((step, index) => {
+                const aiGuidance = currentWorkflowAIAnalysis?.stepGuidance?.find(g => g.stepIndex === index);
+                return (
+                  <div key={index} className="py-2.5 px-3 bg-muted/30 rounded-xl text-sm">
+                    <div className="flex items-start gap-3">
+                      <span className="text-muted-foreground font-medium flex-shrink-0">{index + 1}.</span>
+                      <div className="flex-1">
+                        <span className="text-foreground">{getHumanDescription(step)}</span>
+                        {aiGuidance && (
+                          <p className="text-xs text-purple-600 mt-1 flex items-center gap-1">
+                            <span>💡</span>
+                            <span>{aiGuidance.whyThisElement || aiGuidance.intent}</span>
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -2250,6 +2598,216 @@ function App() {
                 </svg>
               )}
               {learningFeedback}
+            </div>
+          </div>
+        )}
+
+        {/* Variable Naming Page - shown for data-entry workflows */}
+        {showVariableNamingPage && currentWorkflowVariables && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+            <div className="relative bg-card p-7 rounded-3xl border border-border/50 shadow-soft-xl max-w-md w-full mx-4 animate-scale-in">
+              <h2 className="text-xl font-semibold mb-2 text-card-foreground tracking-tight">Name Your Input Fields</h2>
+              <p className="text-sm text-muted-foreground mb-5">
+                Tell me what each field represents so I can understand this workflow better.
+              </p>
+
+              {/* Variable List */}
+              <div className="space-y-3 mb-6 max-h-64 overflow-y-auto">
+                {currentWorkflowVariables.variables.map((variable, index) => (
+                  <div key={variable.stepIndex} className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl border border-border/40">
+                    <div className="flex-shrink-0 w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center text-primary font-medium text-sm">
+                      {index + 1}
+                    </div>
+                    <div className="flex-1">
+                      <input
+                        type="text"
+                        value={variable.fieldName}
+                        onChange={(e) => {
+                          // Update the variable's fieldName
+                          const updatedVariables = currentWorkflowVariables.variables.map((v, i) =>
+                            i === index ? { ...v, fieldName: e.target.value } : v
+                          );
+                          setCurrentWorkflowVariables({
+                            ...currentWorkflowVariables,
+                            variables: updatedVariables,
+                          });
+                        }}
+                        placeholder="Field name (e.g., Name, Email, Phone)"
+                        className="w-full px-3 py-2 bg-background border border-border/60 rounded-lg text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/40 transition-all text-sm"
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Value: "{variable.defaultValue?.substring(0, 30)}{(variable.defaultValue?.length || 0) > 30 ? '...' : ''}"
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Help Text */}
+              <div className="mb-5 p-3 bg-blue-50 border border-blue-200 rounded-xl">
+                <p className="text-xs text-blue-700">
+                  <strong>Tip:</strong> Use descriptive names like "Customer Name", "Email Address", or "Phone Number".
+                  This helps AI understand what this workflow does.
+                </p>
+              </div>
+
+              {/* Buttons */}
+              <div className="flex gap-3">
+                <button
+                  onClick={handleVariableNamingComplete}
+                  className="flex-1 px-5 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200"
+                >
+                  Continue
+                </button>
+                <button
+                  onClick={() => {
+                    setShowVariableNamingPage(false);
+                    clearWorkflowSteps();
+                    setCurrentWorkflowVariables(null);
+                  }}
+                  className="flex-1 px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* AI Clarifying Questions Page */}
+        {showAIQuestionsPage && aiQuestions.length > 0 && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
+            <div className="relative bg-card p-7 rounded-3xl border border-border/50 shadow-soft-xl max-w-lg w-full mx-4 animate-scale-in max-h-[85vh] overflow-y-auto">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="p-2 bg-purple-100 rounded-xl">
+                  <svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-card-foreground tracking-tight">Quick Questions</h2>
+                  <p className="text-sm text-muted-foreground">Help me understand this workflow better</p>
+                </div>
+              </div>
+
+              {/* Questions List */}
+              <div className="space-y-6 mb-6">
+                {aiQuestions.map((q, qIndex) => (
+                  <div key={q.id} className="p-4 bg-muted/20 rounded-xl border border-border/40">
+                    <p className="font-medium text-foreground mb-1">
+                      {qIndex + 1}. {q.question}
+                    </p>
+                    {q.why && (
+                      <p className="text-xs text-muted-foreground mb-3 italic">
+                        {q.why}
+                      </p>
+                    )}
+
+                    {/* Options */}
+                    <div className="space-y-2">
+                      {q.options.map((opt) => (
+                        <label
+                          key={opt.label}
+                          className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-all ${
+                            aiQuestionAnswers[q.id]?.selected === opt.value
+                              ? 'bg-primary/10 border-2 border-primary/40'
+                              : 'bg-background border border-border/60 hover:border-primary/30'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name={q.id}
+                            value={opt.value}
+                            checked={aiQuestionAnswers[q.id]?.selected === opt.value}
+                            onChange={() => setAiQuestionAnswers(prev => ({
+                              ...prev,
+                              [q.id]: { selected: opt.value }
+                            }))}
+                            className="sr-only"
+                          />
+                          <span className={`flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-semibold ${
+                            aiQuestionAnswers[q.id]?.selected === opt.value
+                              ? 'border-primary bg-primary text-primary-foreground'
+                              : 'border-muted-foreground/40 text-muted-foreground'
+                          }`}>
+                            {opt.label}
+                          </span>
+                          <span className="text-sm text-foreground">{opt.text}</span>
+                        </label>
+                      ))}
+
+                      {/* Custom answer option */}
+                      {q.allowCustom && (
+                        <label
+                          className={`flex items-start gap-3 p-3 rounded-lg cursor-pointer transition-all ${
+                            aiQuestionAnswers[q.id]?.selected === 'custom'
+                              ? 'bg-primary/10 border-2 border-primary/40'
+                              : 'bg-background border border-border/60 hover:border-primary/30'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name={q.id}
+                            value="custom"
+                            checked={aiQuestionAnswers[q.id]?.selected === 'custom'}
+                            onChange={() => setAiQuestionAnswers(prev => ({
+                              ...prev,
+                              [q.id]: { selected: 'custom', customText: prev[q.id]?.customText || '' }
+                            }))}
+                            className="sr-only"
+                          />
+                          <span className={`flex-shrink-0 w-6 h-6 rounded-full border-2 flex items-center justify-center text-xs font-semibold mt-0.5 ${
+                            aiQuestionAnswers[q.id]?.selected === 'custom'
+                              ? 'border-primary bg-primary text-primary-foreground'
+                              : 'border-muted-foreground/40 text-muted-foreground'
+                          }`}>
+                            E
+                          </span>
+                          <div className="flex-1">
+                            <span className="text-sm text-foreground">Other:</span>
+                            {aiQuestionAnswers[q.id]?.selected === 'custom' && (
+                              <input
+                                type="text"
+                                value={aiQuestionAnswers[q.id]?.customText || ''}
+                                onChange={(e) => setAiQuestionAnswers(prev => ({
+                                  ...prev,
+                                  [q.id]: { selected: 'custom', customText: e.target.value }
+                                }))}
+                                placeholder="Type your answer..."
+                                className="w-full mt-2 px-3 py-2 bg-background border border-border/60 rounded-lg text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                                autoFocus
+                              />
+                            )}
+                          </div>
+                        </label>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Buttons */}
+              <div className="flex gap-3">
+                <button
+                  onClick={handleAIQuestionsComplete}
+                  disabled={aiQuestions.some(q => !aiQuestionAnswers[q.id]?.selected)}
+                  className="flex-1 px-5 py-3 bg-primary text-primary-foreground rounded-xl font-semibold hover:opacity-90 active:scale-[0.98] shadow-soft transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Continue
+                </button>
+                <button
+                  onClick={() => {
+                    // Skip questions and go directly to save
+                    setShowAIQuestionsPage(false);
+                    setShowSaveDialog(true);
+                  }}
+                  className="px-5 py-3 bg-muted text-muted-foreground rounded-xl font-medium hover:bg-muted/80 active:scale-[0.98] transition-all duration-200"
+                >
+                  Skip
+                </button>
+              </div>
             </div>
           </div>
         )}

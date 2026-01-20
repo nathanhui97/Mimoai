@@ -7,7 +7,8 @@
 
 import type { SavedWorkflow, WorkflowStepPayload } from '../../types/workflow';
 import { isWorkflowStepPayload } from '../../types/workflow';
-import type { AgentHint, AgentObservation } from './types';
+import type { AgentHint, AgentObservation, AIAnalysisContext, StructuredSuccessCriteria } from './types';
+import type { StepExecutionGuidance } from '../post-recording-analyzer';
 import { getCleanLabelForMatching } from '../label-utils';
 
 /**
@@ -45,7 +46,7 @@ export class HintExtractor {
 
   /**
    * Extract hints from workflow steps
-   * 
+   *
    * Hints are "suggestions" not commands - they tell the AI what was recorded,
    * but the AI should adapt based on current page state and variable overrides.
    */
@@ -54,16 +55,19 @@ export class HintExtractor {
     // The optimizer removes "redundant" clicks (like opening menus, waiting for page loads)
     // but these are ESSENTIAL for AI agent to execute in the correct sequence
     const steps = workflow.steps;
-    
+
     if (workflow.optimizedSteps) {
       console.warn(`[HintExtractor] ⚠️ Ignoring ${workflow.optimizedSteps.length} optimized steps - AI Agent requires original ${workflow.steps.length} steps for reliable execution`);
     }
-    
+
     const originalSteps = workflow.steps;
-    
+
     // Build step→variable mapping
     const stepToVariable = this.buildVariableMapping(workflow, variableValues);
     const stepIdToVariable = this.buildStepIdVariableMapping(workflow, variableValues);
+
+    // Extract AI analysis step guidance for enriching hints
+    const stepGuidance = workflow.aiAnalysis?.stepGuidance || [];
     
     return steps.map((step, index) => {
       // Handle TAB_SWITCH steps specially
@@ -181,6 +185,19 @@ export class HintExtractor {
         console.log(`[HintExtractor] 📋 Extracted decision space with ${decisionSpace.options.length} options for dropdown`);
       }
       
+      // Build AI analysis context from step guidance
+      const guidance = stepGuidance.find(g => g.stepIndex === index);
+      const aiAnalysisContext = this.buildAIAnalysisContext(guidance);
+
+      if (aiAnalysisContext) {
+        console.log(`[HintExtractor] 🧠 Step ${index} AI context attached:`, {
+          intent: aiAnalysisContext.intent?.substring(0, 50),
+          lookingFor: aiAnalysisContext.elementFindingStrategy?.lookingFor,
+          criticality: aiAnalysisContext.criticality,
+          hasSuccessCriteria: !!aiAnalysisContext.successCriteria,
+        });
+      }
+
       return {
         stepNumber: index + 1,
         description,
@@ -205,6 +222,8 @@ export class HintExtractor {
         decisionSpace,
         // Store original step type for outcome verification (NAVIGATION, CLICK, INPUT, etc.)
         stepType: step.type as AgentHint['stepType'],
+        // 🧠 AI Analysis context for intelligent execution and recovery
+        aiAnalysisContext,
       };
     });
   }
@@ -310,6 +329,14 @@ export class HintExtractor {
       }
       if (kind === 'BUTTON_CLICK' || kind === 'LINK_CLICK') {
         console.log('[HintExtractor] Converting to CLICK action via interactionType');
+        return 'click';
+      }
+      if (kind === 'RADIO_SELECTION') {
+        console.log('[HintExtractor] 🔘 Converting to CLICK action via interactionType (radio button)');
+        return 'click';
+      }
+      if (kind === 'CHECKBOX_TOGGLE') {
+        console.log('[HintExtractor] ☑️ Converting to CLICK action via interactionType (checkbox)');
         return 'click';
       }
       // For other kinds, fall through to legacy logic
@@ -563,12 +590,133 @@ export class HintExtractor {
     if (!step.naturalLanguage) {
       return undefined;
     }
-    
+
     return {
       intent: step.naturalLanguage.intent,
       precondition: step.naturalLanguage.precondition,
       expectedOutcome: step.naturalLanguage.expectedOutcome,
       dependencies: step.naturalLanguage.dependencies || [],
+    };
+  }
+
+  /**
+   * Build AI analysis context from step guidance
+   * This provides rich context about WHY this element was chosen and HOW to find it
+   */
+  private buildAIAnalysisContext(guidance: StepExecutionGuidance | undefined): AIAnalysisContext | undefined {
+    if (!guidance) {
+      return undefined;
+    }
+
+    // Build structured success criteria from expected outcome
+    const successCriteria = this.inferSuccessCriteria(guidance.expectedOutcome);
+
+    return {
+      intent: guidance.intent,
+      whyThisElement: guidance.whyThisElement,
+      elementFindingStrategy: {
+        lookingFor: guidance.elementFindingStrategy.lookingFor,
+        searchContext: guidance.elementFindingStrategy.searchContext,
+        distinguishers: guidance.elementFindingStrategy.distinguishers,
+        textPatterns: guidance.elementFindingStrategy.textPatterns,
+        elementType: guidance.elementFindingStrategy.elementType,
+      },
+      preconditions: guidance.preconditions,
+      expectedOutcome: guidance.expectedOutcome,
+      criticality: guidance.criticality,
+      alternatives: guidance.alternatives,
+      successCriteria,
+    };
+  }
+
+  /**
+   * Infer structured success criteria from expected outcome text
+   */
+  private inferSuccessCriteria(expectedOutcome: string): StructuredSuccessCriteria | undefined {
+    if (!expectedOutcome) {
+      return undefined;
+    }
+
+    const outcomeLower = expectedOutcome.toLowerCase();
+
+    // Dropdown opens
+    if (outcomeLower.includes('dropdown') && outcomeLower.includes('open')) {
+      return {
+        type: 'element_appears',
+        params: {
+          elementDescription: 'dropdown options list',
+          elementRole: 'listbox',
+        },
+        fallback: expectedOutcome,
+      };
+    }
+
+    // Modal/dialog appears
+    if (outcomeLower.includes('modal') || outcomeLower.includes('dialog') || outcomeLower.includes('popup')) {
+      if (outcomeLower.includes('open') || outcomeLower.includes('appear')) {
+        return {
+          type: 'modal_appears',
+          params: {},
+          fallback: expectedOutcome,
+        };
+      }
+      if (outcomeLower.includes('close') || outcomeLower.includes('disappear')) {
+        return {
+          type: 'element_disappears',
+          params: {
+            elementDescription: 'modal dialog',
+          },
+          fallback: expectedOutcome,
+        };
+      }
+    }
+
+    // Success/confirmation messages
+    if (outcomeLower.includes('success') || outcomeLower.includes('saved') || outcomeLower.includes('created') || outcomeLower.includes('added')) {
+      return {
+        type: 'toast_appears',
+        params: {
+          toastType: 'success',
+          toastPattern: 'success|saved|created|added|complete',
+        },
+        fallback: expectedOutcome,
+      };
+    }
+
+    // Page navigation
+    if (outcomeLower.includes('navigate') || outcomeLower.includes('redirect') || outcomeLower.includes('url')) {
+      return {
+        type: 'url_changes',
+        params: {},
+        fallback: expectedOutcome,
+      };
+    }
+
+    // Value entered in field
+    if (outcomeLower.includes('enter') || outcomeLower.includes('value') || outcomeLower.includes('field')) {
+      return {
+        type: 'dom_stabilizes',
+        params: {},
+        fallback: expectedOutcome,
+      };
+    }
+
+    // Option selected
+    if (outcomeLower.includes('select') || outcomeLower.includes('chosen') || outcomeLower.includes('option')) {
+      return {
+        type: 'text_appears',
+        params: {
+          textPattern: '', // Will be filled with the selected value
+        },
+        fallback: expectedOutcome,
+      };
+    }
+
+    // Default: DOM stabilizes
+    return {
+      type: 'dom_stabilizes',
+      params: {},
+      fallback: expectedOutcome,
     };
   }
 }

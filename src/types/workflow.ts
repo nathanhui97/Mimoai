@@ -359,13 +359,14 @@ export interface WorkflowStepPayload {
   // NOTE: Stores minimal intent data only. Full sheet state is extracted fresh during replay.
   spreadsheetContext?: {
     recordedIntent: {
-      cellRef: string;
+      cellRef?: string;
       columnHeader?: string;
-      wasEmpty: boolean;
-      wasAppendPosition: boolean;
-      reasoning: string;
+      semanticField?: string;  // Same as columnHeader, but more descriptive name for pattern understanding
+      wasEmpty?: boolean;
+      wasAppendPosition?: boolean;
+      reasoning?: string;
       // Minimal column info for intent verification
-      column: string;
+      column?: string;
       columnDataType?: 'text' | 'number' | 'date' | 'mixed' | 'empty';
       lastDataRow?: number;
       firstEmptyRow?: number;
@@ -529,6 +530,11 @@ export interface SavedWorkflow {
   // AI-powered post-recording analysis for intelligent execution
   // This complements analyzedIntent with richer execution guidance
   aiAnalysis?: import('../lib/post-recording-analyzer').WorkflowAnalysis;
+
+  // Unified workflow memory - human-like understanding of the workflow
+  // This consolidates scattered data (aiAnalysis, learnedSkill, variables, etc.)
+  // into a single coherent structure the agent can consult
+  memory?: import('../lib/workflow-memory').WorkflowMemory;
 }
 
 // ============================================================================

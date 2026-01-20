@@ -7,12 +7,15 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { TeachableSkill } from '../types/skill';
+import type { SavedWorkflow } from '../types/workflow';
 import { AIOrchestrator, type OrchestratorQuestion, type ExecutionPlanPreview } from '../lib/ai-orchestrator';
 import { TeachableSkillLibrary } from '../lib/skill-storage';
+import { WorkflowStorage } from '../lib/storage';
 
 interface ChatExecutorProps {
   onTeachSkill?: () => void;  // Called when user wants to teach a new skill
   onClose?: () => void;
+  onExecuteWorkflow?: (workflow: SavedWorkflow, variables?: Record<string, string>) => Promise<boolean>;  // Called to execute a matched workflow
 }
 
 interface ChatMessage {
@@ -63,7 +66,7 @@ function ProgressBar({ data }: { data: { current: number; total: number } }) {
   );
 }
 
-export function ChatExecutor({ onTeachSkill, onClose }: ChatExecutorProps) {
+export function ChatExecutor({ onTeachSkill, onClose, onExecuteWorkflow }: ChatExecutorProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'welcome',
@@ -214,6 +217,33 @@ export function ChatExecutor({ onTeachSkill, onClose }: ChatExecutorProps) {
           content: `Sorry, something went wrong: ${error}`,
           type: 'error',
         });
+      },
+
+      // Handle workflow execution from semantic matching
+      onExecuteWorkflow: async (workflowId, variables) => {
+        if (!onExecuteWorkflow) {
+          console.warn('[ChatExecutor] onExecuteWorkflow prop not provided');
+          return false;
+        }
+
+        try {
+          // Load the workflow
+          const workflow = await WorkflowStorage.loadWorkflow(workflowId);
+          if (!workflow) {
+            console.error('[ChatExecutor] Workflow not found:', workflowId);
+            return false;
+          }
+
+          console.log('[ChatExecutor] Executing matched workflow:', workflow.name);
+          console.log('[ChatExecutor] With variables:', variables);
+
+          // Execute via the parent's handler
+          const success = await onExecuteWorkflow(workflow, variables);
+          return success;
+        } catch (error) {
+          console.error('[ChatExecutor] Workflow execution error:', error);
+          return false;
+        }
       },
     });
 

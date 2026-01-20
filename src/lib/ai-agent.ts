@@ -269,12 +269,13 @@ export interface AgentHint {
   // NEW: Spreadsheet context (minimal - full state extracted during replay)
   spreadsheetContext?: {
     recordedIntent: {
-      cellRef: string;
+      cellRef?: string;
       columnHeader?: string;
-      wasEmpty: boolean;
-      wasAppendPosition: boolean;
-      reasoning: string;
-      column: string;
+      semanticField?: string;  // Same as columnHeader, for pattern understanding
+      wasEmpty?: boolean;
+      wasAppendPosition?: boolean;
+      reasoning?: string;
+      column?: string;
       columnDataType?: 'text' | 'number' | 'date' | 'mixed' | 'empty';
       lastDataRow?: number;
       firstEmptyRow?: number;
@@ -295,6 +296,41 @@ export interface AgentHint {
     selectedIndex?: number;
     options?: string[];
   };
+
+  // Phase 3: AI Analysis context for intelligent execution
+  aiAnalysisContext?: {
+    intent: string;
+    whyThisElement: string;
+    elementFindingStrategy: {
+      lookingFor: string;
+      searchContext: string;
+      distinguishers: string[];
+      textPatterns: string[];
+      elementType: string;
+    };
+    preconditions: string[];
+    expectedOutcome: string;
+    criticality: 'critical' | 'important' | 'optional';
+    alternatives: string[];
+    successCriteria?: {
+      type: 'modal_appears' | 'text_appears' | 'text_disappears' | 'url_changes' |
+            'element_appears' | 'element_disappears' | 'input_cleared' |
+            'toast_appears' | 'count_changes' | 'dom_stabilizes';
+      params: Record<string, any>;
+      fallback?: string;
+    };
+  };
+
+  // Phase 4: Learned corrections from past executions
+  learnedCorrections?: Array<{
+    strategy: string;
+    actualElement: {
+      foundBy: 'selector' | 'role+name' | 'text' | 'vision' | 'recovery';
+      selector?: string;
+      role?: string;
+      name?: string;
+    };
+  }>;
 }
 
 /** Current observation of the page (DOM-first, screenshot optional) */
@@ -3611,11 +3647,32 @@ export class AIAgent {
     
     const config = aiConfig.getConfig();
     const url = `${config.supabaseUrl}/functions/v1/dom_agent`;
-    
+
+    // Get current hint for AI analysis context
+    const currentHint = this.state.hints[this.state.currentHintIndex];
+    const completedSteps = this.state.hints
+      .map((h, i) => h.completed ? i : -1)
+      .filter(i => i >= 0);
+
+    // Build execution state context for smarter recovery
+    const executionState = {
+      currentStep: this.state.currentHintIndex,
+      totalSteps: this.state.hints.length,
+      completedSteps,
+      overallGoal: this.state.goal,
+      progressSummary: this.buildProgressSummary(this.state.currentHintIndex, this.state.hints.length, completedSteps),
+    };
+
+    console.log(`[AIAgent] 🔄 Recovery with execution context:`, {
+      progress: executionState.progressSummary,
+      hasAIContext: !!currentHint?.aiAnalysisContext,
+      aiIntent: currentHint?.aiAnalysisContext?.intent?.substring(0, 40),
+    });
+
     try {
       const payload = {
         mode: 'recover',
-        
+
         // Rejection context
         rejectionCode,
         rejectionDetails: {
@@ -3625,14 +3682,14 @@ export class AIAgent {
           interactabilityIssue: rejectionDetails.interactabilityIssue,
           scopeStatus: rejectionDetails.scopeStatus,
         },
-        
+
         // Failed action
         failedAction: {
           type: failedAction.type,
           target: failedAction.params.target,
           description: failedAction.params.description,
         },
-        
+
         // Current context
         pageContext: {
           url: observation.url,
@@ -3640,12 +3697,34 @@ export class AIAgent {
           hasModal: observation.hasModal,
           domMap: observation.domMapText.substring(0, 2000), // Truncate for cost
         },
-        
+
         // Attempt number
         attemptNumber,
-        
+
         // Goal for context
         goal: this.state.goal,
+
+        // NEW: Execution state context (Phase 3)
+        executionState,
+
+        // NEW: AI analysis context from current hint (Phase 3)
+        aiAnalysisContext: currentHint?.aiAnalysisContext ? {
+          intent: currentHint.aiAnalysisContext.intent,
+          whyThisElement: currentHint.aiAnalysisContext.whyThisElement,
+          elementFindingStrategy: currentHint.aiAnalysisContext.elementFindingStrategy,
+          preconditions: currentHint.aiAnalysisContext.preconditions,
+          expectedOutcome: currentHint.aiAnalysisContext.expectedOutcome,
+          criticality: currentHint.aiAnalysisContext.criticality,
+          alternatives: currentHint.aiAnalysisContext.alternatives,
+        } : undefined,
+
+        // NEW: Hint's step guidance for recovery context
+        stepGuidance: currentHint?.aiAnalysisContext?.elementFindingStrategy ? {
+          lookingFor: currentHint.aiAnalysisContext.elementFindingStrategy.lookingFor,
+          searchContext: currentHint.aiAnalysisContext.elementFindingStrategy.searchContext,
+          distinguishers: currentHint.aiAnalysisContext.elementFindingStrategy.distinguishers,
+          textPatterns: currentHint.aiAnalysisContext.elementFindingStrategy.textPatterns,
+        } : undefined,
       };
       
       const response = await fetch(url, {
@@ -4060,6 +4139,28 @@ export class AIAgent {
     }
 
     return { achieved: false, reason: 'Outcome not yet verified' };
+  }
+
+  /**
+   * Build a human-readable progress summary for recovery context
+   * Helps the AI understand where we are in the workflow
+   */
+  private buildProgressSummary(currentStep: number, totalSteps: number, completedSteps: number[]): string {
+    const percentComplete = Math.round((completedSteps.length / totalSteps) * 100);
+
+    if (currentStep === 0) {
+      return 'Just starting - this is the first step';
+    }
+    if (currentStep >= totalSteps - 1) {
+      return `Almost done (${percentComplete}%) - this is the FINAL step, try harder!`;
+    }
+    if (percentComplete >= 80) {
+      return `Near completion (${percentComplete}%) - ${completedSteps.length} of ${totalSteps} steps done`;
+    }
+    if (percentComplete >= 50) {
+      return `Halfway through (${percentComplete}%) - ${completedSteps.length} of ${totalSteps} steps done`;
+    }
+    return `In progress (${percentComplete}%) - ${completedSteps.length} of ${totalSteps} steps done`;
   }
 
   private sleep(ms: number): Promise<void> {

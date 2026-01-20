@@ -26,8 +26,8 @@ export const FeatureFlags = {
   
   /**
    * Use Gemini Computer Use model for vision tasks
-   * When enabled: Uses gemini-2.5-computer-use-preview (specialized for UI automation)
-   * When disabled: Falls back to gemini-2.5-flash (generic vision model)
+   * When enabled: Uses gemini-3-flash-preview (specialized for UI automation)
+   * When disabled: Falls back to gemini-3-flash-preview (generic vision model)
    * Cost: Similar to flash, but more accurate for coordinates
    * Risk: Preview model - may have occasional issues
    */

@@ -647,7 +647,7 @@ async function executeStep(
     case 'SCROLL': {
       // Handle scroll step - replay the scroll from recording
       const viewport = step.metadata?.viewport as any;
-      
+
       try {
         // Check if this is a container scroll or window scroll
         if (viewport?.elementScrollContainer) {
@@ -656,16 +656,21 @@ async function executeStep(
           const containerSelector = containerInfo.selector;
           const scrollTop = containerInfo.scrollTop || 0;
           const scrollLeft = containerInfo.scrollLeft || 0;
+          const scrollDeltaX = containerInfo.scrollDeltaX;
+          const scrollDeltaY = containerInfo.scrollDeltaY;
           const isDropdownScroll = containerInfo.isDropdownScroll || false;
-          
-          console.log(`[UniversalOrchestrator] 📜 Replaying container scroll: ${containerSelector} to top=${scrollTop}, left=${scrollLeft}${isDropdownScroll ? ' (DROPDOWN)' : ''}`);
-          
-          // 🎯 NEW: For dropdown scrolls, use MenuDetector instead of selector
+
+          // Prefer delta scrolling (relative) when available for more accurate replay
+          const useDelta = scrollDeltaX !== undefined || scrollDeltaY !== undefined;
+
+          console.log(`[UniversalOrchestrator] 📜 Replaying container scroll: ${containerSelector} ${useDelta ? `delta=(${scrollDeltaX || 0}, ${scrollDeltaY || 0})` : `to top=${scrollTop}, left=${scrollLeft}`}${isDropdownScroll ? ' (DROPDOWN)' : ''}`);
+
+          // 🎯 For dropdown scrolls, use MenuDetector instead of selector
           let container: Element | null = null;
           if (isDropdownScroll) {
             const { MenuDetector } = await import('../menu-detector');
             const visibleMenu = MenuDetector.findVisibleMenu();
-            
+
             if (visibleMenu) {
               console.log(`[UniversalOrchestrator] 📜 Found visible dropdown/menu using MenuDetector`);
               container = visibleMenu;
@@ -673,7 +678,7 @@ async function executeStep(
               console.warn(`[UniversalOrchestrator] ⚠️ No visible menu found via MenuDetector, falling back to selector`);
             }
           }
-          
+
           // Fall back to selector-based approach if MenuDetector didn't find anything
           if (!container) {
             try {
@@ -691,7 +696,53 @@ async function executeStep(
               }
             }
           }
-          
+
+          // 🎯 NEW: If container still not found, try modal/popup detection
+          // This handles cases where modals are portaled or have dynamic selectors
+          if (!container) {
+            console.log(`[UniversalOrchestrator] 📜 Selector failed, trying modal/popup detection...`);
+
+            const modalSelectors = [
+              '[role="dialog"]',
+              '[aria-modal="true"]',
+              '.modal',
+              '[class*="Modal"]',
+              '[class*="dialog"]',
+              '[class*="Dialog"]',
+              '[class*="popup"]',
+              '[class*="Popup"]',
+              '[class*="overlay"]',
+              '[class*="Overlay"]',
+            ];
+
+            // Find all potential modals and check for scrollable containers
+            for (const modalSelector of modalSelectors) {
+              try {
+                const modals = Array.from(document.querySelectorAll(modalSelector));
+                for (const modal of modals) {
+                  const style = window.getComputedStyle(modal);
+                  const isVisible = style.display !== 'none' &&
+                                   style.visibility !== 'hidden' &&
+                                   style.opacity !== '0';
+                  const zIndex = parseInt(style.zIndex) || 0;
+
+                  if (isVisible && zIndex > 50) {
+                    // Found an active modal - look for scrollable container within it
+                    const scrollableContainer = findScrollableContainerInModal(modal);
+                    if (scrollableContainer) {
+                      container = scrollableContainer;
+                      console.log(`[UniversalOrchestrator] 📜 Found scrollable container inside modal (${modalSelector})`);
+                      break;
+                    }
+                  }
+                }
+              } catch (e) {
+                // Continue to next selector
+              }
+              if (container) break;
+            }
+          }
+
           if (!container) {
             console.warn(`[UniversalOrchestrator] Container not found: ${containerSelector}`);
             return {
@@ -700,34 +751,125 @@ async function executeStep(
               error: `Scroll container not found: ${containerSelector}`,
             };
           }
-          
-          // Scroll the container
-          container.scrollTop = scrollTop;
-          container.scrollLeft = scrollLeft;
-          
+
+          // Validate container is actually scrollable
+          const containerStyle = window.getComputedStyle(container);
+          const isScrollable = container.scrollHeight > container.clientHeight ||
+                              container.scrollWidth > container.clientWidth ||
+                              containerStyle.overflow === 'auto' ||
+                              containerStyle.overflow === 'scroll' ||
+                              containerStyle.overflowY === 'auto' ||
+                              containerStyle.overflowY === 'scroll';
+
+          if (!isScrollable) {
+            console.warn(`[UniversalOrchestrator] ⚠️ Container found but not scrollable, attempting scroll anyway`);
+          }
+
+          // Scroll the container - prefer delta (relative) scrolling when available
+          if (useDelta) {
+            container.scrollBy({
+              top: scrollDeltaY || 0,
+              left: scrollDeltaX || 0,
+              behavior: 'smooth',
+            });
+          } else {
+            container.scrollTop = scrollTop;
+            container.scrollLeft = scrollLeft;
+          }
+
           // Wait for scroll to complete
           await sleep(300);
-          
+
           return {
             success: true,
             elapsedMs: Date.now() - startTime,
           };
         } else {
-          // Window scroll
+          // Window scroll - but first check if there's an active modal/popup
+          // If a modal is open, the scroll should happen within it, not on the window
           const scrollX = viewport?.scrollX || 0;
           const scrollY = viewport?.scrollY || 0;
-          
-          console.log(`[UniversalOrchestrator] 📜 Replaying window scroll to x=${scrollX}, y=${scrollY}`);
-          
-          window.scrollTo({
-            top: scrollY,
-            left: scrollX,
-            behavior: 'smooth',
-          });
-          
+          const scrollDeltaX = viewport?.scrollDeltaX;
+          const scrollDeltaY = viewport?.scrollDeltaY;
+          const useDelta = scrollDeltaX !== undefined || scrollDeltaY !== undefined;
+
+          // Check for active modals/popups first
+          const modalSelectors = [
+            '[role="dialog"]',
+            '[aria-modal="true"]',
+            '.modal',
+            '[class*="Modal"]',
+            '[class*="dialog"]',
+            '[class*="Dialog"]',
+            '[class*="popup"]',
+            '[class*="Popup"]',
+          ];
+
+          let modalScrollContainer: Element | null = null;
+          for (const modalSelector of modalSelectors) {
+            try {
+              const modals = Array.from(document.querySelectorAll(modalSelector));
+              for (const modal of modals) {
+                const style = window.getComputedStyle(modal);
+                const isVisible = style.display !== 'none' &&
+                                 style.visibility !== 'hidden' &&
+                                 style.opacity !== '0';
+                const zIndex = parseInt(style.zIndex) || 0;
+
+                if (isVisible && zIndex > 50) {
+                  const scrollableContainer = findScrollableContainerInModal(modal);
+                  if (scrollableContainer) {
+                    modalScrollContainer = scrollableContainer;
+                    console.log(`[UniversalOrchestrator] 📜 Found active modal with scrollable content, scrolling modal instead of window`);
+                    break;
+                  }
+                }
+              }
+            } catch (e) {
+              // Continue
+            }
+            if (modalScrollContainer) break;
+          }
+
+          if (modalScrollContainer) {
+            // Scroll within the modal instead of the window
+            if (useDelta) {
+              modalScrollContainer.scrollBy({
+                top: scrollDeltaY || 0,
+                left: scrollDeltaX || 0,
+                behavior: 'smooth',
+              });
+            } else {
+              modalScrollContainer.scrollTop = scrollY;
+              modalScrollContainer.scrollLeft = scrollX;
+            }
+            await sleep(300);
+            return {
+              success: true,
+              elapsedMs: Date.now() - startTime,
+            };
+          }
+
+          // No modal found, proceed with window scroll
+          console.log(`[UniversalOrchestrator] 📜 Replaying window scroll ${useDelta ? `delta=(${scrollDeltaX || 0}, ${scrollDeltaY || 0})` : `to x=${scrollX}, y=${scrollY}`}`);
+
+          if (useDelta) {
+            window.scrollBy({
+              top: scrollDeltaY || 0,
+              left: scrollDeltaX || 0,
+              behavior: 'smooth',
+            });
+          } else {
+            window.scrollTo({
+              top: scrollY,
+              left: scrollX,
+              behavior: 'smooth',
+            });
+          }
+
           // Wait for scroll to complete
           await sleep(500);
-          
+
           return {
             success: true,
             elapsedMs: Date.now() - startTime,
@@ -941,6 +1083,47 @@ export function convertLegacyStep(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Find a scrollable container within a modal element.
+ * Searches for the most likely scroll container by checking overflow CSS and actual scrollability.
+ */
+function findScrollableContainerInModal(modal: Element): Element | null {
+  // First check if the modal itself is scrollable
+  const modalStyle = window.getComputedStyle(modal);
+  const modalScrollable = modal.scrollHeight > modal.clientHeight ||
+                          modalStyle.overflow === 'auto' ||
+                          modalStyle.overflow === 'scroll' ||
+                          modalStyle.overflowY === 'auto' ||
+                          modalStyle.overflowY === 'scroll';
+
+  if (modalScrollable && modal.scrollHeight > modal.clientHeight) {
+    return modal;
+  }
+
+  // Search for scrollable children within the modal
+  const candidates = modal.querySelectorAll('*');
+  let bestCandidate: Element | null = null;
+  let maxScrollHeight = 0;
+
+  for (const el of Array.from(candidates)) {
+    const style = window.getComputedStyle(el);
+    const hasOverflow = style.overflow === 'auto' ||
+                       style.overflow === 'scroll' ||
+                       style.overflowY === 'auto' ||
+                       style.overflowY === 'scroll';
+
+    if (hasOverflow && el.scrollHeight > el.clientHeight) {
+      // Prefer larger scroll areas (likely the main content)
+      if (el.scrollHeight > maxScrollHeight) {
+        maxScrollHeight = el.scrollHeight;
+        bestCandidate = el;
+      }
+    }
+  }
+
+  return bestCandidate;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));

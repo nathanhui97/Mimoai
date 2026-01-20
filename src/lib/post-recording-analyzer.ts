@@ -181,11 +181,12 @@ export async function analyzeWorkflowWithAI(
   steps: WorkflowStep[],
   options: {
     workflowName?: string;
+    variableContext?: string; // User-named fields like "Name, Email, Phone"
     onProgress?: (status: string) => void;
     useAI?: boolean; // Default: true - call AI for richer analysis
   } = {}
 ): Promise<WorkflowAnalysis> {
-  const { onProgress, useAI = true } = options;
+  const { onProgress, useAI = true, variableContext } = options;
 
   onProgress?.('Building execution guidance from recorded context...');
 
@@ -203,7 +204,7 @@ export async function analyzeWorkflowWithAI(
     onProgress?.('Analyzing workflow with AI...');
 
     try {
-      const prompt = buildAnalysisPrompt(steps, options.workflowName);
+      const prompt = buildAnalysisPrompt(steps, options.workflowName, variableContext);
       const analysisResult = await callAIService(prompt);
 
       onProgress?.('Processing AI analysis...');
@@ -460,7 +461,7 @@ function mergeStepGuidance(
 /**
  * Build the prompt for AI analysis
  */
-function buildAnalysisPrompt(steps: WorkflowStep[], workflowName?: string): string {
+function buildAnalysisPrompt(steps: WorkflowStep[], workflowName?: string, variableContext?: string): string {
   // Extract relevant data from each step
   const stepSummaries = steps.map((step, index) => {
     if (!isWorkflowStepPayload(step.payload)) {
@@ -523,6 +524,13 @@ function buildAnalysisPrompt(steps: WorkflowStep[], workflowName?: string): stri
         cellReference: payload.context.gridCoordinates.cellReference,
         columnHeader: payload.context.gridCoordinates.columnHeader,
       } : undefined,
+      // Include enriched spreadsheet context (pattern understanding)
+      spreadsheetContext: payload.spreadsheetContext?.recordedIntent ? {
+        cellRef: payload.spreadsheetContext.recordedIntent.cellRef,
+        column: payload.spreadsheetContext.recordedIntent.column,
+        columnHeader: payload.spreadsheetContext.recordedIntent.columnHeader,
+        semanticField: payload.spreadsheetContext.recordedIntent.semanticField,
+      } : undefined,
       // Include container context
       container: payload.context?.container,
       // Include scope
@@ -533,7 +541,18 @@ function buildAnalysisPrompt(steps: WorkflowStep[], workflowName?: string): stri
   const prompt = `You are an expert workflow analyzer. Analyze this recorded browser automation workflow and produce detailed execution guidance.
 
 ${workflowName ? `Workflow Name: "${workflowName}"` : ''}
+${variableContext ? `
+## User-Named Input Fields
 
+The user has named the input fields in this workflow as: **${variableContext}**
+
+This is CRITICAL context! When the user named fields "Name, Email, Phone", they are telling you:
+- The PURPOSE of each input step (entering contact information)
+- The TYPE of data expected (person's name, email address, phone number)
+- The SEMANTIC MEANING of the workflow (adding a contact, not just filling cells)
+
+Use these field names to understand what the workflow REALLY does, not just what elements it clicks.
+` : ''}
 ## Recorded Steps
 
 ${JSON.stringify(stepSummaries, null, 2)}
@@ -612,6 +631,13 @@ Respond with a JSON object matching this structure:
 4. **Patterns**: Recognize common patterns like "search for X then select it" or "fill form fields"
 5. **Dependencies**: Identify which steps depend on previous steps (e.g., can't select from dropdown until it's open)
 6. **Criticality**: Some steps are critical (submit), others are optional (scrolling)
+7. **Spreadsheet Pattern Understanding**: When you see spreadsheetContext with columnHeader/semanticField:
+   - Understand that the user entered data in a SPECIFIC COLUMN (not just a cell)
+   - Column headers like "Name", "Email", "Phone" represent the SEMANTIC FIELD, not the cell reference
+   - The PATTERN is: "enter [field type] data in the [column name] column"
+   - This pattern can be REPEATED for different rows - the column meaning stays the same
+   - Example: If user typed "John" in A10 with columnHeader="Name", understand this as "enter name in Name column", not "type John in A10"
+   - For parameterized workflows, each column becomes a variable slot (Name → name variable, Email → email variable)
 
 Respond ONLY with valid JSON, no markdown formatting.`;
 
@@ -684,10 +710,32 @@ async function callAIService(prompt: string): Promise<string> {
 function parseAnalysisResult(result: string, steps: WorkflowStep[]): WorkflowAnalysis {
   try {
     // Try to extract JSON from the response (handle markdown code blocks)
-    let jsonStr = result;
-    const jsonMatch = result.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
+    let jsonStr = result.trim();
+
+    // Method 1: Try standard markdown code block extraction
+    const jsonMatch = result.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (jsonMatch && jsonMatch[1]) {
       jsonStr = jsonMatch[1].trim();
+      console.log('[PostRecordingAnalyzer] Extracted JSON from markdown code block');
+    }
+    // Method 2: If still starts with backticks, try aggressive extraction
+    else if (jsonStr.startsWith('```')) {
+      // Remove opening ```json or ``` and find the closing ```
+      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '');
+      const closingIndex = jsonStr.lastIndexOf('```');
+      if (closingIndex > 0) {
+        jsonStr = jsonStr.substring(0, closingIndex).trim();
+      }
+      console.log('[PostRecordingAnalyzer] Used aggressive markdown extraction');
+    }
+    // Method 3: Find the first { and last } to extract JSON object
+    else if (!jsonStr.startsWith('{')) {
+      const firstBrace = jsonStr.indexOf('{');
+      const lastBrace = jsonStr.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
+        console.log('[PostRecordingAnalyzer] Extracted JSON by finding braces');
+      }
     }
 
     const parsed = JSON.parse(jsonStr);

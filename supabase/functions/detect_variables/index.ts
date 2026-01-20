@@ -2,16 +2,17 @@
  * Supabase Edge Function: detect_variables
  * Analyzes workflow step snapshots using Gemini Vision API to determine
  * which fields should be parameterized as variables for workflow execution.
- * 
+ *
  * Focuses primarily on INPUT/TEXTAREA steps, with selective CLICK step analysis
  * for selectable options (dropdowns, radio buttons).
  */
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { SYSTEM_PROMPT_SHORT, getSystemPromptForTask } from '../_shared/system-prompt.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
 
 interface StepMetadata {
   stepIndex: number;
@@ -645,9 +646,13 @@ function buildVariableDetectionPrompt(
   afterSnapshot?: string,
   initialFullPageSnapshot?: string
 ): string {
-  let prompt = `PRODUCT CONTEXT:
-You are analyzing steps from a browser automation tool called "mimoai". 
-This tool allows users to record repetitive browser tasks (like filling forms, creating promotions, processing orders) 
+  const systemContext = getSystemPromptForTask('extract_variables');
+
+  let prompt = `${systemContext}
+
+PRODUCT CONTEXT:
+You are analyzing steps from a browser automation tool called "mimoai".
+This tool allows users to record repetitive browser tasks (like filling forms, creating promotions, processing orders)
 and then execute them multiple times with different input values. 
 
 The goal is to identify which values the user typed should be "variables" - meaning they can be changed 

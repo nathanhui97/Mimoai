@@ -3,6 +3,7 @@
  */
 
 import type { SavedWorkflow } from '../types/workflow';
+import { generateWorkflowMemory, consolidateExistingData } from './workflow-memory';
 
 const WORKFLOWS_KEY = 'ghostwriter-workflows';
 
@@ -17,27 +18,102 @@ export class WorkflowStorage {
   /**
    * Save a workflow to storage
    * Updates existing workflow if ID matches, otherwise appends
+   * Automatically generates/updates workflow memory
    */
-  static async saveWorkflow(workflow: SavedWorkflow): Promise<void> {
+  static async saveWorkflow(workflow: SavedWorkflow, options?: { skipMemoryGeneration?: boolean }): Promise<void> {
     try {
       const workflows = await this.loadWorkflows();
       const existingIndex = workflows.findIndex((w) => w.id === workflow.id);
 
+      // Generate memory if not present or if workflow changed significantly
+      let workflowWithMemory = workflow;
+      if (!options?.skipMemoryGeneration) {
+        workflowWithMemory = await this.ensureMemory(workflow);
+      }
+
       if (existingIndex >= 0) {
         // Update existing workflow
         workflows[existingIndex] = {
-          ...workflow,
+          ...workflowWithMemory,
           updatedAt: Date.now(),
         };
       } else {
         // Add new workflow
-        workflows.push(workflow);
+        workflows.push(workflowWithMemory);
       }
 
       await chrome.storage.local.set({ [WORKFLOWS_KEY]: workflows });
     } catch (error) {
       console.error('Error saving workflow:', error);
       throw new Error(`Failed to save workflow: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Ensure workflow has a memory, generate if missing
+   * Uses local consolidation first (instant), then enhances with AI (background)
+   */
+  private static async ensureMemory(workflow: SavedWorkflow): Promise<SavedWorkflow> {
+    // Skip if workflow has minimal data
+    if (!workflow.steps || workflow.steps.length === 0) {
+      return workflow;
+    }
+
+    // Check if memory exists and is recent
+    if (workflow.memory && workflow.memory.generatedAt) {
+      // Memory exists - check if workflow has been updated since memory was generated
+      if (workflow.memory.generatedAt >= (workflow.updatedAt || workflow.createdAt)) {
+        return workflow; // Memory is up to date
+      }
+    }
+
+    console.log('[Storage] Generating memory for workflow:', workflow.name);
+
+    try {
+      // Step 1: Quick local consolidation (instant)
+      const localMemory = consolidateExistingData(workflow);
+      workflow = { ...workflow, memory: localMemory };
+
+      // Step 2: Try to enhance with AI (async, non-blocking)
+      // This runs in the background and updates storage when complete
+      this.enhanceMemoryInBackground(workflow.id).catch(err => {
+        console.warn('[Storage] Background memory enhancement failed:', err);
+      });
+
+      return workflow;
+    } catch (error) {
+      console.warn('[Storage] Memory generation failed:', error);
+      return workflow; // Return workflow without memory
+    }
+  }
+
+  /**
+   * Enhance workflow memory with AI in the background
+   */
+  private static async enhanceMemoryInBackground(workflowId: string): Promise<void> {
+    try {
+      // Small delay to let the initial save complete
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      const workflow = await this.loadWorkflow(workflowId);
+      if (!workflow) return;
+
+      // Generate full memory with AI enhancement
+      const enhancedMemory = await generateWorkflowMemory(workflow, { useAI: true });
+
+      // Update workflow with enhanced memory
+      const updatedWorkflow = { ...workflow, memory: enhancedMemory };
+
+      // Save without re-generating memory (to avoid infinite loop)
+      const workflows = await this.loadWorkflows();
+      const index = workflows.findIndex(w => w.id === workflowId);
+      if (index >= 0) {
+        workflows[index] = updatedWorkflow;
+        await chrome.storage.local.set({ [WORKFLOWS_KEY]: workflows });
+        console.log('[Storage] Enhanced memory for workflow:', workflow.name);
+      }
+    } catch (error) {
+      console.warn('[Storage] Background memory enhancement failed:', error);
     }
   }
 
@@ -198,8 +274,98 @@ export class WorkflowStorage {
         score += 35;
       }
     }
-    
+
     return score;
+  }
+
+  // ============================================================================
+  // Phase 4: Execution Feedback Storage
+  // ============================================================================
+
+  /**
+   * Get the storage key for execution feedback
+   */
+  static getFeedbackKey(workflowId: string): string {
+    return `feedback-${workflowId}`;
+  }
+
+  /**
+   * Store execution feedback for a workflow
+   * Keeps last 10 executions for learning
+   */
+  static async storeExecutionFeedback(feedback: import('./execution-feedback').ExecutionFeedback): Promise<void> {
+    const key = this.getFeedbackKey(feedback.workflowId);
+
+    try {
+      const existing = await this.getExecutionFeedback(feedback.workflowId);
+      existing.push(feedback);
+
+      // Keep last 10 executions
+      while (existing.length > 10) {
+        existing.shift();
+      }
+
+      await chrome.storage.local.set({ [key]: existing });
+      console.log(`[Storage] Stored execution feedback for workflow ${feedback.workflowId} (${existing.length} total)`);
+    } catch (error) {
+      console.error('Error storing execution feedback:', error);
+    }
+  }
+
+  /**
+   * Get execution feedback history for a workflow
+   */
+  static async getExecutionFeedback(workflowId: string): Promise<import('./execution-feedback').ExecutionFeedback[]> {
+    const key = this.getFeedbackKey(workflowId);
+
+    try {
+      const result = await chrome.storage.local.get(key);
+      const feedback = result[key];
+      if (Array.isArray(feedback)) {
+        return feedback;
+      }
+      return [];
+    } catch (error) {
+      console.error('Error getting execution feedback:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Get learned corrections for a workflow based on feedback history
+   */
+  static async getLearnedCorrections(workflowId: string): Promise<import('./execution-feedback').StepCorrections> {
+    const { aggregateFeedback } = await import('./execution-feedback');
+    const feedback = await this.getExecutionFeedback(workflowId);
+    return aggregateFeedback(feedback);
+  }
+
+  /**
+   * Get feedback analysis/patterns for a workflow
+   */
+  static async getFeedbackAnalysis(workflowId: string): Promise<{
+    overallSuccessRate: number;
+    commonFailureSteps: number[];
+    effectiveRecoveryStrategies: string[];
+    averageExecutionTime: number;
+  }> {
+    const { analyzeFeedbackPatterns } = await import('./execution-feedback');
+    const feedback = await this.getExecutionFeedback(workflowId);
+    return analyzeFeedbackPatterns(feedback);
+  }
+
+  /**
+   * Clear execution feedback for a workflow
+   */
+  static async clearExecutionFeedback(workflowId: string): Promise<void> {
+    const key = this.getFeedbackKey(workflowId);
+
+    try {
+      await chrome.storage.local.remove(key);
+      console.log(`[Storage] Cleared execution feedback for workflow ${workflowId}`);
+    } catch (error) {
+      console.error('Error clearing execution feedback:', error);
+    }
   }
 }
 

@@ -1,14 +1,15 @@
 /**
  * Supabase Edge Function: dom_agent
- * 
+ *
  * DOM-first AI agent brain. Receives a structured DOM map (not screenshots)
  * and decides what semantic action to take.
- * 
+ *
  * Returns semantic targets (role, name, scope) that the executor uses
  * with the reliable locator/scope engine - NOT pixel coordinates.
  */
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
+import { SYSTEM_PROMPT_SHORT } from '../_shared/system-prompt.ts';
 
 const VERSION = 'v1.0.0-dom-first';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
@@ -142,23 +143,23 @@ interface DOMAgentRequest {
   currentHintIndex?: number;
   history?: HistoryEntry[];
   screenshot?: string;  // Optional, only if VisionClicker fallback enabled
-  
+
   // Reference screenshot from recording - shows what user clicked on
   referenceScreenshot?: string;  // Base64 data URL of recorded element/viewport
-  
+
   // FLEXIBILITY: Variable values that user can override
   // Example: {"Budget Amount": "2000"} overrides recorded value of "1000"
   variableValues?: Record<string, string>;
-  
+
   // Ranked candidates for LLM selection (max 8)
   currentCandidates?: RankedCandidate[];
-  
+
   // Available widgets on the page (for LLM to choose from when scope is ambiguous)
   availableWidgets?: string[];
-  
+
   // Inherited scope hint (if recorded scope was wrong, use this instead)
   inheritedScopeHint?: string;
-  
+
   // NEW: Spreadsheet context (only present on sheet domains)
   spreadsheetContext?: {
     isSpreadsheet: true;
@@ -171,7 +172,7 @@ interface DOMAgentRequest {
       reasoning: string;
     };
   };
-  
+
   // For recovery mode
   rejectionCode?: 'NOT_FOUND' | 'AMBIGUOUS' | 'NOT_INTERACTABLE' | 'SCOPE_FAILED' | 'UNSAFE_ACTION' | 'OUTCOME_FAILED';
   rejectionDetails?: {
@@ -187,6 +188,39 @@ interface DOMAgentRequest {
     description?: string;
   };
   attemptNumber?: number;
+
+  // Phase 3: Execution state context for smarter recovery
+  executionState?: {
+    currentStep: number;
+    totalSteps: number;
+    completedSteps: number[];
+    overallGoal: string;
+    progressSummary: string;
+  };
+
+  // Phase 3: AI analysis context from step guidance
+  aiAnalysisContext?: {
+    intent: string;
+    whyThisElement: string;
+    elementFindingStrategy: {
+      lookingFor: string;
+      searchContext: string;
+      distinguishers: string[];
+      textPatterns: string[];
+    };
+    preconditions: string[];
+    expectedOutcome: string;
+    criticality: 'critical' | 'important' | 'optional';
+    alternatives: string[];
+  };
+
+  // Phase 3: Simplified step guidance for finding elements
+  stepGuidance?: {
+    lookingFor: string;
+    searchContext: string;
+    distinguishers: string[];
+    textPatterns: string[];
+  };
 }
 
 interface SemanticTarget {
@@ -566,7 +600,9 @@ ${intent.failurePatterns.map(fp => `- ${fp.description}${fp.visualIndicator ? ` 
 `;
   }
 
-  const prompt = `You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
+  const prompt = `${SYSTEM_PROMPT_SHORT}
+
+You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
 
 IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.
 ${taskSummarySection}
@@ -939,13 +975,63 @@ Respond with ONLY the JSON object, no other text.`;
  * Build recovery prompt for Tier 2 decision making
  */
 function buildRecoveryPrompt(payload: DOMAgentRequest): string {
-  const { rejectionCode, rejectionDetails, failedAction, pageContext, goal, attemptNumber } = payload;
-  
+  const { rejectionCode, rejectionDetails, failedAction, pageContext, goal, attemptNumber, executionState, aiAnalysisContext, stepGuidance } = payload;
+
+  // Build execution context section
+  let executionContextSection = '';
+  if (executionState) {
+    const { currentStep, totalSteps, progressSummary } = executionState;
+    const isFinalStep = currentStep >= totalSteps - 1;
+    const isFirstStep = currentStep === 0;
+
+    executionContextSection = `
+## Execution Context
+
+**Progress:** Step ${currentStep + 1} of ${totalSteps} (${Math.round((currentStep / totalSteps) * 100)}% complete)
+**Status:** ${progressSummary}
+${isFinalStep ? '\n⚠️ This is the FINAL step - try harder to find the element!' : ''}
+${isFirstStep ? '\n⚠️ This is the FIRST step - make sure we are on the right page!' : ''}
+`;
+  }
+
+  // Build AI analysis context section
+  let aiContextSection = '';
+  if (aiAnalysisContext) {
+    aiContextSection = `
+## AI Analysis Context (WHY this element was chosen)
+
+**Intent:** ${aiAnalysisContext.intent}
+**Why this element:** ${aiAnalysisContext.whyThisElement}
+**Criticality:** ${aiAnalysisContext.criticality}
+**Expected outcome:** ${aiAnalysisContext.expectedOutcome}
+${aiAnalysisContext.preconditions.length > 0 ? `**Preconditions:** ${aiAnalysisContext.preconditions.join(', ')}` : ''}
+${aiAnalysisContext.alternatives.length > 0 ? `**Alternatives:** ${aiAnalysisContext.alternatives.join(', ')}` : ''}
+`;
+  }
+
+  // Build step guidance section
+  let stepGuidanceSection = '';
+  if (stepGuidance || aiAnalysisContext?.elementFindingStrategy) {
+    const strategy = stepGuidance || aiAnalysisContext?.elementFindingStrategy;
+    stepGuidanceSection = `
+## Element Finding Strategy
+
+**Looking for:** ${strategy?.lookingFor || 'Unknown'}
+**Search context:** ${strategy?.searchContext || 'Page'}
+${strategy?.distinguishers?.length ? `**Distinguishing features:** ${strategy.distinguishers.join(', ')}` : ''}
+${strategy?.textPatterns?.length ? `**Text patterns:** ${strategy.textPatterns.join(', ')}` : ''}
+
+Use this information to refine your search strategy!
+`;
+  }
+
   const prompt = `You are an AI agent recovery planner. An action failed and you must decide the best recovery strategy.
 
 ## Goal
 ${goal}
-
+${executionContextSection}
+${aiContextSection}
+${stepGuidanceSection}
 ## Failed Action
 Type: ${failedAction?.type}
 Target: ${JSON.stringify(failedAction?.target, null, 2)}

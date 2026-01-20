@@ -434,19 +434,40 @@ export class VariableDetector {
     // Check for spreadsheet cell reference
     const cellRef = SpreadsheetHelpers.extractCellReference(payload);
     if (cellRef) {
+      // Get column header from enriched spreadsheet context (pattern understanding)
+      const columnHeader = payload.spreadsheetContext?.recordedIntent?.columnHeader ||
+                          payload.spreadsheetContext?.recordedIntent?.semanticField ||
+                          payload.context?.gridCoordinates?.columnHeader;
+
+      // Use column header as field name if available (e.g., "Name" instead of "A10")
+      const fieldName = columnHeader || cellRef;
+      const variableName = columnHeader
+        ? this.generateVariableName(columnHeader)  // "Name" → "name"
+        : SpreadsheetHelpers.generateVariableName(cellRef);  // "A10" → "cellA10"
+
+      console.log('[VariableDetector] 📊 Spreadsheet variable:', {
+        cellRef,
+        columnHeader,
+        fieldName,
+        variableName,
+        value: payload.value?.substring(0, 20),
+      });
+
       return {
         stepIndex,
         stepId: `${payload.timestamp}`,
-        fieldName: cellRef,
-        fieldLabel: payload.label || cellRef,
-        variableName: SpreadsheetHelpers.generateVariableName(cellRef),
+        fieldName,
+        fieldLabel: columnHeader || payload.label || cellRef,
+        variableName,
         defaultValue: payload.value,
         inputType: payload.inputDetails?.type,
         isVariable: true,
         confidence: 1.0,
-        reasoning: 'User typed value in spreadsheet cell',
+        reasoning: columnHeader
+          ? `User typed value in "${columnHeader}" column (cell ${cellRef})`
+          : 'User typed value in spreadsheet cell',
         cellReference: cellRef,
-        columnHeader: payload.context?.gridCoordinates?.columnHeader,
+        columnHeader,
       };
     }
 
@@ -615,24 +636,39 @@ export class VariableDetector {
         const payload = step.payload;
         // Use centralized helper to extract cell reference
         const cellRef = SpreadsheetHelpers.extractCellReference(payload);
-        
+
         if (cellRef) {
+          // Get column header from enriched spreadsheet context (pattern understanding)
+          const columnHeader = payload.spreadsheetContext?.recordedIntent?.columnHeader ||
+                              payload.spreadsheetContext?.recordedIntent?.semanticField ||
+                              payload.context?.gridCoordinates?.columnHeader;
+
+          // Use column header as field name if available (e.g., "Name" instead of "A10")
+          const fieldName = columnHeader || cellRef;
+          const variableName = columnHeader
+            ? this.generateVariableName(columnHeader)  // "Name" → "name"
+            : SpreadsheetHelpers.generateVariableName(cellRef);  // "A10" → "cellA10"
+
           const variable = {
             stepIndex: i,
             stepId: `${payload.timestamp}`,
             stepType: step.type,
-            fieldName: cellRef, // Use cell reference as field name (e.g., "A2", "B2")
-            variableName: SpreadsheetHelpers.generateVariableName(cellRef), // e.g., "cellA2", "cellB2"
+            fieldName,
+            variableName,
             defaultValue: payload.value || '',
             isVariable: true,
             confidence: 1.0, // 100% confident - we captured it directly
-            reasoning: `Spreadsheet INPUT in cell ${cellRef} - using cell reference as variable name`,
+            reasoning: columnHeader
+              ? `Spreadsheet INPUT in "${columnHeader}" column (cell ${cellRef})`
+              : `Spreadsheet INPUT in cell ${cellRef}`,
             cellReference: cellRef,
+            columnHeader,
           };
           console.log(`[VariableDetector] 📊 Found spreadsheet INPUT at step ${i}:`, {
             stepIndex: i,
             stepId: variable.stepId,
             cellRef,
+            columnHeader,
             value: payload.value,
             fieldName: variable.fieldName,
             variableName: variable.variableName,
