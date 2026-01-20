@@ -32,6 +32,10 @@ export type MessageType =
   | 'EXECUTION_STARTED' // Notify when execution starts
   | 'EXECUTION_PROGRESS' // Update execution progress
   | 'EXECUTION_COMPLETED' // Mark execution as completed
+  // User context (service worker storage proxy)
+  | 'GET_USER_CONTEXT'
+  | 'SET_USER_CONTEXT'
+  | 'CLEAR_USER_CONTEXT'
   // Execution progress and control messages
   | 'VERIFIED_EXECUTION_CANCEL'
   | 'VERIFIED_EXECUTION_STARTED'
@@ -242,6 +246,18 @@ export interface ExecuteWorkflowUniversalMessage extends ExtensionMessage {
 }
 
 /**
+ * EXECUTE_WORKFLOW_AGENT message - execute workflow using AI Agent loop
+ */
+export interface ExecuteWorkflowAgentMessage extends ExtensionMessage {
+  type: 'EXECUTE_WORKFLOW_AGENT';
+  payload: {
+    workflow: import('./workflow').SavedWorkflow;
+    variableValues?: Record<string, string>;
+    userContext?: import('./ai').UserContext | null;
+  };
+}
+
+/**
  * CORRECTION_SAVED message - sent when a user correction is saved
  */
 export interface CorrectionSavedMessage extends ExtensionMessage {
@@ -294,6 +310,30 @@ export interface SetZoomMessage extends ExtensionMessage {
     zoomFactor: number;
     tabId?: number;
   };
+}
+
+/**
+ * GET_USER_CONTEXT message - request stored user context from service worker
+ */
+export interface GetUserContextMessage extends ExtensionMessage {
+  type: 'GET_USER_CONTEXT';
+}
+
+/**
+ * SET_USER_CONTEXT message - save user context via service worker
+ */
+export interface SetUserContextMessage extends ExtensionMessage {
+  type: 'SET_USER_CONTEXT';
+  payload: {
+    userContext: import('./ai').UserContext;
+  };
+}
+
+/**
+ * CLEAR_USER_CONTEXT message - remove user context via service worker
+ */
+export interface ClearUserContextMessage extends ExtensionMessage {
+  type: 'CLEAR_USER_CONTEXT';
 }
 
 /**

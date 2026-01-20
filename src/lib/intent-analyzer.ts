@@ -8,6 +8,7 @@ import { isWorkflowStepPayload } from '../types/workflow';
 import { AICache } from './ai-cache';
 import { aiConfig } from './ai-config';
 import { AIDataBuilder } from '../content/ai-data-builder';
+import { UserContextStorage } from './user-context-storage';
 
 export interface StepTranslation {
   stepIndex: number;
@@ -312,6 +313,7 @@ export class IntentAnalyzer {
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const userContext = await UserContextStorage.getUserContext();
 
     try {
       const response = await fetch(url, {
@@ -328,6 +330,7 @@ export class IntentAnalyzer {
           },
           steps: aiPayload.steps,
           pattern: aiPayload.pattern,
+          userContext: userContext || undefined,
         }),
         signal: controller.signal,
       });

@@ -21,7 +21,7 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 const VERSION = 'v1.0.0-computer-use';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
 // Use the specialized Computer Use model
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-computer-use-preview-10-2025:generateContent';
 
 console.log('computer_use Edge Function', VERSION, 'starting...');
 
@@ -40,6 +40,7 @@ interface BaseRequest {
     url: string;
     title: string;
     viewportSize: { width: number; height: number };
+    hasModal?: boolean; // Whether a modal/popup is currently open
   };
   referenceScreenshot?: string;
   hasAnnotatedReference?: boolean;
@@ -129,7 +130,7 @@ interface FindElementResponse {
 
 // Agent response (backward compatible with visual_agent)
 interface AgentResponse {
-  action: 'click' | 'type' | 'scroll' | 'navigate' | 'wait' | 'done' | 'fail';
+  action: 'click' | 'double_click' | 'right_click' | 'type' | 'scroll' | 'navigate' | 'wait' | 'read' | 'done' | 'fail';
   params: {
     x?: number;
     y?: number;
@@ -139,6 +140,8 @@ interface AgentResponse {
     amount?: number;
     url?: string;
     duration?: number;
+    waitFor?: string;
+    attribute?: string;
     reason?: string;
     pressEnter?: boolean;
     clearBeforeTyping?: boolean;
@@ -396,6 +399,17 @@ function buildAgentPrompt(payload: AgentRequest): string {
   parts.push('- If element not visible: Scroll to find it.');
   parts.push('- If all steps complete: Return done().');
   parts.push('- If stuck: Return fail() with reason.');
+  parts.push('');
+  
+  // Modal-specific instructions
+  if (pageContext.hasModal) {
+    parts.push('## ⚠️ MODAL/POPUP IS OPEN');
+    parts.push('- A modal dialog is currently visible in the screenshot');
+    parts.push('- Focus ONLY on elements within the modal');
+    parts.push('- If the target element is not visible in the modal, use scroll_document to scroll DOWN within the modal');
+    parts.push('- The system will automatically scroll within the modal, not the page');
+    parts.push('- Do NOT click outside the modal area');
+  }
 
   return parts.join('\n');
 }
@@ -725,6 +739,63 @@ function parseAgentResponse(
         };
       }
 
+      case 'wait_for_element': {
+        const timeoutSeconds = typeof args.timeout_seconds === 'number' ? args.timeout_seconds : 10;
+        return {
+          action: 'wait',
+          params: {
+            duration: Math.round(timeoutSeconds * 1000),
+            waitFor: args.element_description || 'element',
+          },
+          reasoning: textReasoning || `Wait for element: ${args.element_description || 'element'}`,
+          confidence: 0.85,
+          safetyDecision,
+        };
+      }
+
+      case 'wait_for_text': {
+        const timeoutSeconds = typeof args.timeout_seconds === 'number' ? args.timeout_seconds : 10;
+        return {
+          action: 'wait',
+          params: {
+            duration: Math.round(timeoutSeconds * 1000),
+            waitFor: args.text || 'text',
+          },
+          reasoning: textReasoning || `Wait for text: ${args.text || 'text'}`,
+          confidence: 0.85,
+          safetyDecision,
+        };
+      }
+
+      case 'check_element_state': {
+        const coords = denormalizeCoordinates({ x: args.x || 0, y: args.y || 0 }, viewport);
+        let attribute: string | undefined;
+        switch (args.check) {
+          case 'is_disabled':
+            attribute = 'disabled';
+            break;
+          case 'is_visible':
+            attribute = 'visible';
+            break;
+          case 'get_options':
+            attribute = 'count';
+            break;
+          default:
+            attribute = 'value';
+        }
+        return {
+          action: 'read',
+          params: {
+            x: coords.x,
+            y: coords.y,
+            attribute,
+          },
+          reasoning: textReasoning || `Check element state: ${args.check}`,
+          confidence: 0.8,
+          safetyDecision,
+        };
+      }
+
       case 'go_back': {
         return {
           action: 'navigate',
@@ -774,6 +845,36 @@ function parseAgentResponse(
           },
           reasoning: textReasoning || `Hover at (${coords.x}, ${coords.y})`,
           confidence: 0.8,
+          safetyDecision,
+        };
+      }
+
+      case 'double_click_at': {
+        const coords = denormalizeCoordinates({ x: args.x || 0, y: args.y || 0 }, viewport);
+        return {
+          action: 'double_click',
+          params: {
+            x: coords.x,
+            y: coords.y,
+            description: textReasoning.substring(0, 100),
+          },
+          reasoning: textReasoning || `Double click at (${coords.x}, ${coords.y})`,
+          confidence: 0.9,
+          safetyDecision,
+        };
+      }
+
+      case 'right_click_at': {
+        const coords = denormalizeCoordinates({ x: args.x || 0, y: args.y || 0 }, viewport);
+        return {
+          action: 'right_click',
+          params: {
+            x: coords.x,
+            y: coords.y,
+            description: textReasoning.substring(0, 100),
+          },
+          reasoning: textReasoning || `Right click at (${coords.x}, ${coords.y})`,
+          confidence: 0.85,
           safetyDecision,
         };
       }

@@ -30,8 +30,10 @@ interface ParsedIntent {
   objects: string[];
   parameters: Record<string, string>;
   context: string[];
-  selectionMode?: 'first' | 'all' | 'matching' | 'count';
+  selectionMode?: 'first' | 'all' | 'matching' | 'count' | 'forEach';
   count?: number;
+  itemList?: string[];
+  iterationVariable?: string;
   matchedSkillIds?: string[];
   confidence: number;
   isOffTopic?: boolean;
@@ -201,9 +203,16 @@ If VALID browser automation request, extract:
 
 5. **count**: If selectionMode is "count", extract the number
 
-6. **matchedSkillIds**: Which skill IDs from the list match this request?
+6. **itemList**: If user mentions MULTIPLE ITEMS separated by commas or "and", extract as array:
+   - "add Alice, Bob, and Carol" → { "itemList": ["Alice", "Bob", "Carol"], "iterationVariable": "name" }
+   - "create promotions for hot dogs, burgers, and fries" → { "itemList": ["hot dogs", "burgers", "fries"], "iterationVariable": "item" }
+   - Single items should NOT have itemList
 
-7. **context**: Inferred context (page type needed, etc.)
+7. **iterationVariable**: Which parameter this list maps to (infer from skill variables)
+
+8. **matchedSkillIds**: Which skill IDs from the list match this request?
+
+9. **context**: Inferred context (page type needed, etc.)
 
 RETURN JSON for valid requests:
 {
@@ -213,6 +222,8 @@ RETURN JSON for valid requests:
   "parameters": { "<var>": "<value>" },
   "selectionMode": "<first|all|matching|count or null>",
   "count": <number or null>,
+  "itemList": ["<item1>", "<item2>"] or null,
+  "iterationVariable": "<variableName>" or null,
   "matchedSkillIds": ["<skillId>"],
   "context": ["<context>"],
   "confidence": <0.0-1.0>
@@ -260,10 +271,12 @@ function parseGeminiResponse(geminiData: any, availableSkills: SkillInfo[]): Par
         ? parsed.parameters
         : {},
       context: Array.isArray(parsed.context) ? parsed.context : [],
-      selectionMode: ['first', 'all', 'matching', 'count'].includes(parsed.selectionMode)
+      selectionMode: ['first', 'all', 'matching', 'count', 'forEach'].includes(parsed.selectionMode)
         ? parsed.selectionMode
         : undefined,
       count: typeof parsed.count === 'number' ? parsed.count : undefined,
+      itemList: Array.isArray(parsed.itemList) ? parsed.itemList : undefined,
+      iterationVariable: typeof parsed.iterationVariable === 'string' ? parsed.iterationVariable : undefined,
       matchedSkillIds,
       confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.5,
       isOffTopic: false,

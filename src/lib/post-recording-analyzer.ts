@@ -494,189 +494,8 @@ function mergeStepGuidance(
 
 /**
  * Build the prompt for AI analysis
+ * @deprecated No longer used - unified AI service uses its own prompt
  */
-function buildAnalysisPrompt(steps: WorkflowStep[], workflowName?: string, variableContext?: string): string {
-  // Extract relevant data from each step
-  const stepSummaries = steps.map((step, index) => {
-    if (!isWorkflowStepPayload(step.payload)) {
-      return {
-        index,
-        type: step.type,
-        description: step.description || 'Tab switch',
-      };
-    }
-
-    const payload = step.payload;
-    return {
-      index,
-      type: step.type,
-      url: payload.url,
-      selector: payload.selector,
-      elementText: payload.elementText,
-      elementRole: payload.elementRole,
-      label: payload.label,
-      value: payload.value,
-      // Include PageModel context if available
-      pageContext: payload.pageModelContext ? {
-        pageType: payload.pageModelContext.pageContext.pageType,
-        activeContext: payload.pageModelContext.pageContext.activeContext,
-        hasModal: payload.pageModelContext.pageContext.uiStateSnapshot.hasModal,
-        hasDropdown: payload.pageModelContext.pageContext.uiStateSnapshot.hasOpenDropdown,
-        region: payload.pageModelContext.pageContext.regionName,
-      } : undefined,
-      // Include relationships if available
-      relationships: payload.pageModelContext?.elementRelationships ? {
-        labeledBy: payload.pageModelContext.elementRelationships.labeledBy?.text,
-        triggers: payload.pageModelContext.elementRelationships.triggers?.description,
-        containedBy: payload.pageModelContext.elementRelationships.containedBy?.description,
-      } : undefined,
-      // Include alternatives info
-      alternatives: payload.pageModelContext?.alternatives ? {
-        uniquenessScore: payload.pageModelContext.alternatives.uniquenessScore,
-        selectionReason: payload.pageModelContext.alternatives.selectionReason,
-        disambiguators: payload.pageModelContext.alternatives.disambiguators,
-        similarCount: payload.pageModelContext.alternatives.similarElements.length,
-      } : undefined,
-      // Include expected outcome
-      expectedOutcome: payload.pageModelContext?.expectations?.primary ? {
-        type: payload.pageModelContext.expectations.primary.type,
-        description: payload.pageModelContext.expectations.primary.description,
-      } : undefined,
-      // Include intent if available
-      intent: payload.intent,
-      stepGoal: payload.stepGoal,
-      // Include form context
-      formContext: payload.context?.formContext ? {
-        formId: payload.context.formContext.formId,
-        fieldset: payload.context.formContext.fieldset,
-        section: payload.context.formContext.section,
-      } : undefined,
-      // Include grid context
-      gridContext: payload.context?.gridCoordinates ? {
-        rowIndex: payload.context.gridCoordinates.rowIndex,
-        columnIndex: payload.context.gridCoordinates.columnIndex,
-        cellReference: payload.context.gridCoordinates.cellReference,
-        columnHeader: payload.context.gridCoordinates.columnHeader,
-      } : undefined,
-      // Include enriched spreadsheet context (pattern understanding)
-      spreadsheetContext: payload.spreadsheetContext?.recordedIntent ? {
-        cellRef: payload.spreadsheetContext.recordedIntent.cellRef,
-        column: payload.spreadsheetContext.recordedIntent.column,
-        columnHeader: payload.spreadsheetContext.recordedIntent.columnHeader,
-        semanticField: payload.spreadsheetContext.recordedIntent.semanticField,
-      } : undefined,
-      // Include container context
-      container: payload.context?.container,
-      // Include scope
-      scope: payload.scope,
-    };
-  });
-
-  const prompt = `You are an expert workflow analyzer. Analyze this recorded browser automation workflow and produce detailed execution guidance.
-
-${workflowName ? `Workflow Name: "${workflowName}"` : ''}
-${variableContext ? `
-## User-Named Input Fields
-
-The user has named the input fields in this workflow as: **${variableContext}**
-
-This is CRITICAL context! When the user named fields "Name, Email, Phone", they are telling you:
-- The PURPOSE of each input step (entering contact information)
-- The TYPE of data expected (person's name, email address, phone number)
-- The SEMANTIC MEANING of the workflow (adding a contact, not just filling cells)
-
-Use these field names to understand what the workflow REALLY does, not just what elements it clicks.
-` : ''}
-## Recorded Steps
-
-${JSON.stringify(stepSummaries, null, 2)}
-
-## Your Task
-
-Analyze this workflow to understand:
-1. WHAT the user was trying to accomplish (the goal, not just the actions)
-2. WHY each element was chosen (semantic meaning, not just selector)
-3. HOW to find elements when things change (text changes, layout changes)
-4. WHAT success looks like for each step and overall
-
-## Output Format
-
-Respond with a JSON object matching this structure:
-
-{
-  "workflowUnderstanding": {
-    "summary": "One sentence describing what this workflow does",
-    "primaryGoal": "The main thing the user is trying to accomplish",
-    "subGoals": ["Milestone 1", "Milestone 2"],
-    "domain": "Domain/context (e.g., CRM, E-commerce, Spreadsheet)",
-    "entities": ["Key entities involved"],
-    "repeatability": "one-time" | "repeatable" | "parameterized",
-    "successIndicators": ["What indicates success"],
-    "failureIndicators": ["What indicates failure"]
-  },
-  "stepGuidance": [
-    {
-      "stepIndex": 0,
-      "intent": "What the user is trying to do with this step",
-      "whyThisElement": "Why THIS element was chosen over alternatives",
-      "elementFindingStrategy": {
-        "lookingFor": "Semantic description of what to find",
-        "searchContext": "Where to look (region, container)",
-        "distinguishers": ["What makes this element unique"],
-        "relatedElements": [{"description": "related element", "relationship": "near|inside|labeled-by|after|before"}],
-        "textPatterns": ["Text patterns that identify this element"],
-        "elementType": "button|input|link|dropdown|etc"
-      },
-      "preconditions": ["What must be true before this step"],
-      "expectedOutcome": "What should happen after this step",
-      "dependencies": [indices of dependent steps],
-      "criticality": "critical|important|optional",
-      "retryStrategy": {
-        "canRetry": true,
-        "approaches": ["Alternative approaches to try"],
-        "maxRetries": 3,
-        "waitBefore": "What to wait for before retrying"
-      },
-      "alternatives": ["Alternative ways to accomplish this"]
-    }
-  ],
-  "patterns": [
-    {
-      "type": "search-and-select|form-fill|navigation-sequence|data-entry|bulk-action|verification",
-      "description": "What this pattern does",
-      "stepIndices": [0, 1, 2],
-      "executionHint": "How to handle this pattern"
-    }
-  ],
-  "adaptationStrategies": [
-    {
-      "scenario": "What might change (e.g., button text changed)",
-      "howToAdapt": "How to handle this change",
-      "affectedSteps": [0]
-    }
-  ]
-}
-
-## Guidelines
-
-1. **Intent over Selectors**: Focus on WHAT the user wants, not HOW it was recorded
-2. **Semantic Anchors**: Identify text, labels, and relationships that are more stable than selectors
-3. **Adaptation**: Consider how text might change, layouts might differ, elements might move
-4. **Patterns**: Recognize common patterns like "search for X then select it" or "fill form fields"
-5. **Dependencies**: Identify which steps depend on previous steps (e.g., can't select from dropdown until it's open)
-6. **Criticality**: Some steps are critical (submit), others are optional (scrolling)
-7. **Spreadsheet Pattern Understanding**: When you see spreadsheetContext with columnHeader/semanticField:
-   - Understand that the user entered data in a SPECIFIC COLUMN (not just a cell)
-   - Column headers like "Name", "Email", "Phone" represent the SEMANTIC FIELD, not the cell reference
-   - The PATTERN is: "enter [field type] data in the [column name] column"
-   - This pattern can be REPEATED for different rows - the column meaning stays the same
-   - Example: If user typed "John" in A10 with columnHeader="Name", understand this as "enter name in Name column", not "type John in A10"
-   - For parameterized workflows, each column becomes a variable slot (Name → name variable, Email → email variable)
-
-Respond ONLY with valid JSON, no markdown formatting.`;
-
-  return prompt;
-}
 
 /**
  * Call the unified AI service to analyze the workflow
@@ -772,108 +591,57 @@ async function callUnifiedAIService(
 
 /**
  * @deprecated Use callUnifiedAIService instead
- * Kept for backward compatibility
  */
-async function callAIService(prompt: string): Promise<string> {
-  // This is now a legacy shim - redirect to unified service is handled at higher level
-  console.warn('[PostRecordingAnalyzer] callAIService is deprecated, use callUnifiedAIService');
-  return JSON.stringify(createFallbackAnalysis());
-}
 
 /**
  * Parse the AI response into a structured analysis
+ * @deprecated No longer used - unified AI service returns structured data
  */
-function parseAnalysisResult(result: string, steps: WorkflowStep[]): WorkflowAnalysis {
-  try {
-    // Try to extract JSON from the response (handle markdown code blocks)
-    let jsonStr = result.trim();
-
-    // Method 1: Try standard markdown code block extraction
-    const jsonMatch = result.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (jsonMatch && jsonMatch[1]) {
-      jsonStr = jsonMatch[1].trim();
-      console.log('[PostRecordingAnalyzer] Extracted JSON from markdown code block');
-    }
-    // Method 2: If still starts with backticks, try aggressive extraction
-    else if (jsonStr.startsWith('```')) {
-      // Remove opening ```json or ``` and find the closing ```
-      jsonStr = jsonStr.replace(/^```(?:json)?\s*\n?/, '');
-      const closingIndex = jsonStr.lastIndexOf('```');
-      if (closingIndex > 0) {
-        jsonStr = jsonStr.substring(0, closingIndex).trim();
-      }
-      console.log('[PostRecordingAnalyzer] Used aggressive markdown extraction');
-    }
-    // Method 3: Find the first { and last } to extract JSON object
-    else if (!jsonStr.startsWith('{')) {
-      const firstBrace = jsonStr.indexOf('{');
-      const lastBrace = jsonStr.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) {
-        jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
-        console.log('[PostRecordingAnalyzer] Extracted JSON by finding braces');
-      }
-    }
-
-    const parsed = JSON.parse(jsonStr);
-
-    // Validate and normalize the structure
-    return {
-      analyzedAt: Date.now(),
-      analysisVersion: '1.0.0',
-      confidence: calculateConfidence(parsed, steps),
-      workflowUnderstanding: normalizeWorkflowUnderstanding(parsed.workflowUnderstanding),
-      stepGuidance: normalizeStepGuidance(parsed.stepGuidance, steps),
-      patterns: parsed.patterns || [],
-      adaptationStrategies: parsed.adaptationStrategies || [],
-    };
-  } catch (error) {
-    console.error('[PostRecordingAnalyzer] Failed to parse AI response:', error);
-    return createFallbackAnalysis(steps);
-  }
-}
 
 /**
  * Calculate confidence based on completeness of analysis
+ * @deprecated No longer used - confidence is calculated by unified AI service
  */
-function calculateConfidence(parsed: Record<string, unknown>, steps: WorkflowStep[]): number {
-  let score = 0;
-  let checks = 0;
+// function calculateConfidence(parsed: Record<string, unknown>, steps: WorkflowStep[]): number {
+//   let score = 0;
+//   let checks = 0;
 
-  // Check workflow understanding
-  checks++;
-  if (parsed.workflowUnderstanding) score++;
+//   // Check workflow understanding
+//   checks++;
+//   if (parsed.workflowUnderstanding) score++;
 
-  // Check step guidance coverage
-  checks++;
-  const guidance = parsed.stepGuidance as Array<Record<string, unknown>> | undefined;
-  if (guidance && guidance.length >= steps.length * 0.8) score++;
+//   // Check step guidance coverage
+//   checks++;
+//   const guidance = parsed.stepGuidance as Array<Record<string, unknown>> | undefined;
+//   if (guidance && guidance.length >= steps.length * 0.8) score++;
 
-  // Check patterns detected
-  checks++;
-  if (parsed.patterns && (parsed.patterns as unknown[]).length > 0) score++;
+//   // Check patterns detected
+//   checks++;
+//   if (parsed.patterns && (parsed.patterns as unknown[]).length > 0) score++;
 
-  // Check adaptation strategies
-  checks++;
-  if (parsed.adaptationStrategies && (parsed.adaptationStrategies as unknown[]).length > 0) score++;
+//   // Check adaptation strategies
+//   checks++;
+//   if (parsed.adaptationStrategies && (parsed.adaptationStrategies as unknown[]).length > 0) score++;
 
-  return score / checks;
-}
+//   return score / checks;
+// }
 
 /**
  * Normalize workflow understanding with defaults
+ * @deprecated No longer used - unified AI service provides normalized data
  */
-function normalizeWorkflowUnderstanding(understanding: Partial<WorkflowUnderstanding> | undefined): WorkflowUnderstanding {
-  return {
-    summary: understanding?.summary || 'Recorded workflow',
-    primaryGoal: understanding?.primaryGoal || 'Complete the recorded task',
-    subGoals: understanding?.subGoals || [],
-    domain: understanding?.domain || 'General',
-    entities: understanding?.entities || [],
-    repeatability: understanding?.repeatability || 'one-time',
-    successIndicators: understanding?.successIndicators || ['All steps complete successfully'],
-    failureIndicators: understanding?.failureIndicators || ['Element not found', 'Unexpected error'],
-  };
-}
+// function normalizeWorkflowUnderstanding(understanding: Partial<WorkflowUnderstanding> | undefined): WorkflowUnderstanding {
+//   return {
+//     summary: understanding?.summary || 'Recorded workflow',
+//     primaryGoal: understanding?.primaryGoal || 'Complete the recorded task',
+//     subGoals: understanding?.subGoals || [],
+//     domain: understanding?.domain || 'General',
+//     entities: understanding?.entities || [],
+//     repeatability: understanding?.repeatability || 'one-time',
+//     successIndicators: understanding?.successIndicators || ['All steps complete successfully'],
+//     failureIndicators: understanding?.failureIndicators || ['Element not found', 'Unexpected error'],
+//   };
+// }
 
 /**
  * Normalize step guidance with defaults

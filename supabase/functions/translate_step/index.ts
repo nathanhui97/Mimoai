@@ -9,7 +9,8 @@ import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 
 const VERSION = 'v1.0.0';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+// Using Gemini 3.0 Flash for text-based reasoning
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
 
 // ============================================================================
 // Types
@@ -45,6 +46,10 @@ interface TranslateStepRequest {
     description?: string;
   }>;
   totalSteps: number;
+  userContext?: {
+    identity?: string;
+    focus?: string;
+  };
 }
 
 interface TranslateStepResponse {
@@ -146,7 +151,7 @@ serve(async (req) => {
 // ============================================================================
 
 function buildPrompt(payload: TranslateStepRequest): string {
-  const { step, previousSteps, remainingSteps, totalSteps } = payload;
+  const { step, previousSteps, remainingSteps, totalSteps, userContext } = payload;
   
   // Build context string from all available info
   const nearbyContext = step.nearbyText?.length ? `\n- Nearby text: ${step.nearbyText.join(', ')}` : '';
@@ -154,7 +159,11 @@ function buildPrompt(payload: TranslateStepRequest): string {
   const ariaContext = step.ariaLabel ? `\n- Aria label: "${step.ariaLabel}"` : '';
   const parentContext = step.parentText ? `\n- Parent element text: "${step.parentText}"` : '';
   
-  return `You are translating a recorded workflow step into natural language.
+  const userContextBlock = userContext?.identity || userContext?.focus
+    ? `\nUSER CONTEXT:\n${userContext.identity ? `- Role: ${userContext.identity}\n` : ''}${userContext.focus ? `- Focus: ${userContext.focus}\n` : ''}Use this context to interpret domain-specific terms.\n`
+    : '';
+
+  return `You are translating a recorded workflow step into natural language.${userContextBlock}
 
 ## Step to Translate
 Step ${step.index + 1} of ${totalSteps}:

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { SavedWorkflow, WorkflowStep } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import type { StepExecutionGuidance } from '../lib/post-recording-analyzer';
-import type { WorkflowBlock, BlockType } from '../lib/workflow-memory/types';
+import type { WorkflowBlock } from '../lib/workflow-memory/types';
 // WorkflowMemory type is used via workflow.memory property
 
 interface WorkflowDetailsProps {
@@ -34,7 +34,6 @@ export function WorkflowDetails({
 
   // Memory section state
   const [showMemory, setShowMemory] = useState(false);
-  const [showBlocks, setShowBlocks] = useState(false);
   const [editedTriggerPhrases, setEditedTriggerPhrases] = useState<string[]>(
     workflow.memory?.triggers?.phrases || []
   );
@@ -156,25 +155,6 @@ export function WorkflowDetails({
   };
 
   // Helper to get block type display info
-  const getBlockTypeInfo = (blockType: BlockType): { label: string; color: string; icon: string } => {
-    switch (blockType) {
-      case 'form_fill':
-        return { label: 'Form Fill', color: 'blue', icon: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z' };
-      case 'table_row':
-        return { label: 'Table Row', color: 'green', icon: 'M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z' };
-      case 'list_item':
-        return { label: 'List Item', color: 'purple', icon: 'M4 6h16M4 10h16M4 14h16M4 18h16' };
-      case 'menu_navigation':
-        return { label: 'Menu Nav', color: 'orange', icon: 'M4 6h16M4 12h16M4 18h7' };
-      case 'one_time':
-        return { label: 'One-time', color: 'gray', icon: 'M13 10V3L4 14h7v7l9-11h-7z' };
-      case 'submission':
-        return { label: 'Submit', color: 'emerald', icon: 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' };
-      default:
-        return { label: 'Block', color: 'gray', icon: 'M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6z' };
-    }
-  };
-
   const getHumanDescription = (step: WorkflowStep): string => {
     // Use natural language if available
     if (step.naturalLanguage?.intent) {
@@ -476,6 +456,34 @@ export function WorkflowDetails({
               </p>
             </div>
 
+            {/* What Mimo Learned */}
+            {blocks.length > 0 && (
+              <div>
+                <h4 className="text-xs font-semibold text-blue-800 mb-2 flex items-center gap-1">
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                  </svg>
+                  What Mimo learned
+                </h4>
+                <div className="space-y-2">
+                  {blocks.map((block) => (
+                    <div key={block.blockId} className="flex items-start gap-2 p-2 bg-gray-50 rounded-lg">
+                      <span className="text-green-500 mt-0.5">✓</span>
+                      <div className="flex-1">
+                        <span className="text-sm font-medium text-gray-800">{block.name}</span>
+                        {block.isRepeatable && (
+                          <span className="ml-2 px-1.5 py-0.5 text-[10px] bg-green-100 text-green-700 rounded">
+                            repeatable
+                          </span>
+                        )}
+                        <p className="text-xs text-gray-500 mt-0.5">{block.purpose}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Trigger Phrases - Editable */}
             <div>
               <h4 className="text-xs font-semibold text-blue-800 mb-2 flex items-center gap-1">
@@ -657,163 +665,6 @@ export function WorkflowDetails({
           </div>
         )}
       </div>
-
-      {/* Blocks visualization - show when blocks are available */}
-      {blocks.length > 0 && (
-        <div className="mb-5">
-          <button
-            onClick={() => setShowBlocks(!showBlocks)}
-            className="w-full flex items-center justify-between p-4 bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl hover:from-indigo-100 hover:to-purple-100 transition-colors"
-          >
-            <div className="flex items-center gap-2">
-              <svg className="w-5 h-5 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
-              </svg>
-              <span className="text-sm font-semibold text-indigo-800">
-                {blocks.length} Blocks
-              </span>
-              {blocks.some(b => b.isRepeatable) && (
-                <span className="px-2 py-0.5 text-xs font-medium bg-green-100 text-green-700 rounded-full flex items-center gap-1">
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                  </svg>
-                  Can Loop
-                </span>
-              )}
-            </div>
-            <svg
-              className={`w-4 h-4 text-indigo-600 transition-transform duration-200 ${showBlocks ? 'rotate-180' : ''}`}
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-
-          {showBlocks && (
-            <div className="mt-3 p-4 bg-white rounded-2xl border border-indigo-200 shadow-soft space-y-3 animate-fade-in">
-              {/* Block flow visualization */}
-              <div className="flex items-center gap-2 flex-wrap">
-                {blocks.map((block, index) => {
-                  const typeInfo = getBlockTypeInfo(block.blockType);
-                  return (
-                    <div key={block.blockId} className="flex items-center gap-2">
-                      {index > 0 && (
-                        <svg className="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
-                      )}
-                      <div
-                        className={`relative px-3 py-2 rounded-lg border-2 ${
-                          block.isRepeatable
-                            ? 'border-green-400 bg-green-50'
-                            : 'border-gray-300 bg-gray-50'
-                        }`}
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <svg className={`w-4 h-4 text-${typeInfo.color}-600`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={typeInfo.icon} />
-                          </svg>
-                          <span className="text-xs font-medium text-gray-700">{block.name}</span>
-                        </div>
-                        {block.isRepeatable && (
-                          <div className="absolute -top-2 -right-2 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center">
-                            <svg className="w-3 h-3 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                            </svg>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Block details */}
-              <div className="space-y-2 pt-2 border-t border-gray-100">
-                {blocks.map((block, index) => {
-                  const typeInfo = getBlockTypeInfo(block.blockType);
-                  return (
-                    <div
-                      key={block.blockId}
-                      className={`p-3 rounded-lg ${
-                        block.isRepeatable ? 'bg-green-50 border border-green-200' : 'bg-gray-50 border border-gray-200'
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs font-bold text-gray-500">#{index + 1}</span>
-                            <span className="text-sm font-medium text-gray-800">{block.name}</span>
-                            <span className={`px-1.5 py-0.5 text-[10px] font-medium bg-${typeInfo.color}-100 text-${typeInfo.color}-700 rounded`}>
-                              {typeInfo.label}
-                            </span>
-                          </div>
-                          <p className="text-xs text-gray-600">{block.purpose}</p>
-                          <div className="flex items-center gap-3 mt-2 text-[10px] text-gray-500">
-                            <span>Steps: {block.stepIndices.map(i => i + 1).join(', ')}</span>
-                            {block.iterationDelayMs && block.isRepeatable && (
-                              <span>Delay: {block.iterationDelayMs}ms</span>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Repeatability info */}
-                        {block.isRepeatable && (
-                          <div className="flex flex-col items-end gap-1">
-                            <span className="px-2 py-0.5 text-[10px] font-semibold bg-green-500 text-white rounded-full">
-                              REPEATABLE
-                            </span>
-                            {block.iterationVariable && (
-                              <span className="text-[10px] text-green-700 font-medium">
-                                Iterates on: {`{{${block.iterationVariable}}}`}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Example execution preview */}
-              {blocks.some(b => b.isRepeatable) && (
-                <div className="p-3 bg-indigo-50 rounded-lg border border-indigo-200">
-                  <h4 className="text-xs font-semibold text-indigo-800 mb-2 flex items-center gap-1">
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                    </svg>
-                    Execution Preview
-                  </h4>
-                  <p className="text-xs text-indigo-700">
-                    If you say "add Alice, Bob, and Carol":
-                  </p>
-                  <ol className="mt-2 space-y-1 text-xs text-indigo-600">
-                    {blocks.map((block, index) => (
-                      <li key={block.blockId} className="flex items-center gap-2">
-                        <span className="w-5 h-5 flex items-center justify-center bg-indigo-200 text-indigo-700 rounded-full text-[10px] font-bold">
-                          {index + 1}
-                        </span>
-                        <span>
-                          {block.name}
-                          {block.isRepeatable ? (
-                            <span className="text-green-600 font-medium"> (x3 iterations)</span>
-                          ) : (
-                            <span className="text-gray-500"> (once)</span>
-                          )}
-                        </span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Steps list - collapsible */}
       <div className="mb-5">

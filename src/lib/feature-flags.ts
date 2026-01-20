@@ -32,6 +32,13 @@ export const FeatureFlags = {
    * Risk: Preview model - may have occasional issues
    */
   COMPUTER_USE_MODEL: true,
+
+  /**
+   * Smart hybrid execution features (proactive fixes, vision scroll, dropdown flow)
+   * Cost: Medium (extra screenshot + Computer Use calls on low confidence)
+   * Risk: Low - gated to avoid regressions
+   */
+  SMART_HYBRID_MODE: true,
   
   /**
    * AI-powered variable detection after recording

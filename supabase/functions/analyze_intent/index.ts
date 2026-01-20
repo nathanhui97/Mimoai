@@ -42,6 +42,10 @@ interface AnalyzeIntentRequest {
     first?: string;  // Base64 viewport screenshot (pre-optimized on client)
     last?: string;   // Base64 viewport screenshot
   };
+  userContext?: {
+    identity?: string;
+    focus?: string;
+  };
 }
 
 interface StepTranslation {
@@ -210,11 +214,16 @@ serve(async (req) => {
  * Build intent analysis prompt
  */
 function buildIntentPrompt(payload: AnalyzeIntentRequest): string {
-  const { workflow, steps, pattern, keyScreenshots } = payload;
+  const { workflow, steps, pattern, keyScreenshots, userContext } = payload;
   
   let prompt = `You are analyzing a recorded browser workflow to understand the user's intent.
 
-${keyScreenshots?.first || keyScreenshots?.last ? `🎯 VISUAL CONTEXT PROVIDED:
+${userContext?.identity || userContext?.focus ? `USER CONTEXT:
+${userContext.identity ? `- Role: ${userContext.identity}` : ''}
+${userContext.focus ? `- Focus: ${userContext.focus}` : ''}
+Use this context to interpret domain-specific terms and success criteria.
+
+` : ''}${keyScreenshots?.first || keyScreenshots?.last ? `🎯 VISUAL CONTEXT PROVIDED:
 I am providing screenshots of the ${keyScreenshots.first ? 'FIRST' : ''}${keyScreenshots.first && keyScreenshots.last ? ' and ' : ''}${keyScreenshots.last ? 'LAST' : ''} state${keyScreenshots.first && keyScreenshots.last ? 's' : ''} of the workflow.
 
 CRITICAL - Look at the screenshot(s) to identify:

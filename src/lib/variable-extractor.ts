@@ -142,11 +142,12 @@ const DEFAULT_ARRAY_SEPARATORS = ['and', ',', 'then', ';', '&', 'plus', 'also'];
 
 /**
  * Patterns that indicate a list of items
+ * @deprecated Not currently used - see detectArraysInQuery for active patterns
  */
-const LIST_INDICATOR_PATTERNS = [
-  /\b(add|create|enter|for|named?)\s+(.+?)(?:\s+(?:and|,)\s+(.+))+/i,
-  /(.+?)(?:\s*,\s*|\s+and\s+)(.+)/i,
-];
+// const LIST_INDICATOR_PATTERNS = [
+//   /\b(add|create|enter|for|named?)\s+(.+?)(?:\s+(?:and|,)\s+(.+))+/i,
+//   /(.+?)(?:\s*,\s*|\s+and\s+)(.+)/i,
+// ];
 
 export class VariableExtractor {
   // ============================================================================

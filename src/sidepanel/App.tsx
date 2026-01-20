@@ -7,11 +7,12 @@ import { VariableDetector } from '../lib/variable-detector';
 // import { NavigationOptimizer } from '../lib/navigation-optimizer'; // DISABLED - breaks AI Agent workflows
 import { IntentAnalyzer } from '../lib/intent-analyzer';
 import { analyzeWorkflowWithAI, analyzeWorkflowUnified } from '../lib/post-recording-analyzer';
-import type { WorkflowAnalysis, UnifiedAnalysisResult } from '../lib/post-recording-analyzer';
+import type { WorkflowAnalysis } from '../lib/post-recording-analyzer';
 import { SiteKnowledgeBase } from '../lib/site-knowledge';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { SettingsPanel } from './SettingsPanel';
+import { UserContextModal } from './UserContextModal';
 import { ThinkingPanel } from './ThinkingPanel';
 import { OpenWorkWindowButton } from './OpenWorkWindowButton';
 import { PreRecordingChat } from './PreRecordingChat';
@@ -26,6 +27,7 @@ import { TeachableSkillLibrary } from '../lib/skill-storage';
 import type { TeachableSkill } from '../types/skill';
 import { FeatureFlags } from '../lib/feature-flags';
 import { VersionChecker, EXTENSION_VERSION } from '../lib/version-checker';
+import { UserContextStorage, type UserContext } from '../lib/user-context-storage';
 import type { WorkflowStep, SavedWorkflow, TeachingIntent, LearnedSkill } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import type { AgentAction } from '../lib/ai-agent';
@@ -41,8 +43,8 @@ import type {
 } from '../types/messages';
 import type { CorrectionEntry } from '../types/visual';
 import type { SafetyDecision } from '../types/ai';
-import type { StepAnnotation, SkillDefinition } from '../types/skill';
-import { SkillStorage } from '../lib/skill-storage';
+import type { StepAnnotation } from '../types/skill';
+// import { SkillStorage } from '../lib/skill-storage';
 function App() {
   const {
     state,
@@ -74,6 +76,8 @@ function App() {
   const [learningFeedback, setLearningFeedback] = useState<string | null>(null);
   // Variable detection state
   const [isDetectingVariables, setIsDetectingVariables] = useState(false);
+  // Post-recording processing state (blocks save UI before analysis/questions)
+  const [isPostRecordingProcessing, setIsPostRecordingProcessing] = useState(false);
   // Recording finalization state (flushing pending steps)
   const [isFinalizingRecording, setIsFinalizingRecording] = useState(false);
   const [currentWorkflowVariables, setCurrentWorkflowVariables] = useState<import('../lib/variable-detector').WorkflowVariables | null>(null);
@@ -101,11 +105,18 @@ function App() {
     steps: WorkflowStep[];
   }>({ workflow: null, steps: [] });
   const [isExecuting, setIsExecuting] = useState(false);
+  const [iterationProgress, setIterationProgress] = useState<{
+    current: number;
+    total: number;
+    currentItem: string;
+  } | null>(null);
   // Screenshot modal state
   const [screenshotModalStep, setScreenshotModalStep] = useState<{ step: WorkflowStep; index: number } | null>(null);
   // UI simplification state
   const [_showAdvancedMenu, _setShowAdvancedMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showUserContextModal, setShowUserContextModal] = useState(false);
+  const [userContext, setUserContext] = useState<UserContext | null>(null);
   const [_workflowMenu, _setWorkflowMenu] = useState<string | null>(null);
   
   // AI Agent execution state
@@ -272,6 +283,20 @@ function App() {
 
     loadSavedWorkflows();
   }, [setSavedWorkflows]);
+
+  // Load user context on mount
+  useEffect(() => {
+    const loadUserContext = async () => {
+      try {
+        const context = await UserContextStorage.getUserContext();
+        setUserContext(context);
+      } catch (error) {
+        console.warn('[App] Failed to load user context:', error);
+      }
+    };
+
+    loadUserContext();
+  }, []);
 
   // Debug: Log when currentWorkflowVariables changes
   useEffect(() => {
@@ -558,6 +583,10 @@ function App() {
 
   const handleStartRecording = async () => {
     try {
+      setShowSaveDialog(false);
+      setShowVariableNamingPage(false);
+      setShowAIQuestionsPage(false);
+      setIsPostRecordingProcessing(false);
       clearWorkflowSteps();
       setCurrentWorkflowName(null);
       setCurrentWorkflowVariables(null); // Clear variables when starting new recording
@@ -675,6 +704,10 @@ function App() {
   const handleStopRecording = async () => {
     console.log('[App] handleStopRecording called, workflowSteps.length:', workflowSteps.length);
     try {
+      setShowSaveDialog(false);
+      setShowVariableNamingPage(false);
+      setShowAIQuestionsPage(false);
+      setIsPostRecordingProcessing(true);
       // Show "finishing up" feedback immediately - this lets users know we're capturing final steps
       setIsFinalizingRecording(true);
       setLearningFeedback('⏳ Finishing up - capturing pending steps...');
@@ -804,22 +837,23 @@ function App() {
         }
 
         // Generate suggested name first (so it's ready when save dialog shows)
-        const suggestedName = generateTaskName(currentSteps);
+        const suggestedName = teachingIntent?.userDescription || generateTaskName(currentSteps);
         setWorkflowName(suggestedName);
 
-        // Check if this is a data-entry workflow with variables
-        const hasVariables = detectedVariables.variables.length > 0;
-        const isDataEntryWorkflow = hasVariables && currentSteps.some(s => s.type === 'INPUT');
+        // Check if this is a spreadsheet workflow (only spreadsheet variables should trigger naming)
+        const spreadsheetVariables = detectedVariables.variables.filter(v => v.cellReference);
+        const isSpreadsheetWorkflow = spreadsheetVariables.length > 0;
 
-        if (isDataEntryWorkflow) {
-          // For data-entry workflows: Show variable naming page FIRST
+        if (isSpreadsheetWorkflow) {
+          // For spreadsheet workflows: Show variable naming page FIRST
           // AI will run AFTER user names the variables
-          console.log('[App] 📊 Data-entry workflow detected with', detectedVariables.variables.length, 'variables');
+          console.log('[App] 📊 Spreadsheet workflow detected with', spreadsheetVariables.length, 'variables');
           console.log('[App] 📝 Showing variable naming page...');
           setCurrentWorkflowAIAnalysis(null); // Clear any previous analysis
           setLearningFeedback('✏️ Name your input fields to help AI understand the workflow');
           // Show variable naming page (not save dialog yet)
           setShowVariableNamingPage(true);
+          setIsPostRecordingProcessing(false);
           // Don't show save dialog - will show after variables are named and AI runs
         } else {
           // For non-data-entry workflows: Run AI analysis immediately (blocking)
@@ -856,24 +890,18 @@ function App() {
             setAiQuestionAnswers({});
             setShowAIQuestionsPage(true);
             setLearningFeedback(null);
+            setIsPostRecordingProcessing(false);
           } else {
             // No questions - show save dialog
             setShowSaveDialog(true);
+            setIsPostRecordingProcessing(false);
           }
         }
 
         console.log('[App] ✅ Recording stopped');
 
-        // Check if we're in teaching mode (with pre-recorded intent)
-        if (teachingMode === 'recording_with_intent' && teachingIntent) {
-          console.log('[App] 🎓 Teaching mode: Moving to post-recording chat');
-          setTeachingMode('post_recording');
-          // Don't show save dialog - the PostRecordingChat will handle it
-        } else {
-          // Quick recording mode - show save dialog now that analysis is complete
-          setShowSaveDialog(true);
-          console.log('[App] 💡 Auto-generated task name:', suggestedName);
-        }
+        // Post-recording flow continues through AI analysis/questions before save
+        console.log('[App] 💡 Suggested task name:', suggestedName);
       } else {
         console.log('[App] ⚠️ No workflow steps to analyze for variables (workflowSteps.length =', workflowSteps.length, ')');
         // Still set empty variables so UI shows the section
@@ -882,12 +910,14 @@ function App() {
           detectedAt: Date.now(),
           analysisCount: 0,
         });
+        setIsPostRecordingProcessing(false);
       }
     } catch (err) {
       console.error('[App] Stop recording error:', err);
       setError(err instanceof Error ? err.message : 'Failed to stop recording');
       setIsDetectingVariables(false);
       setIsFinalizingRecording(false);
+      setIsPostRecordingProcessing(false);
     }
   };
 
@@ -987,9 +1017,10 @@ function App() {
         stepGuidanceCount: currentWorkflowAIAnalysis?.stepGuidance?.length,
       });
 
-      // Save to storage
+      // Save to storage (ensures local memory is generated)
       await WorkflowStorage.saveWorkflow(workflow);
-      addSavedWorkflow(workflow);
+      const savedWorkflow = await WorkflowStorage.loadWorkflow(workflow.id);
+      addSavedWorkflow(savedWorkflow || workflow);
 
       // Reset state
       clearWorkflowSteps();
@@ -1197,8 +1228,8 @@ function App() {
   const handleVariableNamingComplete = async () => {
     console.log('[VariableNaming] ✅ User completed naming variables');
 
-    // Get user-named variables from state
-    const namedVariables = currentWorkflowVariables?.variables || [];
+    // Get user-named spreadsheet variables from state
+    const namedVariables = currentWorkflowVariables?.variables.filter(v => v.cellReference) || [];
     const variableContext = namedVariables.map(v => v.fieldName).join(', ');
 
     console.log('[VariableNaming] Variable context for AI:', variableContext);
@@ -1604,14 +1635,14 @@ function App() {
 
       if (workflow.memory) {
         console.log('[SaveWorkflow] ✅ Memory attached to workflow:', {
-          hasBlocks: !!(workflow.memory.understanding?.blocks),
-          blocksCount: workflow.memory.understanding?.blocks?.length || 0,
+          hasUnderstanding: !!(workflow.memory.understanding),
           hasTriggers: !!(workflow.memory.triggers?.phrases),
         });
       }
 
       await WorkflowStorage.saveWorkflow(workflow);
-      addSavedWorkflow(workflow);
+      const savedWorkflow = await WorkflowStorage.loadWorkflow(workflow.id);
+      addSavedWorkflow(savedWorkflow || workflow);
       setCurrentWorkflowName(workflow.name);
       setShowSaveDialog(false);
       setWorkflowName('');
@@ -1676,18 +1707,82 @@ function App() {
   /**
    * Handle variable form confirmation - execute workflow with provided values
    */
-  const handleVariableFormConfirm = async (values: Record<string, string>) => {
+  const handleVariableFormConfirm = async (
+    values: Record<string, string> | Record<string, string>[]
+  ) => {
     setShowVariableForm(false);
 
-    if (pendingExecution.workflow) {
-      await executeWorkflowWithVariables(
-        pendingExecution.steps,
-        pendingExecution.workflow,
-        values
-      );
+    try {
+      if (pendingExecution.workflow) {
+        if (Array.isArray(values)) {
+          await executeForEachEntry(pendingExecution.workflow, values);
+        } else {
+          await executeWorkflowWithVariables(
+            pendingExecution.steps,
+            pendingExecution.workflow,
+            values
+          );
+        }
+      }
+    } finally {
+      setPendingExecution({ workflow: null, steps: [] });
+    }
+  };
+
+  const executeForEachEntry = async (
+    workflow: SavedWorkflow,
+    entries: Record<string, string>[]
+  ) => {
+    setIsExecuting(true);
+    setIterationProgress({ current: 0, total: entries.length, currentItem: '' });
+
+    const results: { index: number; success: boolean; error?: string }[] = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      const itemLabel = Object.values(entry).find(value => value && value.length > 0) || `Item ${i + 1}`;
+
+      setIterationProgress({
+        current: i + 1,
+        total: entries.length,
+        currentItem: itemLabel,
+      });
+
+      try {
+        await executeWorkflowWithVariables(workflow.steps, workflow, entry);
+        results.push({ index: i, success: true });
+
+        if (i < entries.length - 1) {
+          await navigateToWorkflowStart(workflow);
+          await new Promise(resolve => setTimeout(resolve, 1500));
+        }
+      } catch (error) {
+        results.push({
+          index: i,
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed',
+        });
+      }
     }
 
-    setPendingExecution({ workflow: null, steps: [] });
+    setIterationProgress(null);
+    setIsExecuting(false);
+
+    const successCount = results.filter(result => result.success).length;
+    if (successCount !== entries.length) {
+      setError(`Completed ${successCount}/${entries.length} items`);
+    }
+  };
+
+  const navigateToWorkflowStart = async (workflow: SavedWorkflow) => {
+    const firstStep = workflow.steps[0];
+    if (firstStep && isWorkflowStepPayload(firstStep.payload)) {
+      const startUrl = firstStep.payload.url;
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id && startUrl) {
+        await chrome.tabs.update(tab.id, { url: startUrl });
+      }
+    }
   };
 
   /**
@@ -1750,18 +1845,19 @@ function App() {
 
   /**
    * Save skills to library (used by SkillTeacher)
+   * @deprecated - Currently unused, kept for potential future use
    */
-  const handleSaveSkills = async (skills: SkillDefinition[]) => {
-    try {
-      await SkillStorage.saveSkills(skills);
-      setLearningFeedback(`${skills.length} skill(s) saved to library`);
-      setTimeout(() => setLearningFeedback(null), 3000);
-    } catch (error) {
-      console.error('[App] Failed to save skills:', error);
-      setLearningFeedback('Failed to save skills');
-      setTimeout(() => setLearningFeedback(null), 3000);
-    }
-  };
+  // const handleSaveSkills = async (skills: SkillDefinition[]) => {
+  //   try {
+  //     await SkillStorage.saveSkills(skills);
+  //     setLearningFeedback(`${skills.length} skill(s) saved to library`);
+  //     setTimeout(() => setLearningFeedback(null), 3000);
+  //   } catch (error) {
+  //     console.error('[App] Failed to save skills:', error);
+  //     setLearningFeedback('Failed to save skills');
+  //     setTimeout(() => setLearningFeedback(null), 3000);
+  //   }
+  // };
 
   /**
    * Execute workflow with optional variable values
@@ -1890,6 +1986,7 @@ function App() {
           payload: {
             workflow,
             variableValues,
+            userContext,
           },
         },
         tab.id
@@ -1945,6 +2042,21 @@ function App() {
     } catch (err) {
       console.error('Failed to pause execution:', err);
       setError(err instanceof Error ? err.message : 'Failed to pause execution');
+    }
+  };
+
+  const handleSaveUserContext = async (context: UserContext | null) => {
+    try {
+      if (context) {
+        await UserContextStorage.setUserContext(context);
+      } else {
+        await UserContextStorage.clearUserContext();
+      }
+      setUserContext(context);
+    } catch (error) {
+      console.warn('[App] Failed to save user context:', error);
+    } finally {
+      setShowUserContextModal(false);
     }
   };
 
@@ -2201,6 +2313,18 @@ function App() {
     return getHumanDescription(steps[0]);
   };
 
+  const spreadsheetVariablesForNaming = currentWorkflowVariables?.variables.filter(v => v.cellReference) || [];
+  const isPostRecordingFlowActive = showVariableNamingPage
+    || showAIQuestionsPage
+    || isAnalyzingWorkflow
+    || isDetectingVariables
+    || _isGeneratingQuestions
+    || isPostRecordingProcessing;
+  const showPostRecordingOverlay = isPostRecordingProcessing
+    || isAnalyzingWorkflow
+    || isDetectingVariables
+    || _isGeneratingQuestions;
+
   return (
     <div className="flex flex-col h-screen bg-background">
       <div className="flex-1 overflow-y-auto p-6">
@@ -2220,6 +2344,19 @@ function App() {
                 </svg>
               </button>
               <button
+                onClick={() => setShowUserContextModal(true)}
+                className="relative p-2 text-muted-foreground hover:text-foreground transition-colors"
+                title="Role & work context"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4a4 4 0 110 8 4 4 0 010-8z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 20a6 6 0 0112 0" />
+                </svg>
+                {userContext && (
+                  <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-emerald-500" />
+                )}
+              </button>
+              <button
                 onClick={() => setShowSettings(true)}
                 className="p-2 text-muted-foreground hover:text-foreground transition-colors"
                 title="Settings"
@@ -2232,6 +2369,25 @@ function App() {
               </button>
             </div>
           </div>
+
+          {iterationProgress && (
+            <div className="bg-primary/10 px-4 py-3 rounded-xl mb-6">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium">
+                  Processing {iterationProgress.current} of {iterationProgress.total}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  {iterationProgress.currentItem}
+                </span>
+              </div>
+              <div className="h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-all duration-300"
+                  style={{ width: `${(iterationProgress.current / iterationProgress.total) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
 
           {/* Pre-Recording Teaching Chat */}
           {teachingMode === 'pre_recording' && (
@@ -2446,7 +2602,7 @@ function App() {
           )}
 
         {/* After recording: Show save workflow UI */}
-        {workflowSteps.length > 0 && !isRecording && !showSaveDialog && (
+        {workflowSteps.length > 0 && !isRecording && !showSaveDialog && !isPostRecordingFlowActive && (
           <div className="mb-6 animate-fade-in">
             <div className="flex gap-3">
               <button
@@ -2471,7 +2627,7 @@ function App() {
         )}
 
         {/* Recorded Steps with AI Insights */}
-        {workflowSteps.length > 0 && teachingMode !== 'post_recording' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && (
+        {workflowSteps.length > 0 && teachingMode !== 'post_recording' && !isAgentRunning && !executionSession && thinkingEvents.length === 0 && !showPostRecordingOverlay && (
           <div className="mb-6 p-5 bg-card rounded-2xl border border-border/60 shadow-soft">
             {/* Header with AI badge */}
             <div className="flex items-center justify-between mb-4">
@@ -2579,7 +2735,7 @@ function App() {
         )}
 
         {/* Variable Naming Page - shown for data-entry workflows */}
-        {showVariableNamingPage && currentWorkflowVariables && (
+        {showVariableNamingPage && spreadsheetVariablesForNaming.length > 0 && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
             <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" />
             <div className="relative bg-card p-7 rounded-3xl border border-border/50 shadow-soft-xl max-w-md w-full mx-4 animate-scale-in">
@@ -2590,8 +2746,8 @@ function App() {
 
               {/* Variable List */}
               <div className="space-y-3 mb-6 max-h-64 overflow-y-auto">
-                {currentWorkflowVariables.variables.map((variable, index) => (
-                  <div key={variable.stepIndex} className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl border border-border/40">
+                {spreadsheetVariablesForNaming.map((variable, index) => (
+                  <div key={variable.stepId || variable.stepIndex} className="flex items-center gap-3 p-3 bg-muted/30 rounded-xl border border-border/40">
                     <div className="flex-shrink-0 w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center text-primary font-medium text-sm">
                       {index + 1}
                     </div>
@@ -2601,8 +2757,9 @@ function App() {
                         value={variable.fieldName}
                         onChange={(e) => {
                           // Update the variable's fieldName
-                          const updatedVariables = currentWorkflowVariables.variables.map((v, i) =>
-                            i === index ? { ...v, fieldName: e.target.value } : v
+                          if (!currentWorkflowVariables) return;
+                          const updatedVariables = currentWorkflowVariables.variables.map((v) =>
+                            v.stepId === variable.stepId ? { ...v, fieldName: e.target.value } : v
                           );
                           setCurrentWorkflowVariables({
                             ...currentWorkflowVariables,
@@ -2871,11 +3028,10 @@ function App() {
           </div>
         )}
 
-        {/* AI Analysis Overlay - Full screen blocker while AI is thinking */}
-        {isAnalyzingWorkflow && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center">
-            <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
-            <div className="relative bg-card p-8 rounded-3xl border border-purple-200 shadow-2xl max-w-sm w-full mx-6 animate-scale-in">
+        {/* Post-Recording Processing Page */}
+        {showPostRecordingOverlay && (
+          <div className="mb-6">
+            <div className="bg-card p-8 rounded-3xl border border-purple-200 shadow-soft max-w-sm w-full mx-auto animate-scale-in">
               {/* Animated AI Brain Icon */}
               <div className="flex justify-center mb-6">
                 <div className="relative">
@@ -2932,6 +3088,7 @@ function App() {
             key={pendingExecution.workflow.id}
             variables={pendingExecution.workflow.variables}
             workflowName={pendingExecution.workflow.name}
+            workflowMemory={pendingExecution.workflow.memory}
             onConfirm={handleVariableFormConfirm}
             onCancel={handleVariableFormCancel}
           />
@@ -3041,6 +3198,14 @@ function App() {
           />
         )}
 
+        {/* User Context Modal */}
+        <UserContextModal
+          isOpen={showUserContextModal}
+          initialValue={userContext}
+          onSave={handleSaveUserContext}
+          onClose={() => setShowUserContextModal(false)}
+        />
+
         {/* Settings Panel */}
         {showSettings && (
           <SettingsPanel
@@ -3053,6 +3218,8 @@ function App() {
             setCorrectionModeStep={setCorrectionModeStep}
             handleExportJSON={handleExportJSON}
             clearWorkflowSteps={clearWorkflowSteps}
+            userContext={userContext}
+            onEditUserContext={() => setShowUserContextModal(true)}
             onClose={() => setShowSettings(false)}
           />
         )}

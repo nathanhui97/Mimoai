@@ -58,6 +58,7 @@ import { VisualSnapshotService } from './visual-snapshot';
 import { SheetStateExtractor } from './sheet-state-extractor';
 import { FeatureFlags } from '../lib/feature-flags';
 import type { WorkflowStep } from '../types/workflow';
+import type { UserContext } from '../types/ai';
 // import { isWorkflowStepPayload } from '../types/workflow'; // Unused after removing Universal Engine
 // Universal Execution Engine - DEPRECATED (replaced by AI Agent with fast-path)
 // import { executeWorkflow as executeUniversalWorkflow, convertLegacyStep } from './universal-execution';
@@ -744,6 +745,7 @@ function handleFullMessage(
 
         const workflow = message.payload.workflow;
         const variableValues = message.payload.variableValues as Record<string, string> || {};
+        const userContext = message.payload.userContext as UserContext | null | undefined;
         
         // Execute workflow with AI Agent
         // IMPORTANT: We send immediate response, then agent runs in background
@@ -772,7 +774,7 @@ function handleFullMessage(
             });
             
             // Run the agent first to initialize state
-            const runPromise = currentAgent.run(workflow, variableValues);
+            const runPromise = currentAgent.run(workflow, variableValues, userContext || undefined);
             
             // After a moment, notify service worker to create execution session
             // (needs to happen after agent state is initialized)

@@ -52,6 +52,10 @@ interface StepDescriptionPayload {
       disambiguators?: string[];
     };
   };
+  userContext?: {
+    identity?: string;
+    focus?: string;
+  };
 }
 
 interface StepDescriptionResult {
@@ -301,6 +305,7 @@ async function saveToCache(supabase: any, cacheKey: string, result: StepDescript
 function buildPrompt(payload: StepDescriptionPayload): string {
   const step = payload.step;
   const hasVisualSnapshot = !!step.payload.visualSnapshot?.elementSnippet;
+  const userContext = payload.userContext;
   
   // PRIORITY 1: Visual snapshot is PRIMARY source of truth
   let prompt = hasVisualSnapshot ? 
@@ -324,6 +329,17 @@ function buildPrompt(payload: StepDescriptionPayload): string {
     `⚠️ WARNING: No visual snapshot available. Descriptions may be less accurate.\n` +
     `Use the text context information below, but be aware descriptions may be generic.\n\n`;
   
+  if (userContext?.identity || userContext?.focus) {
+    prompt += `\nUSER CONTEXT:\n`;
+    if (userContext.identity) {
+      prompt += `- Role: ${userContext.identity}\n`;
+    }
+    if (userContext.focus) {
+      prompt += `- Focus: ${userContext.focus}\n`;
+    }
+    prompt += `Use this context to interpret domain-specific terms.\n\n`;
+  }
+
   // LOCATION CONTEXT: Always include widget/dashboard context (works WITH visual snapshot)
   if (step.payload.context?.container?.text) {
     prompt += `\n📍 LOCATION CONTEXT: The text context suggests the action is within "${step.payload.context.container.text}" (${step.payload.context.container.type || 'container'})\n`;

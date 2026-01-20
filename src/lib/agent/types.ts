@@ -354,6 +354,7 @@ export interface AgentState {
   status: 'running' | 'completed' | 'failed' | 'paused';
   startTime: number;
   variableValues?: Record<string, string>;
+  userContext?: import('../../types/ai').UserContext;
   memory?: Record<string, string | boolean | number>; // Store values read during execution
 }
 

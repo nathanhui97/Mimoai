@@ -10,6 +10,7 @@ import type { WorkflowStep, NaturalLanguageContext } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import { aiConfig } from './ai-config';
 import { getElementLabel } from './label-utils';
+import { UserContextStorage } from './user-context-storage';
 
 // Re-export for convenience
 export type { NaturalLanguageContext };
@@ -86,6 +87,7 @@ async function translateStepWithAI(
   const url = `${config.supabaseUrl}/functions/v1/translate_step`;
   
   const payload = isWorkflowStepPayload(step.payload) ? step.payload : null;
+  const userContext = await UserContextStorage.getUserContext();
   
   // Extract the ACTUAL element info from context, not just the (potentially incorrect) description
   const parentText = payload?.context?.parent?.text;
@@ -129,6 +131,7 @@ async function translateStepWithAI(
       description: s.description,
     })),
     totalSteps: previousSteps.length + 1 + remainingSteps.length,
+    userContext: userContext || undefined,
   };
   
   try {

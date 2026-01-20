@@ -2,6 +2,11 @@
  * AI Analysis Types - Optimized payload structures for LLM consumption
  */
 
+export interface UserContext {
+  identity: string;
+  focus: string;
+}
+
 /**
  * Semantic context extracted from step (prioritized for AI understanding)
  */

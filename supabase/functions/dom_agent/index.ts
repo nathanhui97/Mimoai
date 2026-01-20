@@ -11,9 +11,10 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { SYSTEM_PROMPT_SHORT } from '../_shared/system-prompt.ts';
 
-const VERSION = 'v1.0.0-dom-first';
+const VERSION = 'v1.1.0-dom-first';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+// Using Gemini 3.0 Flash for DOM-based reasoning (no screenshots)
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
 
 console.log('dom_agent Edge Function', VERSION, 'starting...');
 
@@ -150,6 +151,27 @@ interface DOMAgentRequest {
   // FLEXIBILITY: Variable values that user can override
   // Example: {"Budget Amount": "2000"} overrides recorded value of "1000"
   variableValues?: Record<string, string>;
+
+  // Optional user context (role + focus)
+  userContext?: {
+    identity?: string;
+    focus?: string;
+  };
+
+  // Learnings from prior executions
+  workflowLearnings?: {
+    troubleSpots?: Array<{
+      stepIndex: number;
+      issue: string;
+      solution: string;
+      frequency: number;
+    }>;
+    provenStrategies?: Array<{
+      situation: string;
+      strategy: string;
+      effectiveness: number;
+    }>;
+  };
 
   // Ranked candidates for LLM selection (max 8)
   currentCandidates?: RankedCandidate[];
@@ -453,7 +475,7 @@ serve(async (req) => {
 // ============================================================================
 
 function buildAgentPrompt(payload: DOMAgentRequest): string {
-  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint } = payload;
+  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint, userContext } = payload;
   
   // Find the current hint to focus on
   const currentHint = hints.find((h, i) => i >= currentHintIndex && !h.completed);
@@ -482,8 +504,17 @@ After clicking the option, new form fields will appear and you can continue.
 `;
   } else if (pageContext?.hasModal) {
     prioritySection = `
-⚠️ MODAL IS OPEN: "${pageContext.modalTitle || 'Dialog'}"
+⚠️ MODAL/POPUP IS OPEN: "${pageContext.modalTitle || 'Dialog'}"
 You MUST interact with the modal first before any other action.
+
+IMPORTANT - MODAL SCROLLING:
+- If the element you're looking for is NOT visible in the DOM map below, it may be BELOW THE FOLD in the modal
+- Modals often have scrollable content - return a SCROLL action to find hidden elements
+- Use: {"action": "scroll", "params": {"direction": "down", "amount": 300}}
+- The system will automatically scroll WITHIN the modal, not the page
+- After scrolling, the next observation will show the newly visible elements
+
+DO NOT click outside the modal - focus on elements WITHIN the modal only.
 `;
   }
   
@@ -501,6 +532,37 @@ IMPORTANT: When a hint says to enter a value, check if there's a variable overri
 - YOU MUST USE: 2000 (not 1000!)
 
 The hints show RECORDED values, but variable overrides are what the user WANTS NOW.
+`;
+  }
+
+  let userContextSection = '';
+  if (userContext?.identity || userContext?.focus) {
+    const contextLines = [
+      userContext.identity ? `Role: ${userContext.identity}` : null,
+      userContext.focus ? `Focus: ${userContext.focus}` : null,
+    ].filter(Boolean).join('\n');
+    userContextSection = `
+## USER CONTEXT
+${contextLines}
+
+Use this context to interpret domain-specific terms and success criteria.
+`;
+  }
+
+  let workflowLearningsSection = '';
+  const troubleSpots = payload.workflowLearnings?.troubleSpots || [];
+  const provenStrategies = payload.workflowLearnings?.provenStrategies || [];
+  if (troubleSpots.length || provenStrategies.length) {
+    const troubleSpotLines = troubleSpots.map(spot =>
+      `- Step ${spot.stepIndex}: "${spot.issue}" → ${spot.solution} (freq ${Math.round(spot.frequency * 100)}%)`
+    ).join('\n');
+    const strategyLines = provenStrategies.map(strategy =>
+      `- ${strategy.situation}: ${strategy.strategy} (effectiveness ${Math.round(strategy.effectiveness * 100)}%)`
+    ).join('\n');
+    workflowLearningsSection = `
+## 📚 LEARNED FROM THIS WORKFLOW
+${troubleSpotLines ? `**Trouble spots:**\n${troubleSpotLines}\n` : ''}${strategyLines ? `**Proven strategies:**\n${strategyLines}\n` : ''}
+Use these to avoid known failures and apply proven strategies when appropriate.
 `;
   }
   
@@ -605,6 +667,8 @@ ${intent.failurePatterns.map(fp => `- ${fp.description}${fp.visualIndicator ? ` 
 You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
 
 IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.
+${userContextSection}
+${workflowLearningsSection}
 ${taskSummarySection}
 ${intentSection}
 ${prioritySection}

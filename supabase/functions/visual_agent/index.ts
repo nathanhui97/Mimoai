@@ -10,9 +10,10 @@
 
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 
-const VERSION = 'v2.0.0-true-vision';
+const VERSION = 'v3.0-computer-use';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
+// Using Gemini 2.5 Computer Use model for screenshot-based execution
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-computer-use-preview-10-2025:generateContent';
 
 console.log('visual_agent Edge Function', VERSION, 'starting...');
 
@@ -51,6 +52,10 @@ interface AgentRequest {
   };
   referenceScreenshot?: string;
   referenceClickPoint?: { x: number; y: number };
+  userContext?: {
+    identity?: string;
+    focus?: string;
+  };
 }
 
 interface SemanticTarget {
@@ -201,7 +206,7 @@ serve(async (req) => {
 // ============================================================================
 
 function buildAgentPrompt(payload: AgentRequest): string {
-  const { goal, hints, currentHintIndex, history, pageContext, referenceClickPoint } = payload;
+  const { goal, hints, currentHintIndex, history, pageContext, referenceClickPoint, userContext } = payload;
   const parts: string[] = [];
 
   // Header
@@ -214,6 +219,18 @@ function buildAgentPrompt(payload: AgentRequest): string {
   parts.push('## Your Goal');
   parts.push(goal);
   parts.push('');
+
+  if (userContext?.identity || userContext?.focus) {
+    parts.push('## User Context');
+    if (userContext.identity) {
+      parts.push(`Role: ${userContext.identity}`);
+    }
+    if (userContext.focus) {
+      parts.push(`Focus: ${userContext.focus}`);
+    }
+    parts.push('Use this context to interpret domain-specific terms.');
+    parts.push('');
+  }
 
   // Hints from recording
   parts.push('## Workflow Hints (from recording)');

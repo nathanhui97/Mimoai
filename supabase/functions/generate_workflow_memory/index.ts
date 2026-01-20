@@ -13,7 +13,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { getSystemPromptForTask } from '../_shared/system-prompt.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+// Using Gemini 3.0 Flash for text-based reasoning
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
 
 // CORS headers
 const corsHeaders = {

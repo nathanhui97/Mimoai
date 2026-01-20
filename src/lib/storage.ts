@@ -3,6 +3,7 @@
  */
 
 import type { SavedWorkflow } from '../types/workflow';
+import type { ExecutionExperience } from './workflow-memory/types';
 import { generateWorkflowMemory, consolidateExistingData } from './workflow-memory';
 
 const WORKFLOWS_KEY = 'ghostwriter-workflows';
@@ -69,7 +70,8 @@ export class WorkflowStorage {
     }
 
     // Check if memory exists with blocks (indicates AI-generated)
-    if (workflow.memory?.understanding?.blocks) {
+    // Note: blocks is on WorkflowUnderstandingWithBlocks, use type assertion
+    if ((workflow.memory?.understanding as any)?.blocks) {
       console.log('[Storage] Memory with blocks already present, skipping generation');
       return workflow;
     }
@@ -167,6 +169,62 @@ export class WorkflowStorage {
     } catch (error) {
       console.error('Error deleting workflow:', error);
       throw new Error(`Failed to delete workflow: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Update the experience section of workflow memory
+   */
+  static async updateWorkflowExperience(
+    workflowId: string,
+    update: Partial<ExecutionExperience>
+  ): Promise<void> {
+    try {
+      const workflows = await this.loadWorkflows();
+      const index = workflows.findIndex((w) => w.id === workflowId);
+      if (index < 0) return;
+
+      const workflow = workflows[index];
+      const workflowWithMemory = workflow.memory
+        ? workflow
+        : { ...workflow, memory: consolidateExistingData(workflow) };
+
+      const existingExperience = workflowWithMemory.memory?.experience;
+      const nextExperience: ExecutionExperience = {
+        timesExecuted: update.timesExecuted ?? existingExperience?.timesExecuted ?? 0,
+        successfulExecutions: update.successfulExecutions ?? existingExperience?.successfulExecutions ?? 0,
+        successRate: update.successRate ?? existingExperience?.successRate ?? 0,
+        lastExecuted: update.lastExecuted ?? existingExperience?.lastExecuted,
+        averageDuration: update.averageDuration ?? existingExperience?.averageDuration,
+        troubleSpots: update.troubleSpots ?? existingExperience?.troubleSpots ?? [],
+        provenStrategies: update.provenStrategies ?? existingExperience?.provenStrategies ?? [],
+        userCorrections: update.userCorrections ?? existingExperience?.userCorrections,
+      };
+
+      // Only update experience if memory is properly formed
+      // Use type assertion since consolidateExistingData guarantees full structure
+      const existingMemory = workflowWithMemory.memory as import('../lib/workflow-memory/types').WorkflowMemory | undefined;
+      if (existingMemory) {
+        workflows[index] = {
+          ...workflowWithMemory,
+          memory: {
+            ...existingMemory,
+            experience: nextExperience,
+          },
+          updatedAt: Date.now(),
+        };
+      } else {
+        // No memory to update, just update the workflow timestamp
+        workflows[index] = {
+          ...workflowWithMemory,
+          updatedAt: Date.now(),
+        };
+      }
+
+      await chrome.storage.local.set({ [WORKFLOWS_KEY]: workflows });
+    } catch (error) {
+      console.error('Error updating workflow experience:', error);
+      throw new Error(`Failed to update workflow experience: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

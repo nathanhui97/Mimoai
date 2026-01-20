@@ -45,6 +45,10 @@ interface DetectVariablesRequest {
     pageType?: string;
   };
   initialFullPageSnapshot?: string; // Full page snapshot captured at recording start (for spreadsheet column headers)
+  userContext?: {
+    identity?: string;
+    focus?: string;
+  };
 }
 
 interface VariableDefinition {
@@ -252,7 +256,7 @@ serve(async (req) => {
       }
 
       // Analyze this step (pass initial full page snapshot for spreadsheet column header detection)
-      const result = await analyzeStep(step, payload.pageContext, payload.initialFullPageSnapshot);
+      const result = await analyzeStep(step, payload.pageContext, payload.initialFullPageSnapshot, payload.userContext);
       
       console.log(`[detect_variables] Step ${step.metadata.stepIndex} analysis result:`, {
         hasResult: !!result,
@@ -319,12 +323,13 @@ serve(async (req) => {
 async function analyzeStep(
   step: StepForAnalysis,
   pageContext?: { url: string; title: string; pageType?: string },
-  initialFullPageSnapshot?: string
+  initialFullPageSnapshot?: string,
+  userContext?: { identity?: string; focus?: string }
 ): Promise<VariableDefinition | null> {
   const { metadata, beforeSnapshot, afterSnapshot } = step;
 
   // Build the prompt based on step type (pass snapshots for context-aware prompts)
-  const prompt = buildVariableDetectionPrompt(metadata, pageContext, beforeSnapshot, afterSnapshot, initialFullPageSnapshot);
+  const prompt = buildVariableDetectionPrompt(metadata, pageContext, beforeSnapshot, afterSnapshot, initialFullPageSnapshot, userContext);
 
   // Build Gemini API request with screenshots
   const parts: any[] = [{ text: prompt }];
@@ -644,7 +649,8 @@ function buildVariableDetectionPrompt(
   pageContext?: { url: string; title: string; pageType?: string },
   beforeSnapshot?: string,
   afterSnapshot?: string,
-  initialFullPageSnapshot?: string
+  initialFullPageSnapshot?: string,
+  userContext?: { identity?: string; focus?: string }
 ): string {
   const systemContext = getSystemPromptForTask('extract_variables');
 
@@ -665,6 +671,17 @@ STATIC = Values that should stay the same every time (system IDs, fixed configur
 TASK: Analyze this workflow step to determine if the user-entered value should be a VARIABLE (parameterized, different each execution) or STATIC (same value each time).
 
 `;
+
+  if (userContext?.identity || userContext?.focus) {
+    prompt += `USER CONTEXT:\n`;
+    if (userContext.identity) {
+      prompt += `- Role: ${userContext.identity}\n`;
+    }
+    if (userContext.focus) {
+      prompt += `- Focus: ${userContext.focus}\n`;
+    }
+    prompt += `Use this context to interpret domain-specific terms.\n\n`;
+  }
 
   if (pageContext) {
     prompt += `Page Context:

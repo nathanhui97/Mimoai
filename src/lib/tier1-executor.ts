@@ -39,7 +39,8 @@ export type RejectionCode =
   | 'SCOPE_FAILED'     // Scope container not found
   | 'UNSAFE_ACTION'    // Would click delete/confirm in popup
   | 'OUTCOME_FAILED'   // Action succeeded but outcome verification failed
-  | 'OPTION_CONFIRMATION_NEEDED'; // Dropdown option needs user confirmation (fuzzy match)
+  | 'OPTION_CONFIRMATION_NEEDED' // Dropdown option needs user confirmation (fuzzy match)
+  | 'COORDINATE_CLICK_FAILED';   // Coordinate-based click failed
 
 /**
  * Execution result with explicit rejection codes
@@ -111,6 +112,12 @@ export class Tier1Executor {
         case 'click':
           return await this.executeClick(action);
         
+        case 'double_click':
+          return await this.executeDoubleClick(action);
+        
+        case 'right_click':
+          return await this.executeRightClick(action);
+        
         case 'type':
           return await this.executeType(action);
         
@@ -181,6 +188,24 @@ export class Tier1Executor {
    */
   private static async executeClick(action: AgentAction): Promise<Tier1ExecutionResult> {
     const { target, expectedOutcome } = action.params;
+
+    if (typeof action.params.x === 'number' && typeof action.params.y === 'number') {
+      const { VisionClicker } = await import('./vision-clicker');
+      const result = await VisionClicker.clickAt(
+        action.params.x,
+        action.params.y,
+        action.params.description
+      );
+      return {
+        status: result.success ? 'success' : 'rejected',
+        code: result.success ? undefined : 'COORDINATE_CLICK_FAILED',
+        details: {
+          element: undefined,
+          resolveMetrics: { method: 'coordinate' },
+        },
+        message: result.error,
+      };
+    }
     
     if (!target) {
       return {
@@ -337,6 +362,168 @@ export class Tier1Executor {
     };
   }
 
+  private static async executeDoubleClick(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target } = action.params;
+
+    if (typeof action.params.x === 'number' && typeof action.params.y === 'number') {
+      const { VisionClicker } = await import('./vision-clicker');
+      const result = await VisionClicker.doubleClickAt(
+        action.params.x,
+        action.params.y,
+        action.params.description
+      );
+      return {
+        status: result.success ? 'success' : 'rejected',
+        code: result.success ? undefined : 'COORDINATE_CLICK_FAILED',
+        details: {
+          element: undefined,
+          resolveMetrics: { method: 'coordinate' },
+        },
+        message: result.error,
+      };
+    }
+
+    if (!target) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No target specified',
+      };
+    }
+
+    const bundle = this.buildLocatorBundle(target);
+    const intent: Intent = { kind: 'CLICK' };
+    const resolveResult = await this.resolveElement(bundle, intent);
+    if (resolveResult.status !== 'success') {
+      return resolveResult;
+    }
+
+    const element = resolveResult.details.element!;
+    const interactabilityCheck = await this.checkInteractability(element);
+    if (!interactabilityCheck.success) {
+      return {
+        status: 'rejected',
+        code: 'NOT_INTERACTABLE',
+        details: {
+          interactabilityIssue: interactabilityCheck.reason,
+          element,
+        },
+        message: interactabilityCheck.reason,
+      };
+    }
+
+    const safetyCheck = this.checkActionSafety(element, 'click');
+    if (!safetyCheck.safe) {
+      return {
+        status: 'rejected',
+        code: 'UNSAFE_ACTION',
+        details: {
+          dangerousPattern: safetyCheck.reason,
+          element,
+        },
+        message: safetyCheck.reason,
+      };
+    }
+
+    const rect = (element as HTMLElement).getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const { VisionClicker } = await import('./vision-clicker');
+    const result = await VisionClicker.doubleClickAt(x, y, action.params.description);
+
+    return {
+      status: result.success ? 'success' : 'rejected',
+      code: result.success ? undefined : 'COORDINATE_CLICK_FAILED',
+      details: {
+        element,
+        resolveMetrics: resolveResult.details.resolveMetrics,
+      },
+      message: result.error,
+    };
+  }
+
+  private static async executeRightClick(action: AgentAction): Promise<Tier1ExecutionResult> {
+    const { target } = action.params;
+
+    if (typeof action.params.x === 'number' && typeof action.params.y === 'number') {
+      const { VisionClicker } = await import('./vision-clicker');
+      const result = await VisionClicker.rightClickAt(
+        action.params.x,
+        action.params.y,
+        action.params.description
+      );
+      return {
+        status: result.success ? 'success' : 'rejected',
+        code: result.success ? undefined : 'COORDINATE_CLICK_FAILED',
+        details: {
+          element: undefined,
+          resolveMetrics: { method: 'coordinate' },
+        },
+        message: result.error,
+      };
+    }
+
+    if (!target) {
+      return {
+        status: 'rejected',
+        code: 'NOT_FOUND',
+        details: {},
+        message: 'No target specified',
+      };
+    }
+
+    const bundle = this.buildLocatorBundle(target);
+    const intent: Intent = { kind: 'CLICK' };
+    const resolveResult = await this.resolveElement(bundle, intent);
+    if (resolveResult.status !== 'success') {
+      return resolveResult;
+    }
+
+    const element = resolveResult.details.element!;
+    const interactabilityCheck = await this.checkInteractability(element);
+    if (!interactabilityCheck.success) {
+      return {
+        status: 'rejected',
+        code: 'NOT_INTERACTABLE',
+        details: {
+          interactabilityIssue: interactabilityCheck.reason,
+          element,
+        },
+        message: interactabilityCheck.reason,
+      };
+    }
+
+    const safetyCheck = this.checkActionSafety(element, 'click');
+    if (!safetyCheck.safe) {
+      return {
+        status: 'rejected',
+        code: 'UNSAFE_ACTION',
+        details: {
+          dangerousPattern: safetyCheck.reason,
+          element,
+        },
+        message: safetyCheck.reason,
+      };
+    }
+
+    const rect = (element as HTMLElement).getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const { VisionClicker } = await import('./vision-clicker');
+    const result = await VisionClicker.rightClickAt(x, y, action.params.description);
+
+    return {
+      status: result.success ? 'success' : 'rejected',
+      code: result.success ? undefined : 'COORDINATE_CLICK_FAILED',
+      details: {
+        element,
+        resolveMetrics: resolveResult.details.resolveMetrics,
+      },
+      message: result.error,
+    };
+  }
+
   /**
    * Execute type action
    */
@@ -349,6 +536,27 @@ export class Tier1Executor {
       fieldTarget: fieldTarget ? { role: fieldTarget.role, name: fieldTarget.name, id: fieldTarget.id } : null,
       text: text?.substring(0, 20),
     });
+
+    if (typeof action.params.x === 'number' && typeof action.params.y === 'number') {
+      const { VisionClicker } = await import('./vision-clicker');
+      const clickResult = await VisionClicker.clickAt(
+        action.params.x,
+        action.params.y,
+        action.params.description
+      );
+      if (!clickResult.success) {
+        return {
+          status: 'rejected',
+          code: 'COORDINATE_CLICK_FAILED',
+          details: {
+            element: undefined,
+            resolveMetrics: { method: 'coordinate' },
+          },
+          message: clickResult.error,
+        };
+      }
+      await this.sleep(50);
+    }
     
     if (!text) {
       return {
@@ -1261,9 +1469,28 @@ export class Tier1Executor {
       }
     }
     
-    // PRIORITY 2: Auto-detect scrollable container using SMART heuristics
+    // PRIORITY 2: Check for ACTIVE DROPDOWN first - this takes precedence over everything!
+    // Dropdowns are overlays that appear when user clicks a combobox/select
     if (scrollTarget === window) {
-      console.log('[Tier1] 📜 Auto-detecting scrollable container...');
+      const dropdownScrollTarget = this.findActiveDropdownForScroll();
+      if (dropdownScrollTarget) {
+        scrollTarget = dropdownScrollTarget;
+        console.log('[Tier1] 📜 PRIORITY 2: Found active dropdown to scroll within');
+      }
+    }
+    
+    // PRIORITY 3: Check for ACTIVE MODAL - also takes precedence over auto-detection
+    if (scrollTarget === window) {
+      const modalScrollTarget = this.findActiveModalForScroll();
+      if (modalScrollTarget) {
+        scrollTarget = modalScrollTarget;
+        console.log('[Tier1] 📜 PRIORITY 3: Found active modal to scroll within');
+      }
+    }
+    
+    // PRIORITY 4: Auto-detect scrollable container using SMART heuristics (FALLBACK)
+    if (scrollTarget === window) {
+      console.log('[Tier1] 📜 Auto-detecting scrollable container (fallback)...');
       
       // Strategy 1: Find ALL potentially scrollable elements
       const allElements = document.querySelectorAll('*');
@@ -1359,40 +1586,6 @@ export class Tier1Executor {
       }
     }
     
-    // Priority 3: Check if there's an active modal - if so, scroll within it
-    if (scrollTarget === window) {
-      const modalSelectors = [
-        '[role="dialog"]',
-        '[aria-modal="true"]',
-        '.modal',
-        '[class*="Modal"]',
-        '[class*="dialog"]',
-        '[class*="Dialog"]',
-        '[class*="popup"]',
-        '[class*="Popup"]',
-      ];
-      
-      for (const selector of modalSelectors) {
-        const modals = Array.from(document.querySelectorAll(selector));
-        for (const modal of modals) {
-          const style = window.getComputedStyle(modal);
-          const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-          const zIndex = parseInt(style.zIndex) || 0;
-          
-          if (isVisible && zIndex > 50) {
-            // Found an active modal - look for scrollable container within it
-            const scrollableContainer = this.findScrollableContainer(modal);
-            if (scrollableContainer) {
-              scrollTarget = scrollableContainer;
-              console.log('[Tier1] 📜 Found scrollable modal container');
-              break;
-            }
-          }
-        }
-        if (scrollTarget !== window) break;
-      }
-    }
-    
     // Perform scroll
     if (scrollTarget === window) {
       console.log(`[Tier1] 📜 Scrolling window ${direction} by ${amount}px`);
@@ -1455,6 +1648,100 @@ export class Tier1Executor {
     return { status: 'success', details: {} };
   }
   
+  /**
+   * Find active dropdown for scrolling
+   * Checks for visible listbox/menu elements that are scrollable
+   */
+  private static findActiveDropdownForScroll(): Element | null {
+    const dropdownSelectors = [
+      '[role="listbox"]',
+      '[role="menu"]',
+      '[role="menubar"]',
+      '.MuiMenu-list',
+      '.MuiAutocomplete-listbox',
+      '.ant-select-dropdown',
+      '.ant-dropdown-menu',
+      '[class*="dropdown"]',
+      '[class*="Dropdown"]',
+      '[class*="listbox"]',
+      '[class*="Listbox"]',
+    ];
+    
+    for (const selector of dropdownSelectors) {
+      try {
+        const dropdowns = Array.from(document.querySelectorAll(selector));
+        for (const dropdown of dropdowns) {
+          const style = window.getComputedStyle(dropdown);
+          const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          const rect = dropdown.getBoundingClientRect();
+          const hasSize = rect.width > 50 && rect.height > 30;
+          
+          if (isVisible && hasSize) {
+            // Check if this dropdown is scrollable
+            const isScrollable = (style.overflow === 'auto' || style.overflow === 'scroll' || 
+                                 style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                                 dropdown.scrollHeight > dropdown.clientHeight + 10;
+            
+            if (isScrollable) {
+              console.log(`[Tier1] 📜 Found scrollable dropdown (${selector}): scrollHeight=${dropdown.scrollHeight}, clientHeight=${dropdown.clientHeight}`);
+              return dropdown;
+            }
+            
+            // Also check children for scrollable container
+            const scrollableChild = this.findScrollableContainer(dropdown);
+            if (scrollableChild) {
+              console.log(`[Tier1] 📜 Found scrollable container inside dropdown`);
+              return scrollableChild;
+            }
+          }
+        }
+      } catch {
+        // Invalid selector
+      }
+    }
+    return null;
+  }
+  
+  /**
+   * Find active modal for scrolling
+   * Checks for visible dialog/modal elements that have scrollable content
+   */
+  private static findActiveModalForScroll(): Element | null {
+    const modalSelectors = [
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '.modal',
+      '[class*="Modal"]',
+      '[class*="dialog"]',
+      '[class*="Dialog"]',
+      '[class*="popup"]',
+      '[class*="Popup"]',
+    ];
+    
+    for (const selector of modalSelectors) {
+      try {
+        const modals = Array.from(document.querySelectorAll(selector));
+        for (const modal of modals) {
+          const style = window.getComputedStyle(modal);
+          const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          const zIndex = parseInt(style.zIndex) || 0;
+          
+          if (isVisible && zIndex > 50) {
+            // Found an active modal - look for scrollable container within it
+            const scrollableContainer = this.findScrollableContainer(modal);
+            if (scrollableContainer) {
+              console.log('[Tier1] 📜 Found scrollable modal container');
+              return scrollableContainer;
+            }
+          }
+        }
+      } catch {
+        // Invalid selector
+      }
+    }
+    return null;
+  }
+
   /**
    * Find scrollable container within an element
    */
@@ -1569,31 +1856,50 @@ export class Tier1Executor {
    * Execute read action - query element values
    */
   private static async executeRead(action: AgentAction): Promise<Tier1ExecutionResult> {
-    const { target, attribute = 'value' } = action.params;
+    const { target, attribute = 'value', x, y } = action.params;
     
-    if (!target) {
+    let element: Element | null = null;
+    let resolveMetrics: any = undefined;
+    const hasTarget = Boolean(target);
+
+    if (typeof x === 'number' && typeof y === 'number') {
+      element = document.elementFromPoint(x, y);
+      resolveMetrics = { method: 'coordinate' };
+    } else {
+      if (!target) {
+        return {
+          status: 'rejected',
+          code: 'NOT_FOUND',
+          details: {},
+          message: 'No target specified for read action',
+        };
+      }
+
+      // Build locator bundle from semantic target
+      const bundle = this.buildLocatorBundle(target);
+      
+      // Build intent for resolver
+      const intent: Intent = { kind: 'CLICK' }; // Use CLICK intent for resolution
+      
+      // Resolve element
+      const resolveResult = await this.resolveElement(bundle, intent);
+      
+      if (resolveResult.status !== 'success') {
+        return resolveResult;
+      }
+      
+      element = resolveResult.details.element!;
+      resolveMetrics = resolveResult.details.resolveMetrics;
+    }
+
+    if (!element) {
       return {
         status: 'rejected',
         code: 'NOT_FOUND',
         details: {},
-        message: 'No target specified for read action',
+        message: 'No element found for read action',
       };
     }
-    
-    // Build locator bundle from semantic target
-    const bundle = this.buildLocatorBundle(target);
-    
-    // Build intent for resolver
-    const intent: Intent = { kind: 'CLICK' }; // Use CLICK intent for resolution
-    
-    // Resolve element
-    const resolveResult = await this.resolveElement(bundle, intent);
-    
-    if (resolveResult.status !== 'success') {
-      return resolveResult;
-    }
-    
-    const element = resolveResult.details.element!;
     
     // Read value based on attribute
     let value: string | boolean | number;
@@ -1628,12 +1934,35 @@ export class Tier1Executor {
           break;
         
         case 'count':
-          // Count matching elements (use the target selector)
-          const selector = target.testId ? `[data-testid="${target.testId}"]` : 
-                          target.id ? `#${target.id}` : 
-                          target.role ? `[role="${target.role}"]` : '*';
-          value = document.querySelectorAll(selector).length;
+          if (hasTarget) {
+            const selector = target?.testId ? `[data-testid="${target.testId}"]` : 
+                            target?.id ? `#${target.id}` : 
+                            target?.role ? `[role="${target.role}"]` : '*';
+            value = document.querySelectorAll(selector).length;
+          } else if (element instanceof HTMLSelectElement) {
+            value = element.options.length;
+          } else {
+            value = element.querySelectorAll ? element.querySelectorAll('*').length : 0;
+          }
           break;
+
+        case 'disabled':
+          if (element instanceof HTMLInputElement || element instanceof HTMLButtonElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
+            value = element.disabled;
+          } else {
+            value = element.getAttribute('aria-disabled') === 'true';
+          }
+          break;
+
+        case 'visible': {
+          if (!(element instanceof HTMLElement)) {
+            value = false;
+            break;
+          }
+          const style = window.getComputedStyle(element);
+          value = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          break;
+        }
         
         default:
           value = '';
@@ -1646,7 +1975,7 @@ export class Tier1Executor {
         details: {
           element,
           value, // Store the read value in details
-          resolveMetrics: resolveResult.details.resolveMetrics,
+          resolveMetrics,
         },
       };
     } catch (error) {

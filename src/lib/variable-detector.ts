@@ -17,6 +17,7 @@ import { aiConfig } from './ai-config';
 import type { WorkflowStep, WorkflowStepPayload } from '../types/workflow';
 import { isWorkflowStepPayload } from '../types/workflow';
 import { SpreadsheetHelpers } from './spreadsheet-helpers';
+import { UserContextStorage } from './user-context-storage';
 
 /**
  * Definition of a detected variable in a workflow
@@ -1508,10 +1509,12 @@ export class VariableDetector {
       });
     }
 
+    const userContext = await UserContextStorage.getUserContext();
     const requestPayload = {
       steps: stepsForAnalysis,
       pageContext,
       initialFullPageSnapshot: initialFullPageSnapshot || undefined, // Include full page snapshot for spreadsheet column header detection
+      userContext: userContext || undefined,
     };
     console.log('[VariableDetector] Request payload:', {
       stepsCount: requestPayload.steps.length,

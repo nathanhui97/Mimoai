@@ -74,7 +74,7 @@ export class VisionClicker {
       await this.sleep(10 + Math.random() * 30);
 
       // Click using debugger API
-      await this.debuggerClick(humanX, humanY);
+      await this.debuggerClick(humanX, humanY, 'left', 1);
 
       console.log('[VisionClicker] ✅ TRUE VISION click succeeded');
       return {
@@ -87,6 +87,74 @@ export class VisionClicker {
         success: false,
         coordinates: { x, y },
         error: error instanceof Error ? error.message : 'Click failed',
+      };
+    }
+  }
+
+  static async doubleClickAt(
+    x: number,
+    y: number,
+    description?: string
+  ): Promise<VisionClickResult> {
+    console.log(`[VisionClicker] 👁️ TRUE VISION double click at (${x}, ${y})${description ? ` - ${description}` : ''}`);
+
+    if (!this.debuggerAttached) {
+      await this.preAttachDebugger();
+    }
+
+    try {
+      const humanX = x + this.randomOffset(-5, 5);
+      const humanY = y + this.randomOffset(-3, 3);
+
+      console.log(`[VisionClicker] Humanized coordinates: (${Math.round(humanX)}, ${Math.round(humanY)})`);
+      await this.sleep(10 + Math.random() * 30);
+      await this.debuggerClick(humanX, humanY, 'left', 2);
+
+      console.log('[VisionClicker] ✅ TRUE VISION double click succeeded');
+      return {
+        success: true,
+        coordinates: { x: Math.round(humanX), y: Math.round(humanY) },
+      };
+    } catch (error) {
+      console.error('[VisionClicker] Double click failed:', error);
+      return {
+        success: false,
+        coordinates: { x, y },
+        error: error instanceof Error ? error.message : 'Double click failed',
+      };
+    }
+  }
+
+  static async rightClickAt(
+    x: number,
+    y: number,
+    description?: string
+  ): Promise<VisionClickResult> {
+    console.log(`[VisionClicker] 👁️ TRUE VISION right click at (${x}, ${y})${description ? ` - ${description}` : ''}`);
+
+    if (!this.debuggerAttached) {
+      await this.preAttachDebugger();
+    }
+
+    try {
+      const humanX = x + this.randomOffset(-5, 5);
+      const humanY = y + this.randomOffset(-3, 3);
+
+      console.log(`[VisionClicker] Humanized coordinates: (${Math.round(humanX)}, ${Math.round(humanY)})`);
+      await this.sleep(10 + Math.random() * 30);
+      await this.debuggerClick(humanX, humanY, 'right', 1);
+
+      console.log('[VisionClicker] ✅ TRUE VISION right click succeeded');
+      return {
+        success: true,
+        coordinates: { x: Math.round(humanX), y: Math.round(humanY) },
+      };
+    } catch (error) {
+      console.error('[VisionClicker] Right click failed:', error);
+      return {
+        success: false,
+        coordinates: { x, y },
+        error: error instanceof Error ? error.message : 'Right click failed',
       };
     }
   }
@@ -116,10 +184,15 @@ export class VisionClicker {
   /**
    * Chrome Debugger API click
    */
-  private static async debuggerClick(x: number, y: number): Promise<void> {
+  private static async debuggerClick(
+    x: number,
+    y: number,
+    button: 'left' | 'right' = 'left',
+    clickCount: number = 1
+  ): Promise<void> {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage(
-        { type: 'DEBUGGER_CLICK', x, y },
+        { type: 'DEBUGGER_CLICK', x, y, button, clickCount },
         (response) => {
           if (chrome.runtime.lastError) {
             reject(new Error(chrome.runtime.lastError.message));

@@ -258,7 +258,13 @@ async function stopRecordingInAllTabs(): Promise<{ initialFullPageSnapshot?: str
  * Perform a click using Chrome Debugger API (sends real mouse events with isTrusted=true)
  * Optimized: attach, click, detach immediately to avoid lag
  */
-async function performDebuggerClick(tabId: number, x: number, y: number): Promise<void> {
+async function performDebuggerClick(
+  tabId: number,
+  x: number,
+  y: number,
+  button: 'left' | 'right' = 'left',
+  clickCount: number = 1
+): Promise<void> {
   try {
     // Attach debugger
     await chrome.debugger.attach({ tabId }, '1.3');
@@ -269,8 +275,8 @@ async function performDebuggerClick(tabId: number, x: number, y: number): Promis
         type: 'mousePressed',
         x,
         y,
-        button: 'left',
-        clickCount: 1,
+        button,
+        clickCount,
       });
 
       // Mouse up immediately (no delay needed)
@@ -278,11 +284,11 @@ async function performDebuggerClick(tabId: number, x: number, y: number): Promis
         type: 'mouseReleased',
         x,
         y,
-        button: 'left',
-        clickCount: 1,
+        button,
+        clickCount,
       });
 
-      console.log(`[Debugger] Click at (${x}, ${y})`);
+      console.log(`[Debugger] Click at (${x}, ${y}) button=${button} count=${clickCount}`);
     } finally {
       // Always detach immediately to prevent lag
       await chrome.debugger.detach({ tabId }).catch(() => {});
@@ -303,7 +309,7 @@ chrome.runtime.onMessage.addListener(
   ) => {
     // Handle DEBUGGER_CLICK request from content script
     if (message.type === 'DEBUGGER_CLICK') {
-      const { x, y } = message as any;
+      const { x, y, button, clickCount } = message as any;
       const tabId = sender.tab?.id;
       
       if (!tabId) {
@@ -311,7 +317,7 @@ chrome.runtime.onMessage.addListener(
         return false;
       }
       
-      performDebuggerClick(tabId, x, y)
+      performDebuggerClick(tabId, x, y, button, clickCount)
         .then(() => sendResponse({ success: true }))
         .catch((error) => sendResponse({ 
           success: false, 
@@ -430,6 +436,50 @@ chrome.runtime.onMessage.addListener(
         }
       });
       return true; // Keep channel open for async
+    }
+
+    // Handle user context storage requests (proxy for restricted contexts)
+    if (message.type === 'GET_USER_CONTEXT') {
+      chrome.storage.local.get(['userContext']).then((result) => {
+        sendResponse({
+          success: true,
+          data: { userContext: result.userContext || null },
+        });
+      }).catch((error) => {
+        console.error('[ServiceWorker] Failed to read user context:', error);
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to read user context',
+        });
+      });
+      return true;
+    }
+
+    if (message.type === 'SET_USER_CONTEXT') {
+      const userContext = message.payload?.userContext;
+      chrome.storage.local.set({ userContext }).then(() => {
+        sendResponse({ success: true });
+      }).catch((error) => {
+        console.error('[ServiceWorker] Failed to save user context:', error);
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to save user context',
+        });
+      });
+      return true;
+    }
+
+    if (message.type === 'CLEAR_USER_CONTEXT') {
+      chrome.storage.local.remove(['userContext']).then(() => {
+        sendResponse({ success: true });
+      }).catch((error) => {
+        console.error('[ServiceWorker] Failed to clear user context:', error);
+        sendResponse({
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to clear user context',
+        });
+      });
+      return true;
     }
 
     // Handle GET_FRAME_ID request from content script

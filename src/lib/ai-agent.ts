@@ -20,14 +20,18 @@ import { generateDOMMap, domMapToText, invalidateDOMMapCache, type DOMMap, type 
 import { FeatureFlags, isFeatureEnabled } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
 import { PostActionObserver, type PageChanges } from './post-action-observer';
+import { capturePageState, verifyStepSuccess } from './success-verifier';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
 import { SheetStateExtractor } from '../content/sheet-state-extractor';
 import { SpreadsheetHelpers } from './spreadsheet-helpers';
 import { VisionAssist } from './tier3-vision-assist';
 import { RecoveryEngine } from '../content/recovery-engine';
 import type { SavedWorkflow } from '../types/workflow';
+import type { UserContext } from '../types/ai';
 import { ExecutionTelemetry } from './execution-telemetry';
 import { StateWaitEngine } from '../content/state-wait-engine';
+import { ExecutionLearning } from './execution-learning';
+import type { WorkflowMemory } from './workflow-memory/types';
 
 // Extracted agent modules
 import { CandidateFinder } from './agent/candidate-finder';
@@ -41,6 +45,8 @@ import { StuckDetector, type StuckContext } from './stuck-detector';
 /** Actions the agent can take */
 export type AgentActionType =
   | 'click'
+  | 'double_click'
+  | 'right_click'
   | 'type'
   | 'select'
   | 'multi_select' // Multi-select operations (checkboxes, list items)
@@ -177,7 +183,7 @@ export interface AgentActionParams {
   isNewTab?: boolean;       // Was this a new tab creation (true) or switch to existing (false)?
   
   // For read - query element values
-  attribute?: 'value' | 'text' | 'checked' | 'selected' | 'count';
+  attribute?: 'value' | 'text' | 'checked' | 'selected' | 'count' | 'disabled' | 'visible';
   storeAs?: string;            // Optional: store in agent memory
   
   // For keyboard - Tab, Enter, Escape, shortcuts
@@ -206,7 +212,7 @@ export interface AgentActionParams {
   // Expected outcome (for verification)
   expectedOutcome?: ExpectedOutcome;
   
-  // Legacy: coordinates fallback (only used if DOM resolution fails AND VisionClicker enabled)
+  // Coordinate-based execution (from Computer Use or vision fallback)
   x?: number;
   y?: number;
 }
@@ -397,12 +403,14 @@ export interface AgentState {
   workflowId?: string;
   goal: string;
   analyzedIntent?: import('./intent-analyzer').AnalyzedIntent;
+  workflowMemory?: WorkflowMemory;
   hints: AgentHint[];
   history: ActionHistoryEntry[];
   currentHintIndex: number;
   status: 'running' | 'completed' | 'failed' | 'paused' | 'stopped';
   startTime: number;
   variableValues?: Record<string, string>;
+  userContext?: UserContext;
   memory?: Record<string, string | boolean | number>; // NEW: Store values read during execution
   // Cooperative pausing support
   pauseRequested?: boolean;
@@ -482,7 +490,11 @@ export class AIAgent {
   /**
    * Run the agent to complete a workflow
    */
-  async run(workflow: SavedWorkflow, variableValues?: Record<string, string>): Promise<AgentResult> {
+  async run(
+    workflow: SavedWorkflow,
+    variableValues?: Record<string, string>,
+    userContext?: UserContext
+  ): Promise<AgentResult> {
     console.log('[AIAgent] Starting workflow execution');
     console.log(`[AIAgent] 🆔 Workflow ID: ${workflow.id}`);
     console.log(`[AIAgent] 📝 Workflow Name: ${workflow.name || 'Unnamed'}`);
@@ -503,12 +515,14 @@ export class AIAgent {
       workflowId: workflow.id,
       goal: this.inferGoal(workflow),
       analyzedIntent: workflow.analyzedIntent,
+      workflowMemory: workflow.memory,
       hints: this.extractHints(workflow, variableValues),
       history: [],
       currentHintIndex: 0,
       status: 'running',
       startTime: Date.now(),
       variableValues,
+      userContext,
       memory: {}, // NEW: Initialize agent memory
     };
 
@@ -1325,6 +1339,10 @@ export class AIAgent {
         // OPTIMIZATION: Lowered threshold from 80% to 70% to skip more LLM calls
         // This saves ~500-1500ms per step for high-confidence actions
         // ============================================================================
+        if (currentHint) {
+          await this.applyProactiveStrategies(currentHint);
+        }
+
         if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type')) {
           const hybridResult = await this.tryFastPathExecute(currentHint);
           
@@ -1365,6 +1383,51 @@ export class AIAgent {
           } else if (hybridResult.confidence !== undefined) {
             console.log(`[Hybrid] 🔧 LOW CONFIDENCE (${hybridResult.confidence}%) - Using LLM for recovery`);
             // Fall through to LLM call below
+          }
+
+          // 🔄 MODAL-AWARE SCROLL: Try scrolling to find the element if not found
+          // Triggers when:
+          // 1. SMART_HYBRID_MODE is enabled
+          // 2. Action is click, type, or select (not just click)
+          // 3. Confidence is low (<50) OR executed failed (element not found)
+          const shouldTryScroll = isFeatureEnabled('SMART_HYBRID_MODE') && 
+            (currentHint.actionType === 'click' || currentHint.actionType === 'type' || currentHint.actionType === 'select') &&
+            ((!hybridResult.executed) || (hybridResult.confidence !== undefined && hybridResult.confidence < 50));
+          
+          if (shouldTryScroll) {
+            console.log(`[AIAgent] 🔄 Element not found or low confidence - trying modal-aware scroll to find it`);
+            const scrollResult = await this.smartScrollToFind(currentHint);
+            if (scrollResult.found || scrollResult.attempts > 0) {
+              continue;
+            }
+          }
+        }
+
+        if (currentHint && currentHint.actionType === 'select' && isFeatureEnabled('SMART_HYBRID_MODE')) {
+          const dropdownResult = await this.executeDropdownWithVision(currentHint);
+          if (dropdownResult.success) {
+            this.state.hints[this.state.currentHintIndex].completed = true;
+            this.state.currentHintIndex++;
+            this.notifyProgress();
+
+            this.state.history.push({
+              stepNumber: currentHint.stepNumber,
+              action: {
+                type: 'select',
+                params: {
+                  option: currentHint.value || currentHint.targetText,
+                  description: currentHint.description,
+                },
+                reasoning: 'Dropdown handled by vision flow',
+                confidence: 0.9,
+              },
+              observation,
+              result: 'success',
+              timestamp: Date.now(),
+            });
+
+            await this.sleep(50);
+            continue;
           }
         }
         
@@ -1454,7 +1517,14 @@ export class AIAgent {
           ? PostActionObserver.captureQuickState()
           : null;
         
+        const shouldVerifyWithMemory = Boolean(
+          isFeatureEnabled('SMART_HYBRID_MODE') &&
+          (this.state.workflowMemory?.success?.indicators?.length ||
+            this.state.workflowMemory?.success?.failureIndicators?.length)
+        );
+        const preVerificationState = shouldVerifyWithMemory ? capturePageState() : null;
         const result = await this.act(action);
+        let finalResult = result;
         
         // 4.2 Post-action observation - detect what changed
         let pageChanges: PageChanges | null = null;
@@ -1484,6 +1554,23 @@ export class AIAgent {
           }
         }
         
+        if (shouldVerifyWithMemory && preVerificationState) {
+          const postVerificationState = capturePageState();
+          const verification = await verifyStepSuccess(
+            this.state.workflowMemory,
+            this.state.hints[this.state.currentHintIndex]?.stepNumber ?? this.state.currentHintIndex,
+            preVerificationState,
+            postVerificationState
+          );
+          if (!verification.success) {
+            finalResult = {
+              success: false,
+              error: `Verification failed: ${verification.reason}`,
+            };
+            console.warn('[AIAgent] Step verification failed:', verification.reason);
+          }
+        }
+
         // Emit action result event
         this.onThinkingEvent?.({
           type: 'act',
@@ -1491,8 +1578,8 @@ export class AIAgent {
           stepIndex: this.state.currentHintIndex,
           stepTotal: this.state.hints.length,
           result: {
-            success: result.success,
-            error: result.error,
+            success: finalResult.success,
+            error: finalResult.error,
             duration: Date.now() - actionStartTime,
           },
         });
@@ -1502,8 +1589,8 @@ export class AIAgent {
           stepNumber: this.state.history.length + 1,
           action,
           observation,
-          result: result.success ? 'success' : 'failed',
-          error: result.error,
+          result: finalResult.success ? 'success' : 'failed',
+          error: finalResult.error,
           timestamp: Date.now(),
           pageChanges: pageChanges || undefined,  // Add observed changes
         };
@@ -1519,7 +1606,7 @@ export class AIAgent {
         // 6. Update hint progress
         // ALWAYS mark currentHintIndex as completed, not hintStepIndex from LLM
         // (LLM might get confused about step numbers, but we know which step we're on)
-        if (result.success) {
+        if (finalResult.success) {
           const completedIndex = this.state.currentHintIndex;
           if (completedIndex >= 0 && completedIndex < this.state.hints.length) {
             const currentHint = this.state.hints[completedIndex];
@@ -1972,19 +2059,36 @@ export class AIAgent {
 
       // 🚀 OPTIMIZATION: Pre-scroll to recorded position BEFORE element detection
       // This skips the slow "AI figuring out where to scroll" loop
+      // MODAL-AWARE: Check if we're in a modal and scroll within it
       if (hint.recordedScrollY !== undefined && hint.recordedScrollY > 0) {
-        const currentScrollY = window.scrollY || window.pageYOffset;
-        const scrollDiff = Math.abs(hint.recordedScrollY - currentScrollY);
+        const modalContainer = this.findModalScrollContainer();
         
-        // Only scroll if we're significantly away from the recorded position (>100px)
-        if (scrollDiff > 100) {
-          console.log(`[Hybrid] 🚀 Pre-scrolling to recorded position: ${hint.recordedScrollY}px (current: ${currentScrollY}px)`);
-          window.scrollTo({
-            top: hint.recordedScrollY,
-            behavior: 'instant', // Use instant for speed
-          });
-          // Brief wait for DOM to update after scroll
-          await this.sleep(50);
+        if (modalContainer) {
+          // We're in a modal - scroll within the modal, not the window
+          const currentScrollTop = modalContainer.scrollTop;
+          const scrollDiff = Math.abs(hint.recordedScrollY - currentScrollTop);
+          
+          if (scrollDiff > 100) {
+            console.log(`[Hybrid] 🚀 Pre-scrolling MODAL to recorded position: ${hint.recordedScrollY}px (current: ${currentScrollTop}px)`);
+            modalContainer.scrollTo({
+              top: hint.recordedScrollY,
+              behavior: 'instant',
+            });
+            await this.sleep(50);
+          }
+        } else {
+          // No modal - scroll the window
+          const currentScrollY = window.scrollY || window.pageYOffset;
+          const scrollDiff = Math.abs(hint.recordedScrollY - currentScrollY);
+          
+          if (scrollDiff > 100) {
+            console.log(`[Hybrid] 🚀 Pre-scrolling WINDOW to recorded position: ${hint.recordedScrollY}px (current: ${currentScrollY}px)`);
+            window.scrollTo({
+              top: hint.recordedScrollY,
+              behavior: 'instant',
+            });
+            await this.sleep(50);
+          }
         }
       }
 
@@ -2372,6 +2476,551 @@ export class AIAgent {
       console.log('[Hybrid] ⚡ Error in confidence-based routing, falling back to LLM:', error);
       return { executed: false, confidence: 0 };
     }
+  }
+
+  private async applyProactiveStrategies(hint: AgentHint): Promise<void> {
+    if (!isFeatureEnabled('SMART_HYBRID_MODE')) return;
+    const memory = this.state.workflowMemory;
+    const troubleSpots = memory?.experience?.troubleSpots || [];
+    if (!troubleSpots.length) return;
+
+    const stepIndex = hint.stepNumber ?? this.state.currentHintIndex;
+    const relevantSpots = troubleSpots.filter(spot => spot.stepIndex === stepIndex && spot.frequency > 0.3);
+    if (!relevantSpots.length) return;
+
+    for (const spot of relevantSpots) {
+      console.log(`[AIAgent] Proactive: Applying known fix for "${spot.issue}"`);
+      const issue = spot.issue.toLowerCase();
+
+      if (issue.includes('dropdown') || issue.includes('load')) {
+        await this.sleep(500);
+      }
+
+      if (issue.includes('scroll') || issue.includes('not visible')) {
+        await this.ensureElementVisible(hint);
+      }
+
+      if (issue.includes('modal') || issue.includes('overlay')) {
+        await this.sleep(300);
+      }
+    }
+  }
+
+  private async ensureElementVisible(hint: AgentHint): Promise<boolean> {
+    const selector = hint.targetSelector;
+    let element: Element | null = null;
+
+    if (selector) {
+      try {
+        element = document.querySelector(selector);
+      } catch (error) {
+        console.warn('[AIAgent] Invalid selector in hint:', selector, error);
+      }
+    }
+
+    if (!element && hint.targetText) {
+      const targetText = hint.targetText.toLowerCase().trim();
+      const candidates = Array.from(document.querySelectorAll(
+        'button, a, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [role="combobox"]'
+      ));
+      element = candidates.find(candidate => {
+        const html = candidate as HTMLElement;
+        const ariaLabel = (html.getAttribute('aria-label') || '').toLowerCase();
+        const placeholder = (html.getAttribute('placeholder') || '').toLowerCase();
+        const text = (html.innerText || html.textContent || '').toLowerCase().trim();
+        return ariaLabel === targetText || placeholder === targetText || text === targetText;
+      }) || null;
+    }
+
+    if (element && element instanceof HTMLElement) {
+      element.scrollIntoView({ block: 'center', inline: 'center' });
+      await this.sleep(50);
+      return true;
+    }
+
+    return false;
+  }
+
+  private async smartScrollToFind(hint: AgentHint): Promise<{ found: boolean; attempts: number }> {
+    if (!isFeatureEnabled('SMART_HYBRID_MODE')) {
+      return { found: false, attempts: 0 };
+    }
+    const config = aiConfig.getConfig();
+    if (!config.enabled) {
+      // Even if AI is disabled, try simple modal scroll as fallback
+      return this.fallbackModalScroll(hint);
+    }
+
+    // FIRST: Check if there's a modal open - if so, try scrolling within it proactively
+    const modalContainer = this.findModalScrollContainer();
+    if (modalContainer) {
+      console.log('[AIAgent] 🔍 Modal detected - will scroll within modal to find element');
+    }
+
+    const maxScrollAttempts = 3;
+    for (let attempt = 0; attempt < maxScrollAttempts; attempt++) {
+      const captureResult = await VisualSnapshotService.captureFullPage(0.7, true);
+      if (!captureResult?.screenshot) {
+        // If screenshot fails but modal exists, try fallback scroll
+        if (modalContainer) {
+          return this.fallbackModalScroll(hint, modalContainer);
+        }
+        return { found: false, attempts: attempt + 1 };
+      }
+
+      const payload = {
+        mode: 'agent' as const,
+        screenshot: captureResult.screenshot,
+        goal: `Find "${hint.targetText || hint.description}" on the page. ${modalContainer ? 'A modal/popup is open - look within it and scroll within the modal if needed.' : 'If not visible, scroll to find it.'}`,
+        hints: [{
+          stepNumber: hint.stepNumber,
+          description: hint.description,
+          actionType: hint.actionType === 'type' ? 'type' : hint.actionType === 'select' ? 'select' : 'click',
+          targetText: hint.targetText,
+          targetPlaceholder: hint.targetPlaceholder,
+          targetSelector: hint.targetSelector,
+          value: hint.value,
+          completed: false,
+        }],
+        currentHintIndex: 0,
+        history: [],
+        pageContext: {
+          url: window.location.href,
+          title: document.title,
+          viewportSize: { width: window.innerWidth, height: window.innerHeight },
+          hasModal: !!modalContainer, // Let AI know there's a modal
+        },
+      };
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000);
+      let response: Response;
+      try {
+        response = await fetch(`${config.supabaseUrl}/functions/v1/computer_use`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.supabaseAnonKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        clearTimeout(timeoutId);
+        console.warn('[AIAgent] smartScrollToFind fetch failed:', error);
+        // Try fallback modal scroll if modal exists
+        if (modalContainer) {
+          return this.fallbackModalScroll(hint, modalContainer);
+        }
+        return { found: false, attempts: attempt + 1 };
+      }
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        console.warn('[AIAgent] smartScrollToFind response error:', response.status);
+        // Try fallback modal scroll if modal exists
+        if (modalContainer) {
+          return this.fallbackModalScroll(hint, modalContainer);
+        }
+        return { found: false, attempts: attempt + 1 };
+      }
+
+      const result = await response.json();
+      if (result.action === 'click' && result.params?.x !== undefined) {
+        return { found: true, attempts: attempt + 1 };
+      }
+      
+      // If AI returns 'type' action (found the element), consider it found
+      if (result.action === 'type' && result.params) {
+        return { found: true, attempts: attempt + 1 };
+      }
+
+      if (result.action === 'scroll') {
+        const direction = result.params?.direction || 'down';
+        const amount = result.params?.amount || 300;
+        
+        // MODAL-AWARE SCROLLING: Always prefer modal container if one exists
+        const scrollTarget = modalContainer || this.findModalScrollContainer();
+        if (scrollTarget) {
+          console.log(`[AIAgent] 📜 Scrolling within modal container (attempt ${attempt + 1})`);
+          scrollTarget.scrollBy({
+            top: direction === 'down' ? amount : -amount,
+            behavior: 'smooth',
+          });
+        } else {
+          console.log(`[AIAgent] 📜 Scrolling window (attempt ${attempt + 1})`);
+          window.scrollBy(0, direction === 'down' ? amount : -amount);
+        }
+        await this.sleep(200);
+        continue;
+      }
+
+      if (result.action === 'wait') {
+        await this.sleep(result.params?.duration || 300);
+        continue;
+      }
+      
+      // AI returned something else (done, fail, unknown) - try one fallback scroll if modal exists
+      if (modalContainer && attempt === 0) {
+        console.log('[AIAgent] 📜 AI uncertain - attempting fallback modal scroll');
+        modalContainer.scrollBy({ top: 300, behavior: 'smooth' });
+        await this.sleep(200);
+        continue;
+      }
+
+      return { found: false, attempts: attempt + 1 };
+    }
+
+    return { found: false, attempts: maxScrollAttempts };
+  }
+  
+  /**
+   * Fallback modal scroll when AI is unavailable or fails
+   * Tries scrolling down within the modal to find the element
+   */
+  private async fallbackModalScroll(hint: AgentHint, existingModal?: Element | null): Promise<{ found: boolean; attempts: number }> {
+    const modalContainer = existingModal || this.findModalScrollContainer();
+    if (!modalContainer) {
+      console.log('[AIAgent] 📜 No modal found for fallback scroll');
+      return { found: false, attempts: 0 };
+    }
+    
+    console.log(`[AIAgent] 📜 Fallback modal scroll: looking for "${hint.targetText || hint.description}"`);
+    
+    const maxAttempts = 3;
+    const scrollAmount = 300;
+    
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Try to find the element after scrolling
+      const element = this.tryFindElementInModal(hint, modalContainer);
+      if (element) {
+        console.log('[AIAgent] ✅ Element found in modal after fallback scroll');
+        element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        await this.sleep(100);
+        return { found: true, attempts: attempt + 1 };
+      }
+      
+      // Scroll down within modal
+      const beforeScroll = modalContainer.scrollTop;
+      modalContainer.scrollBy({ top: scrollAmount, behavior: 'smooth' });
+      await this.sleep(200);
+      
+      // Check if we've hit the bottom
+      if (modalContainer.scrollTop === beforeScroll) {
+        console.log('[AIAgent] 📜 Reached bottom of modal - element not found');
+        break;
+      }
+      
+      console.log(`[AIAgent] 📜 Modal scroll attempt ${attempt + 1}/${maxAttempts}`);
+    }
+    
+    return { found: false, attempts: maxAttempts };
+  }
+  
+  /**
+   * Try to find element within a modal container
+   */
+  private tryFindElementInModal(hint: AgentHint, modal: Element): Element | null {
+    const targetText = (hint.targetText || hint.description || '').toLowerCase().trim();
+    if (!targetText) return null;
+    
+    // Search within the modal only
+    const allElements = modal.querySelectorAll('button, input, a, [role="button"], [role="option"], [role="menuitem"], [class*="btn"], label, span, div[tabindex]');
+    
+    for (const el of Array.from(allElements)) {
+      const text = (el.textContent || '').toLowerCase().trim();
+      const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase().trim();
+      const placeholder = (el.getAttribute('placeholder') || '').toLowerCase().trim();
+      
+      if (text.includes(targetText) || targetText.includes(text) ||
+          ariaLabel.includes(targetText) || targetText.includes(ariaLabel) ||
+          placeholder.includes(targetText) || targetText.includes(placeholder)) {
+        // Check if element is visible
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          return el;
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Find scrollable container within an active modal/popup
+   * Returns the scrollable element if a modal is open, null otherwise
+   */
+  private findModalScrollContainer(): Element | null {
+    // Comprehensive list of modal/popup selectors for different frameworks
+    const modalSelectors = [
+      // Semantic/ARIA
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      
+      // Generic class patterns
+      '.modal',
+      '[class*="Modal"]',
+      '[class*="modal"]',
+      '[class*="dialog"]',
+      '[class*="Dialog"]',
+      '[class*="popup"]',
+      '[class*="Popup"]',
+      '[class*="overlay"]',
+      '[class*="Overlay"]',
+      '[class*="drawer"]',
+      '[class*="Drawer"]',
+      '[class*="sheet"]',
+      '[class*="Sheet"]',
+      '[class*="panel"]',
+      '[class*="Panel"]',
+      '[class*="sidebar"]',
+      '[class*="Sidebar"]',
+      '[class*="pane"]',
+      '[class*="Pane"]',
+      '[class*="lightbox"]',
+      '[class*="Lightbox"]',
+      
+      // Framework-specific
+      '.MuiDialog-root',        // Material-UI
+      '.MuiDrawer-root',        // Material-UI
+      '.MuiModal-root',         // Material-UI
+      '.ant-modal',             // Ant Design
+      '.ant-drawer',            // Ant Design
+      '.chakra-modal__content', // Chakra UI
+      '.bp3-dialog',            // Blueprint
+      '.bp4-dialog',            // Blueprint
+      '.slds-modal',            // Salesforce Lightning
+      '.gs-modal',              // Gainsight
+      '[data-testid*="modal"]',
+      '[data-testid*="dialog"]',
+      '[data-testid*="drawer"]',
+    ];
+
+    for (const selector of modalSelectors) {
+      try {
+        const modals = Array.from(document.querySelectorAll(selector));
+        for (const modal of modals) {
+          const style = window.getComputedStyle(modal);
+          const isVisible = style.display !== 'none' && 
+                           style.visibility !== 'hidden' && 
+                           style.opacity !== '0';
+          
+          // Check z-index - use 0 as minimum to catch positioned elements
+          // Some modals might have lower z-index but still be the active overlay
+          const zIndex = parseInt(style.zIndex) || 0;
+          const isPositioned = style.position === 'fixed' || style.position === 'absolute';
+          
+          // Modal is valid if:
+          // 1. It's visible AND
+          // 2. Either has high z-index (>50) OR is fixed/absolute positioned
+          if (isVisible && (zIndex > 50 || isPositioned)) {
+            // Check if the modal has enough content to need scrolling
+            const rect = modal.getBoundingClientRect();
+            if (rect.width > 100 && rect.height > 100) {
+              // Found an active modal - look for scrollable container within it
+              const scrollableContainer = this.findScrollableInElement(modal);
+              if (scrollableContainer) {
+                console.log(`[AIAgent] 🎯 Found modal scroll container via selector: ${selector}`);
+                return scrollableContainer;
+              }
+              // If modal itself might be scrollable, return it
+              if (modal.scrollHeight > modal.clientHeight) {
+                console.log(`[AIAgent] 🎯 Modal itself is scrollable: ${selector}`);
+                return modal;
+              }
+            }
+          }
+        }
+      } catch {
+        // Invalid selector, skip
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Find scrollable element within a container (used for modal scrolling)
+   */
+  private findScrollableInElement(element: Element): Element | null {
+    // Check if element itself is scrollable
+    const style = window.getComputedStyle(element);
+    const isScrollable = style.overflow === 'auto' || style.overflow === 'scroll' || 
+                        style.overflowY === 'auto' || style.overflowY === 'scroll';
+    
+    if (isScrollable && element.scrollHeight > element.clientHeight) {
+      return element;
+    }
+    
+    // Look for scrollable children
+    const children = Array.from(element.querySelectorAll('*'));
+    for (const child of children) {
+      const childStyle = window.getComputedStyle(child);
+      const isChildScrollable = childStyle.overflow === 'auto' || childStyle.overflow === 'scroll' || 
+                               childStyle.overflowY === 'auto' || childStyle.overflowY === 'scroll';
+      
+      if (isChildScrollable && child.scrollHeight > child.clientHeight) {
+        return child;
+      }
+    }
+    
+    return null;
+  }
+
+  private async callComputerUseFindElement(
+    screenshot: string,
+    target: { text?: string; role?: string; label?: string; description?: string }
+  ): Promise<{ coordinates: { x: number; y: number }; confidence: number; reasoning?: string } | null> {
+    const config = aiConfig.getConfig();
+    if (!config.enabled) {
+      return null;
+    }
+
+    const payload = {
+      mode: 'find_element' as const,
+      screenshot,
+      target,
+      pageContext: {
+        url: window.location.href,
+        title: document.title,
+        viewportSize: { width: window.innerWidth, height: window.innerHeight },
+      },
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    let response: Response;
+    try {
+      response = await fetch(`${config.supabaseUrl}/functions/v1/computer_use`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.supabaseAnonKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeoutId);
+      console.warn('[AIAgent] callComputerUseFindElement fetch failed:', error);
+      return null;
+    }
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.warn('[AIAgent] callComputerUseFindElement response error:', response.status);
+      return null;
+    }
+
+    const result = await response.json();
+    if (!result?.coordinates || typeof result.coordinates.x !== 'number') {
+      return null;
+    }
+
+    return {
+      coordinates: result.coordinates,
+      confidence: result.confidence || 0,
+      reasoning: result.reasoning,
+    };
+  }
+
+  private async executeDropdownWithVision(hint: AgentHint): Promise<{ success: boolean; error?: string }> {
+    const config = aiConfig.getConfig();
+    if (!config.enabled) {
+      return { success: false, error: 'AI features are disabled' };
+    }
+
+    const captureResult1 = await VisualSnapshotService.captureFullPage(0.7, true);
+    if (!captureResult1?.screenshot) {
+      return { success: false, error: 'Failed to capture screenshot for dropdown trigger' };
+    }
+
+    const triggerResult = await this.callComputerUseFindElement(captureResult1.screenshot, {
+      text: hint.targetText,
+      role: 'combobox',
+      description: 'dropdown trigger to open',
+    });
+
+    if (!triggerResult || triggerResult.confidence < 0.5) {
+      return { success: false, error: 'Could not find dropdown trigger' };
+    }
+
+    const { VisionClicker } = await import('./vision-clicker');
+    await VisionClicker.clickAt(
+      triggerResult.coordinates.x,
+      triggerResult.coordinates.y,
+      'Open dropdown'
+    );
+
+    await this.sleep(300);
+
+    const captureResult2 = await VisualSnapshotService.captureFullPage(0.7, true);
+    if (!captureResult2?.screenshot) {
+      return { success: false, error: 'Failed to capture screenshot for dropdown options' };
+    }
+
+    const optionText = hint.value || hint.targetText || '';
+    const optionResult = await this.callComputerUseFindElement(captureResult2.screenshot, {
+      text: optionText,
+      role: 'option',
+      description: `option to select: "${optionText}"`,
+    });
+
+    if (!optionResult || optionResult.confidence < 0.5) {
+      return { success: false, error: `Could not find option "${optionText}"` };
+    }
+
+    await VisionClicker.clickAt(
+      optionResult.coordinates.x,
+      optionResult.coordinates.y,
+      `Select option "${optionText}"`
+    );
+
+    return { success: true };
+  }
+
+  private async attemptMemoryBasedRecovery(
+    hint: AgentHint,
+    error: string
+  ): Promise<{ recovered: boolean; strategy?: string }> {
+    if (!isFeatureEnabled('SMART_HYBRID_MODE')) {
+      return { recovered: false };
+    }
+    const fallbacks = this.state.workflowMemory?.adaptability?.fallbacks || [];
+    if (!fallbacks.length) {
+      return { recovered: false };
+    }
+
+    const lowerError = error.toLowerCase();
+    const matchingFallback = fallbacks.find(fallback => {
+      if (fallback.forStep !== undefined && fallback.forStep !== hint.stepNumber) {
+        return false;
+      }
+      const when = fallback.when.toLowerCase();
+      return lowerError.includes(when) || (when.includes('not found') && lowerError.includes('not found'));
+    });
+
+    if (!matchingFallback) {
+      return { recovered: false };
+    }
+
+    const alternativeTarget = this.extractAlternativeTarget(matchingFallback.then);
+    const modifiedHint: AgentHint = {
+      ...hint,
+      targetText: alternativeTarget || hint.targetText,
+    };
+
+    console.log(`[AIAgent] Applying memory fallback: "${matchingFallback.then}"`);
+    const recoveryResult = await this.tryFastPathExecute(modifiedHint);
+    return {
+      recovered: Boolean(recoveryResult.executed && recoveryResult.success),
+      strategy: matchingFallback.then,
+    };
+  }
+
+  private extractAlternativeTarget(text: string): string | null {
+    const match = text.match(/["']([^"']+)["']/);
+    return match ? match[1].trim() : null;
   }
   
   /**
@@ -2818,6 +3467,12 @@ export class AIAgent {
       // Example: User changed "Budget Amount" from 1000 → 2000
       // AI should use 2000 instead of the recorded 1000
       variableValues: this.state.variableValues,
+
+      // Optional user context (role + focus)
+      userContext: this.state.userContext,
+
+      // Learnings from past executions (trouble spots, proven strategies)
+      workflowLearnings: this.state.workflowMemory?.experience,
         
       // Action history
       history: this.state.history.slice(-5).map(h => ({
@@ -3167,6 +3822,9 @@ export class AIAgent {
   private async act(action: AgentAction): Promise<{ success: boolean; error?: string }> {
     const maxRecoveryAttempts = 3;
     let currentAction = action;
+    const workflowId = this.state.workflowId;
+    const stepIndex = this.state.hints[this.state.currentHintIndex]?.stepNumber ?? this.state.currentHintIndex;
+    let recoveryContext: { issue: string; solution?: string } | null = null;
     
     // ============================================================================
     // 🖼️ FRAME ROUTING: Check if action needs to execute in an iframe
@@ -3446,14 +4104,54 @@ export class AIAgent {
           console.log(`[AIAgent] 💾 Stored value in memory: ${currentAction.params.storeAs} = ${result.details.value}`);
         }
         
+        if (recoveryContext && workflowId) {
+          await ExecutionLearning.recordRecoverySuccess(
+            workflowId,
+            stepIndex,
+            recoveryContext.issue,
+            recoveryContext.solution || 'Recovered with fallback'
+          );
+        }
+
         return { success: true };
       }
       
       // Action was rejected - start recovery loop
       console.warn(`[AIAgent] ⚠️ Tier 1 rejected: ${result.code}`, result.details);
+      if (!recoveryContext) {
+        recoveryContext = {
+          issue: result.message || result.code || 'Execution rejected',
+        };
+      }
+
+      const currentHint = this.state.hints[this.state.currentHintIndex];
+      if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type')) {
+        const memoryRecovery = await this.attemptMemoryBasedRecovery(
+          currentHint,
+          result.message || result.code || 'Execution rejected'
+        );
+        if (memoryRecovery.recovered) {
+          if (workflowId) {
+            await ExecutionLearning.recordRecoverySuccess(
+              workflowId,
+              stepIndex,
+              recoveryContext.issue,
+              memoryRecovery.strategy || 'Recovered using memory fallback'
+            );
+          }
+          return { success: true };
+        }
+      }
       
       // On last attempt, give up
       if (attempt === maxRecoveryAttempts) {
+        if (workflowId) {
+          await ExecutionLearning.recordStepFailure(
+            workflowId,
+            stepIndex,
+            `Failed after ${maxRecoveryAttempts} attempts: ${result.message || result.code || 'Unknown error'}`
+          );
+        }
         return {
           success: false,
           error: `Failed after ${maxRecoveryAttempts} attempts: ${result.message || result.code}`,
@@ -3475,11 +4173,23 @@ export class AIAgent {
       
       // Execute recovery strategy
       if (recoveryDecision.strategy === 'GIVE_UP') {
+        if (workflowId) {
+          await ExecutionLearning.recordStepFailure(
+            workflowId,
+            stepIndex,
+            `Recovery gave up: ${recoveryDecision.reasoning}`
+          );
+        }
         return {
           success: false,
           error: `Recovery gave up: ${recoveryDecision.reasoning}`,
         };
       }
+
+      recoveryContext = {
+        issue: recoveryContext?.issue || result.message || result.code || 'Execution rejected',
+        solution: `${recoveryDecision.strategy}: ${recoveryDecision.reasoning}`,
+      };
       
       if (recoveryDecision.strategy === 'RETRY_WITH_VISION') {
         // Tier 3: Get vision hint
@@ -3703,6 +4413,9 @@ export class AIAgent {
 
         // Goal for context
         goal: this.state.goal,
+
+        // Optional user context
+        userContext: this.state.userContext,
 
         // NEW: Execution state context (Phase 3)
         executionState,

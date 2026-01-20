@@ -6,6 +6,7 @@
  */
 
 import type { VerificationResult, AgentHint } from './agent/types';
+import type { WorkflowMemory, SuccessIndicator } from './workflow-memory/types';
 
 /**
  * Page state snapshot for before/after comparison
@@ -151,6 +152,69 @@ export async function verifyActionOutcome(
 
     default:
       return { verified: true, confidence: 0.4, details: 'Unknown criteria type' };
+  }
+}
+
+export async function verifyStepSuccess(
+  memory: WorkflowMemory | undefined,
+  _stepIndex: number,
+  beforeState: PageState,
+  afterState: PageState
+): Promise<{ success: boolean; reason: string; indicator?: SuccessIndicator }> {
+  if (!memory?.success?.indicators?.length) {
+    const fallback = detectSignificantDOMChange(beforeState, afterState);
+    return {
+      success: fallback.verified,
+      reason: fallback.details || 'No structured success indicators available',
+    };
+  }
+
+  for (const indicator of memory.success.indicators) {
+    const matched = await checkIndicator(indicator, beforeState, afterState);
+    if (matched) {
+      return { success: true, reason: indicator.description, indicator };
+    }
+  }
+
+  const failureIndicators = memory.success.failureIndicators || [];
+  for (const failPattern of failureIndicators) {
+    if (
+      afterState.visibleText.toLowerCase().includes(failPattern.toLowerCase()) ||
+      afterState.toastMessages.some(message => message.toLowerCase().includes(failPattern.toLowerCase()))
+    ) {
+      return { success: false, reason: `Failure detected: ${failPattern}` };
+    }
+  }
+
+  return { success: true, reason: 'No failure indicators detected' };
+}
+
+async function checkIndicator(
+  indicator: SuccessIndicator,
+  before: PageState,
+  after: PageState
+): Promise<boolean> {
+  switch (indicator.type) {
+    case 'text_appears':
+      return checkTextAppears(after, indicator.pattern).verified;
+    case 'text_disappears':
+      return checkTextDisappears(before, after, indicator.pattern).verified;
+    case 'url_changes':
+      return checkUrlChange(before.url, after.url, indicator.pattern).verified;
+    case 'element_appears':
+      return checkElementAppears(after, { element: indicator.element }).verified;
+    case 'element_disappears':
+      return checkElementDisappears(before, after, { element: indicator.element }).verified;
+    case 'toast_appears':
+      return checkToastAppears(after, undefined, indicator.pattern).verified;
+    case 'modal_closes':
+      return before.hasModal && !after.hasModal;
+    case 'count_changes':
+      return checkCountChange(before, after, {}).verified;
+    case 'navigation_complete':
+      return before.url !== after.url;
+    default:
+      return false;
   }
 }
 

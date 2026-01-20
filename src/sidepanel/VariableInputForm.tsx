@@ -4,13 +4,15 @@
  * A clean modal for entering workflow variable values before execution.
  */
 
-import { useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import type { WorkflowVariables, VariableDefinition } from '../lib/variable-detector';
+import type { WorkflowMemory } from '../lib/workflow-memory/types';
 
 interface VariableInputFormProps {
   variables: WorkflowVariables;
   workflowName: string;
-  onConfirm: (values: Record<string, string>) => void;
+  workflowMemory?: WorkflowMemory;
+  onConfirm: (values: Record<string, string> | Record<string, string>[]) => void;
   onCancel: () => void;
 }
 
@@ -70,9 +72,42 @@ function validateInput(value: string, inputType?: string, isDropdown?: boolean):
 export function VariableInputForm({
   variables,
   workflowName,
+  workflowMemory,
   onConfirm,
   onCancel,
 }: VariableInputFormProps) {
+  const repeatableFieldNames = useMemo(() => {
+    const repeatable = new Set<string>();
+    const inputs = [
+      ...(workflowMemory?.inputs?.required || []),
+      ...(workflowMemory?.inputs?.optional || []),
+    ];
+    for (const input of inputs) {
+      // Check for isArray property (exists on InputFieldWithArraySupport)
+      if ('isArray' in input && input.isArray) {
+        if (input.name) repeatable.add(input.name);
+        if (input.variableName) repeatable.add(input.variableName);
+      }
+    }
+    return repeatable;
+  }, [workflowMemory]);
+
+  const fixedVariables = useMemo(
+    () => variables.variables.filter(v =>
+      !repeatableFieldNames.has(v.fieldName) && !repeatableFieldNames.has(v.variableName)
+    ),
+    [variables.variables, repeatableFieldNames]
+  );
+
+  const repeatableVariables = useMemo(
+    () => variables.variables.filter(v =>
+      repeatableFieldNames.has(v.fieldName) || repeatableFieldNames.has(v.variableName)
+    ),
+    [variables.variables, repeatableFieldNames]
+  );
+
+  const hasRepeatableFields = repeatableVariables.length > 0;
+
   // Initialize values with defaults
   const [values, setValues] = useState<Record<string, string>>(() => {
     const initial: Record<string, string> = {};
@@ -87,8 +122,40 @@ export function VariableInputForm({
     return initial;
   });
 
+  const [fixedValues, setFixedValues] = useState<Record<string, string>>({});
+  const [repeatableEntries, setRepeatableEntries] = useState<Record<string, string>[]>([]);
+  const [activeEntryIndex, setActiveEntryIndex] = useState(0);
+
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    const initialValues: Record<string, string> = {};
+    for (const variable of variables.variables) {
+      if (variable.isDropdown && variable.options && variable.options.length > 0) {
+        const defaultInOptions = variable.options.includes(variable.defaultValue || '');
+        initialValues[variable.stepId] = defaultInOptions ? (variable.defaultValue || '') : variable.options[0];
+      } else {
+        initialValues[variable.stepId] = variable.defaultValue || '';
+      }
+    }
+    setValues(initialValues);
+
+    const initialFixed: Record<string, string> = {};
+    for (const variable of fixedVariables) {
+      initialFixed[variable.stepId] = initialValues[variable.stepId] || '';
+    }
+    setFixedValues(initialFixed);
+
+    const initialRepeatable: Record<string, string> = {};
+    for (const variable of repeatableVariables) {
+      initialRepeatable[variable.stepId] = initialValues[variable.stepId] || '';
+    }
+    setRepeatableEntries([initialRepeatable]);
+    setActiveEntryIndex(0);
+    setErrors({});
+    setTouched({});
+  }, [variables.variables, fixedVariables, repeatableVariables]);
 
   const handleChange = (stepId: string, value: string) => {
     setValues(prev => ({ ...prev, [stepId]: value }));
@@ -101,45 +168,164 @@ export function VariableInputForm({
     }
   };
 
-  const handleBlur = (variable: VariableDefinition) => {
+  const handleBlur = (variable: VariableDefinition, value: string) => {
     setTouched(prev => ({ ...prev, [variable.stepId]: true }));
-    const error = validateInput(values[variable.stepId], variable.inputType, variable.isDropdown);
+    const error = validateInput(value, variable.inputType, variable.isDropdown);
     if (error) {
       setErrors(prev => ({ ...prev, [variable.stepId]: error }));
     }
   };
 
+  const addEntry = () => {
+    const newEntry: Record<string, string> = {};
+    for (const variable of repeatableVariables) {
+      newEntry[variable.stepId] = variable.defaultValue || '';
+    }
+    setRepeatableEntries(prev => [...prev, newEntry]);
+    setActiveEntryIndex(repeatableEntries.length);
+  };
+
+  const removeEntry = (index: number) => {
+    if (repeatableEntries.length <= 1) return;
+    setRepeatableEntries(prev => prev.filter((_, i) => i !== index));
+    if (activeEntryIndex >= index && activeEntryIndex > 0) {
+      setActiveEntryIndex(activeEntryIndex - 1);
+    }
+  };
+
+  const transformEntry = (entry: Record<string, string>, vars: VariableDefinition[]) => {
+    const result: Record<string, string> = {};
+    for (const variable of vars) {
+      const value = entry[variable.stepId];
+      result[variable.stepId] = value;
+      result[variable.variableName] = value;
+    }
+    return result;
+  };
+
+  const renderVariableField = (
+    variable: VariableDefinition,
+    value: string,
+    onValueChange: (value: string) => void
+  ) => {
+    const inputType = getInputType(variable.inputType);
+    const hasError = touched[variable.stepId] && errors[variable.stepId];
+
+    return (
+      <div key={variable.stepId}>
+        <label
+          htmlFor={variable.stepId}
+          className="block text-sm font-medium text-foreground mb-1.5"
+        >
+          {variable.fieldName}
+        </label>
+
+        {variable.isDropdown && variable.options && variable.options.length > 0 ? (
+          <select
+            id={variable.stepId}
+            value={value ?? variable.options[0]}
+            onChange={(e) => {
+              onValueChange(e.target.value);
+              if (errors[variable.stepId]) {
+                setErrors(prev => {
+                  const next = { ...prev };
+                  delete next[variable.stepId];
+                  return next;
+                });
+              }
+            }}
+            onBlur={() => handleBlur(variable, value)}
+            className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
+              hasError
+                ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
+                : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
+            } focus:outline-none`}
+          >
+            {variable.options.map((option, idx) => (
+              <option key={idx} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <input
+            id={variable.stepId}
+            type={inputType}
+            value={value}
+            onChange={(e) => onValueChange(e.target.value)}
+            onBlur={() => handleBlur(variable, value)}
+            placeholder={`Enter ${variable.fieldName.toLowerCase()}`}
+            className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
+              hasError
+                ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
+                : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
+            } focus:outline-none placeholder:text-muted-foreground/50`}
+          />
+        )}
+
+        {hasError && (
+          <p className="text-xs text-red-500 mt-1.5">{errors[variable.stepId]}</p>
+        )}
+      </div>
+    );
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Validate all fields
-    const newErrors: Record<string, string> = {};
-    for (const variable of variables.variables) {
-      const error = validateInput(values[variable.stepId], variable.inputType, variable.isDropdown);
-      if (error) {
-        newErrors[variable.stepId] = error;
-      }
-    }
-
-    if (Object.keys(newErrors).length > 0) {
-      setErrors(newErrors);
-      const allTouched: Record<string, boolean> = {};
+    if (!hasRepeatableFields) {
+      // Validate all fields (single-entry mode)
+      const newErrors: Record<string, string> = {};
       for (const variable of variables.variables) {
-        allTouched[variable.stepId] = true;
+        const error = validateInput(values[variable.stepId], variable.inputType, variable.isDropdown);
+        if (error) {
+          newErrors[variable.stepId] = error;
+        }
       }
-      setTouched(allTouched);
+
+      if (Object.keys(newErrors).length > 0) {
+        setErrors(newErrors);
+        const allTouched: Record<string, boolean> = {};
+        for (const variable of variables.variables) {
+          allTouched[variable.stepId] = true;
+        }
+        setTouched(allTouched);
+        return;
+      }
+
+      const valuesForParent = transformEntry(values, variables.variables);
+      onConfirm(valuesForParent);
       return;
     }
 
-    // Transform values to include both stepId and variableName keys
-    const valuesForParent: Record<string, string> = {};
-    for (const variable of variables.variables) {
-      const value = values[variable.stepId];
-      valuesForParent[variable.stepId] = value;
-      valuesForParent[variable.variableName] = value;
+    // Validate fixed values
+    for (const variable of fixedVariables) {
+      const error = validateInput(fixedValues[variable.stepId], variable.inputType, variable.isDropdown);
+      if (error) {
+        setErrors({ [variable.stepId]: error });
+        return;
+      }
     }
 
-    onConfirm(valuesForParent);
+    // Validate all repeatable entries
+    for (let i = 0; i < repeatableEntries.length; i++) {
+      for (const variable of repeatableVariables) {
+        const error = validateInput(repeatableEntries[i][variable.stepId], variable.inputType, variable.isDropdown);
+        if (error) {
+          setActiveEntryIndex(i);
+          setErrors({ [variable.stepId]: error });
+          return;
+        }
+      }
+    }
+
+    const fixedEntry = transformEntry(fixedValues, fixedVariables);
+    const combinedEntries = repeatableEntries.map(entry => ({
+      ...fixedEntry,
+      ...transformEntry(entry, repeatableVariables),
+    }));
+
+    onConfirm(combinedEntries.length === 1 ? combinedEntries[0] : combinedEntries);
   };
 
   return (
@@ -164,68 +350,107 @@ export function VariableInputForm({
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
-          {variables.variables.map((variable) => {
-            const inputType = getInputType(variable.inputType);
-            const hasError = touched[variable.stepId] && errors[variable.stepId];
+          {!hasRepeatableFields && variables.variables.map((variable) =>
+            renderVariableField(variable, values[variable.stepId], (nextValue) => handleChange(variable.stepId, nextValue))
+          )}
 
-            return (
-              <div key={variable.stepId}>
-                <label
-                  htmlFor={variable.stepId}
-                  className="block text-sm font-medium text-foreground mb-1.5"
-                >
-                  {variable.fieldName}
-                </label>
-
-                {variable.isDropdown && variable.options && variable.options.length > 0 ? (
-                  <select
-                    id={variable.stepId}
-                    value={values[variable.stepId] ?? variable.options[0]}
-                    onChange={(e) => {
-                      setValues(prev => ({ ...prev, [variable.stepId]: e.target.value }));
-                      if (errors[variable.stepId]) {
-                        setErrors(prev => {
-                          const next = { ...prev };
-                          delete next[variable.stepId];
-                          return next;
-                        });
+          {hasRepeatableFields && (
+            <>
+              {fixedVariables.length > 0 && (
+                <div className="space-y-4 pb-4 border-b border-border/40">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                    One-time settings
+                  </p>
+                  {fixedVariables.map((variable) =>
+                    renderVariableField(
+                      variable,
+                      fixedValues[variable.stepId] || '',
+                      (nextValue) => {
+                        setFixedValues(prev => ({ ...prev, [variable.stepId]: nextValue }));
+                        if (errors[variable.stepId]) {
+                          setErrors(prev => {
+                            const next = { ...prev };
+                            delete next[variable.stepId];
+                            return next;
+                          });
+                        }
                       }
-                    }}
-                    onBlur={() => handleBlur(variable)}
-                    className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
-                      hasError
-                        ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
-                        : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
-                    } focus:outline-none`}
-                  >
-                    {variable.options.map((option, idx) => (
-                      <option key={idx} value={option}>
-                        {option}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <input
-                    id={variable.stepId}
-                    type={inputType}
-                    value={values[variable.stepId]}
-                    onChange={(e) => handleChange(variable.stepId, e.target.value)}
-                    onBlur={() => handleBlur(variable)}
-                    placeholder={`Enter ${variable.fieldName.toLowerCase()}`}
-                    className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
-                      hasError
-                        ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
-                        : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
-                    } focus:outline-none placeholder:text-muted-foreground/50`}
-                  />
-                )}
+                    )
+                  )}
+                </div>
+              )}
 
-                {hasError && (
-                  <p className="text-xs text-red-500 mt-1.5">{errors[variable.stepId]}</p>
-                )}
-              </div>
-            );
-          })}
+              {repeatableVariables.length > 0 && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Items to add
+                    </p>
+                    <button
+                      type="button"
+                      onClick={addEntry}
+                      className="text-sm text-primary hover:underline"
+                    >
+                      + Add another
+                    </button>
+                  </div>
+
+                  <div className="flex gap-2 flex-wrap">
+                    {repeatableEntries.map((_, index) => (
+                      <div
+                        key={index}
+                        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg cursor-pointer ${
+                          index === activeEntryIndex
+                            ? 'bg-primary text-primary-foreground'
+                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                        }`}
+                        onClick={() => setActiveEntryIndex(index)}
+                      >
+                        <span>Item {index + 1}</span>
+                        {repeatableEntries.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              removeEntry(index);
+                            }}
+                          >
+                            <span className="sr-only">Remove</span>
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+
+                  {repeatableVariables.map((variable) =>
+                    renderVariableField(
+                      variable,
+                      repeatableEntries[activeEntryIndex]?.[variable.stepId] || '',
+                      (nextValue) => {
+                        setRepeatableEntries(prev => prev.map((entry, i) =>
+                          i === activeEntryIndex ? { ...entry, [variable.stepId]: nextValue } : entry
+                        ));
+                        if (errors[variable.stepId]) {
+                          setErrors(prev => {
+                            const next = { ...prev };
+                            delete next[variable.stepId];
+                            return next;
+                          });
+                        }
+                      }
+                    )
+                  )}
+
+                  {repeatableEntries.length > 1 && (
+                    <p className="text-sm text-muted-foreground">
+                      Will run {repeatableEntries.length} times with different values
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
 
           {/* Actions */}
           <div className="flex gap-3 pt-4">

@@ -66,6 +66,9 @@ export class RecordingManager {
   private copyHandler: ((event: ClipboardEvent) => void) | null = null;
   private pasteHandler: ((event: ClipboardEvent) => void) | null = null;
   private scrollDebounceTimer: number | null = null;
+  // Modal/container scroll support: Track scroll listeners on elements
+  private elementScrollListeners: Map<Element, (event: Event) => void> = new Map();
+  private scrollableMutationObserver: MutationObserver | null = null;
   private lastScrollStep: { scrollX: number; scrollY: number; timestamp: number; container?: Element } | null = null;
   private pendingScrollEvent: Event | null = null; // Store the scroll event for processing after debounce
   private currentUrl: string = window.location.href;
@@ -203,7 +206,12 @@ export class RecordingManager {
 
     // Setup scroll handler - debounced to avoid too many events
     this.scrollHandler = this.handleScroll.bind(this);
-    window.addEventListener('scroll', this.scrollHandler, true); // Capture phase for all scroll events
+    window.addEventListener('scroll', this.scrollHandler, true); // Capture phase for window scroll
+    
+    // 🎯 MODAL SCROLL FIX: Also listen for scroll events on scrollable elements (modals, dialogs, etc.)
+    // Scroll events do NOT bubble, so window listener won't catch scrolls inside modal containers
+    this.attachScrollListenersToScrollableElements();
+    this.startScrollableMutationObserver();
 
     // Setup copy handler to track clipboard operations (Phase 6: Data lineage)
     // Use capture phase (true) to ensure we catch events even if page stops propagation
@@ -421,6 +429,9 @@ export class RecordingManager {
       window.removeEventListener('scroll', this.scrollHandler, true);
       this.scrollHandler = null;
     }
+    
+    // 🎯 MODAL SCROLL FIX: Clean up element scroll listeners and mutation observer
+    this.stopScrollableTracking();
 
     if (this.copyHandler) {
       document.removeEventListener('copy', this.copyHandler, true);
@@ -2695,6 +2706,160 @@ export class RecordingManager {
         console.error('Error handling scroll event:', error);
       }
     }, this.SCROLL_DEBOUNCE_DELAY);
+  }
+
+  /**
+   * 🎯 MODAL & DROPDOWN SCROLL FIX: Find and attach scroll listeners to scrollable elements
+   * This captures scrolls inside modals, dialogs, dropdowns, and other scrollable containers
+   */
+  private attachScrollListenersToScrollableElements(): void {
+    const scrollableSelectors = [
+      // Modals and dialogs
+      '[role="dialog"]',
+      '[aria-modal="true"]',
+      '.modal',
+      '[class*="Modal"]',
+      '[class*="modal"]',
+      '[class*="dialog"]',
+      '[class*="Dialog"]',
+      '[class*="popup"]',
+      '[class*="Popup"]',
+      // Dropdowns and menus - CRITICAL for capturing dropdown scrolls!
+      '[role="listbox"]',
+      '[role="menu"]',
+      '[role="menubar"]',
+      '[role="combobox"]',
+      '[class*="dropdown"]',
+      '[class*="Dropdown"]',
+      '[class*="select"]',
+      '[class*="Select"]',
+      '[class*="listbox"]',
+      '[class*="Listbox"]',
+      '[class*="menu"]',
+      '[class*="Menu"]',
+      // MUI/Ant/Chakra specific
+      '.MuiMenu-list',
+      '.MuiAutocomplete-listbox',
+      '.ant-select-dropdown',
+      '.ant-dropdown-menu',
+      '.chakra-menu__menu-list',
+    ];
+
+    for (const selector of scrollableSelectors) {
+      try {
+        const elements = document.querySelectorAll(selector);
+        for (const element of elements) {
+          this.attachScrollListenerToElement(element);
+        }
+      } catch {
+        // Selector might be invalid
+      }
+    }
+
+    // Check for any element with scrollable overflow
+    const allElements = document.querySelectorAll('*');
+    for (const element of allElements) {
+      const style = window.getComputedStyle(element);
+      const isScrollable = (style.overflow === 'auto' || style.overflow === 'scroll' || 
+                           style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                           element.scrollHeight > element.clientHeight + 50;
+      
+      if (isScrollable && !this.elementScrollListeners.has(element)) {
+        this.attachScrollListenerToElement(element);
+      }
+    }
+
+    console.log(`📜 GhostWriter: Attached scroll listeners to ${this.elementScrollListeners.size} scrollable elements`);
+  }
+
+  private attachScrollListenerToElement(element: Element): void {
+    if (this.elementScrollListeners.has(element)) {
+      return;
+    }
+
+    const listener = (event: Event) => {
+      if (!this.isRecording) return;
+      this.handleScroll(event);
+    };
+
+    element.addEventListener('scroll', listener, { passive: true });
+    this.elementScrollListeners.set(element, listener);
+  }
+
+  private startScrollableMutationObserver(): void {
+    if (this.scrollableMutationObserver) {
+      return;
+    }
+
+    this.scrollableMutationObserver = new MutationObserver((mutations) => {
+      if (!this.isRecording) return;
+
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList') {
+          for (const node of mutation.addedNodes) {
+            if (node instanceof Element) {
+              this.checkAndAttachScrollListener(node);
+              const children = node.querySelectorAll('*');
+              for (const child of children) {
+                this.checkAndAttachScrollListener(child);
+              }
+            }
+          }
+        }
+      }
+    });
+
+    this.scrollableMutationObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    console.log('📜 GhostWriter: Started MutationObserver for new scrollable elements');
+  }
+
+  private checkAndAttachScrollListener(element: Element): void {
+    const style = window.getComputedStyle(element);
+    const role = element.getAttribute('role');
+    const className = element.className?.toString() || '';
+
+    // Check for modals/dialogs
+    const isModalType = role === 'dialog' || element.getAttribute('aria-modal') === 'true' ||
+                       className.includes('modal') || className.includes('Modal') ||
+                       className.includes('dialog') || className.includes('Dialog');
+
+    // Check for dropdowns/menus - CRITICAL for capturing dropdown scrolls!
+    const isDropdownType = role === 'listbox' || role === 'menu' || role === 'menubar' ||
+                          className.includes('dropdown') || className.includes('Dropdown') ||
+                          className.includes('listbox') || className.includes('Listbox') ||
+                          className.includes('menu') || className.includes('Menu') ||
+                          className.includes('select') || className.includes('Select') ||
+                          className.includes('MuiMenu') || className.includes('ant-select') ||
+                          className.includes('ant-dropdown');
+
+    // Check if element is scrollable
+    const isScrollable = (style.overflow === 'auto' || style.overflow === 'scroll' || 
+                         style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+                         element.scrollHeight > element.clientHeight + 10; // Lower threshold for dropdowns
+
+    if ((isModalType || isDropdownType || isScrollable) && !this.elementScrollListeners.has(element)) {
+      this.attachScrollListenerToElement(element);
+      const typeLabel = isDropdownType ? 'dropdown' : isModalType ? 'modal' : 'scrollable';
+      console.log(`📜 GhostWriter: Attached scroll listener to new ${typeLabel}: ${element.tagName}.${className.split(' ')[0]}`);
+    }
+  }
+
+  private stopScrollableTracking(): void {
+    if (this.scrollableMutationObserver) {
+      this.scrollableMutationObserver.disconnect();
+      this.scrollableMutationObserver = null;
+    }
+
+    for (const [element, listener] of this.elementScrollListeners) {
+      element.removeEventListener('scroll', listener);
+    }
+    this.elementScrollListeners.clear();
+
+    console.log('📜 GhostWriter: Stopped scrollable element tracking');
   }
 
   /**

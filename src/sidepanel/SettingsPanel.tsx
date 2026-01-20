@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { CorrectionMemory } from '../lib/correction-memory';
+import type { UserContext } from '../lib/user-context-storage';
 import { EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep } from '../types/workflow';
 import type { CorrectionEntry } from '../types/visual';
@@ -14,6 +15,8 @@ interface SettingsPanelProps {
   setCorrectionModeStep: (step: string | null) => void;
   handleExportJSON: (steps?: WorkflowStep[]) => void;
   clearWorkflowSteps: () => void;
+  userContext?: UserContext | null;
+  onEditUserContext: () => void;
   onClose: () => void;
 }
 
@@ -27,6 +30,8 @@ export function SettingsPanel({
   setCorrectionModeStep,
   handleExportJSON,
   clearWorkflowSteps,
+  userContext,
+  onEditUserContext,
   onClose,
 }: SettingsPanelProps) {
   const [showDevOptions, setShowDevOptions] = useState(false);
@@ -45,6 +50,33 @@ export function SettingsPanel({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+        </div>
+
+        {/* Role & Work Context */}
+        <div className="mb-5 p-5 bg-muted/30 rounded-2xl">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-semibold text-foreground">Role & Work Context</h3>
+            <button
+              onClick={onEditUserContext}
+              className="px-3 py-1.5 text-xs bg-primary/10 text-primary rounded-lg font-medium hover:bg-primary/20 transition-colors"
+            >
+              {userContext ? 'Edit' : 'Set'}
+            </button>
+          </div>
+          {userContext ? (
+            <div className="space-y-2 text-sm text-foreground">
+              <div>
+                <span className="text-muted-foreground">Identity:</span> {userContext.identity}
+              </div>
+              <div>
+                <span className="text-muted-foreground">Focus:</span> {userContext.focus}
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Not set. Add your role and typical tasks to improve AI context.
+            </p>
+          )}
         </div>
 
         {/* Actions */}

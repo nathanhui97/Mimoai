@@ -15,6 +15,7 @@ import { PIIScrubber } from './pii-scrubber';
 import { AICache } from './ai-cache';
 import { aiConfig } from './ai-config';
 import { CorrectionMemory } from './correction-memory';
+import { UserContextStorage } from './user-context-storage';
 
 export interface ElementFindingResult {
   candidateIndex?: number;
@@ -536,13 +537,14 @@ export class AIService {
 
     try {
       const fetchStartTime = performance.now();
+      const userContext = await UserContextStorage.getUserContext();
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${config.supabaseAnonKey}`,
         },
-        body: JSON.stringify({ step }),
+        body: JSON.stringify({ step, userContext: userContext || undefined }),
         signal: controller.signal,
       });
 

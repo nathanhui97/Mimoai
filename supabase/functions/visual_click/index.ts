@@ -14,10 +14,10 @@
 import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const VERSION = 'v2.1-correct-model';
+const VERSION = 'v3.0-computer-use';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-// Using gemini-3-flash-preview - same model as recover_element function
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
+// Using Gemini 2.5 Computer Use model for screenshot-based execution
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-computer-use-preview-10-2025:generateContent';
 
 console.log('visual_click Edge Function', VERSION, 'starting...');
 

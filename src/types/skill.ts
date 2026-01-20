@@ -352,8 +352,10 @@ export interface ParsedIntent {
   objects: string[];               // ["promotion", "item"]
   parameters: Record<string, string>;  // { itemName: "honey mustard", count: "3" }
   context: string[];               // Inferred context
-  selectionMode?: 'first' | 'all' | 'matching' | 'count';
+  selectionMode?: 'first' | 'all' | 'matching' | 'count' | 'forEach';
   count?: number;                  // For count mode
+  itemList?: string[];             // ["Alice", "Bob", "Carol"]
+  iterationVariable?: string;      // Which variable to substitute
 
   // Off-topic detection (for non-automation requests)
   isOffTopic?: boolean;            // True if request is not browser automation related

@@ -14,7 +14,8 @@ import { serve } from 'https://deno.land/std@0.168.0/http/server.ts';
 
 const VERSION = 'v1.0.0';
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY');
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
+// Using Gemini 3.0 Flash for text-based reasoning
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent';
 
 console.log('widget_identifier Edge Function', VERSION, 'starting...');
 
