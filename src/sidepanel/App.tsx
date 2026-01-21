@@ -1597,6 +1597,28 @@ function App() {
       const pendingMemory = (window as any).__pendingWorkflowMemory;
       delete (window as any).__pendingWorkflowMemory;
 
+      // Get formatted Q&A answers if user completed clarifying questions
+      const formattedClarifications = (aiQuestionAnswers as any)?._formatted as Array<{
+        questionId: string;
+        category: 'intent' | 'context' | 'scope' | 'triggers';
+        question: string;
+        answerValue: string;
+        answerText: string;
+        customAnswer?: string;
+      }> | undefined;
+
+      // Build clarifications object if we have answers
+      const clarifications = formattedClarifications && formattedClarifications.length > 0
+        ? {
+            collectedAt: Date.now(),
+            items: formattedClarifications,
+          }
+        : undefined;
+
+      if (clarifications) {
+        console.log('[SaveWorkflow] ✅ Attaching', clarifications.items.length, 'Q&A clarifications to memory');
+      }
+
       const workflow: SavedWorkflow = {
         id: tempWorkflow.id,
         name: workflowName.trim(),
@@ -1617,7 +1639,12 @@ function App() {
         // Include AI analysis if completed (runs in background after recording stops)
         aiAnalysis: currentWorkflowAIAnalysis || undefined,
         // Include memory from unified analysis (blocks, triggers, inputs, etc.)
-        memory: pendingMemory ? { ...pendingMemory, generatedAt: Date.now() } : undefined,
+        // Also attach Q&A clarifications if user answered questions
+        memory: pendingMemory
+          ? { ...pendingMemory, generatedAt: Date.now(), clarifications }
+          : clarifications
+            ? { clarifications, generatedAt: Date.now() } as any
+            : undefined,
       };
 
       // Log AI analysis and memory status

@@ -511,40 +511,162 @@ interface SkillIndex {
 
 ## Implementation Phases
 
-### Phase 1: AI Questions After Recording ← CURRENT FOCUS
-- [ ] Analyze recording to identify uncertain areas
-- [ ] Generate targeted questions (not checklist)
-- [ ] Build Q&A UI in side panel
-- [ ] Store answers as clarifications
+### Key Decisions (January 2025)
 
-### Phase 2: Skill Data Model
-- [ ] Define Skill interface
-- [ ] Create skill from workflow + Q&A answers
-- [ ] Build skill index for fast lookup
-- [ ] Migration path from old workflows
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| **Data Model** | Add `getSkill()` getter | Keep SavedWorkflow as storage, add unified Skill view |
+| **Milestone Detection** | AI detects from recording | Let AI identify logical phases automatically |
+| **Transition Strategy** | Replace directly | No users yet, go straight to goal-oriented execution |
+| **Q&A Bug** | Fixed | Clarifications now saved to `memory.clarifications` |
 
-### Phase 3: AI Skill Awareness
-- [ ] Load all skills into AI context
-- [ ] Match natural language to skills
-- [ ] AI knows what it can/cannot do
-- [ ] Suggest relevant skills in chat
+### Phase Dependency Graph
 
-### Phase 4: Goal-Oriented Execution
-- [ ] Rewrite executor to pursue goals
-- [ ] Send skill knowledge to LLM (not just steps)
-- [ ] Implement success verification
-- [ ] Handle adaptation when page differs
+```
+         ┌──────────────────┐
+         │ Phase 1: Skill   │
+         │ Foundation       │
+         └────────┬─────────┘
+                  │
+    ┌─────────────┴─────────────┐
+    ↓                           ↓
+┌──────────────┐       ┌──────────────┐
+│ Phase 2:     │       │ Phase 4:     │
+│ Learning     │       │ Awareness    │
+└──────┬───────┘       └──────────────┘
+       │
+       ↓
+┌──────────────┐
+│ Phase 3:     │
+│ Execution    │
+└──────┬───────┘
+       │
+    ┌──┴──┐
+    ↓     ↓
+┌──────┐ ┌──────┐
+│ P5   │ │ P6   │
+│ Help │ │ Multi│
+└──────┘ └──────┘
+```
 
-### Phase 5: Multi-Item Handling
-- [ ] Natural detection of multiple items
-- [ ] Execute skill multiple times
-- [ ] Progress reporting for batch operations
+---
 
-### Phase 6: Continuous Learning
-- [ ] Learn from execution successes/failures
-- [ ] Update confidence based on results
-- [ ] Suggest skill refinements
-- [ ] Remember site-specific adaptations
+### Phase 1: Skill Foundation
+
+**Goal**: Unified Skill view over existing SavedWorkflow
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Define Skill interface | TypeScript types matching vision doc | [ ] |
+| Create `getSkill()` method | Returns unified Skill view from SavedWorkflow | [ ] |
+| Create SkillStorage helper | CRUD operations using Skill view | [ ] |
+| Add SkillIndex | Fast lookup by triggers/domain | [ ] |
+
+**Key Files**:
+- `src/lib/skill/types.ts` (NEW)
+- `src/lib/skill/skill-view.ts` (NEW) - getSkill() implementation
+- `src/lib/skill/skill-index.ts` (NEW)
+
+**Deliverable**: `getSkill(workflow)` returns complete Skill object
+
+---
+
+### Phase 2: Enhanced Learning Flow
+
+**Goal**: Recording produces complete Skill knowledge
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Update generate_workflow_memory | Add milestone detection to AI prompt | [ ] |
+| Wire Q&A to Skill.knowledge | Clarifications → knowledge.rules | [x] Fixed |
+| Add knowledge extraction | Convert Q&A answers to actionable rules | [ ] |
+| Update post-recording UI | Show skill summary after teaching | [ ] |
+
+**Key Files**:
+- `supabase/functions/generate_workflow_memory/index.ts`
+- `src/sidepanel/App.tsx` (Q&A flow)
+
+**Deliverable**: After recording + Q&A, Skill has milestones and knowledge
+
+---
+
+### Phase 3: Goal-Oriented Execution ← BIGGEST PIECE
+
+**Goal**: Replace step-replay with goal-pursuit
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Build ExecutionEngine | Observe→Think→Act→Reflect loop | [ ] |
+| Create goal-oriented prompts | LLM pursues goal, not "do step 3" | [ ] |
+| Build ProgressTracker | Milestone-based progress | [ ] |
+| Build SuccessVerifier | Check success criteria from Skill | [ ] |
+| Build PageState builder | Combined DOM + Visual state | [ ] |
+| Integrate with existing tools | Reuse dom_agent, computer_use | [ ] |
+
+**Key Files**:
+- `src/lib/execution/engine.ts` (NEW)
+- `src/lib/execution/progress-tracker.ts` (NEW)
+- `src/lib/execution/page-state.ts` (NEW)
+- `supabase/functions/goal_execution/index.ts` (NEW)
+
+**Deliverable**: Execute skill by pursuing goal, verify success
+
+---
+
+### Phase 4: Skill Awareness & Matching
+
+**Goal**: AI knows all skills, matches natural language requests
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Build semantic skill matching | Natural language → right skill | [ ] |
+| Implement "What can you do?" | AI lists capabilities | [ ] |
+| Handle ambiguous requests | Multiple matches → clarify | [ ] |
+| Handle unknown requests | "I haven't learned that" | [ ] |
+
+**Key Files**:
+- `src/lib/skill/skill-matcher.ts` (NEW)
+- `supabase/functions/match_skill/index.ts` (NEW or update match_workflow)
+
+**Deliverable**: "Add John to CRM" → AI finds and runs "Add Contact" skill
+
+---
+
+### Phase 5: Help System
+
+**Goal**: AI asks for help when stuck, learns from corrections
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Build stuck detection | After N failed attempts | [ ] |
+| Generate help requests | "I need help finding..." | [ ] |
+| Process user guidance | Continue after help | [ ] |
+| Learn from corrections | Remember for next time | [ ] |
+
+**Key Files**:
+- `src/lib/execution/help-system.ts` (NEW)
+- `src/sidepanel/HelpRequest.tsx` (NEW)
+
+**Deliverable**: AI asks user when stuck, continues after help
+
+---
+
+### Phase 6: Multi-Item Scaling
+
+**Goal**: Handle "add Alice, Bob, Carol" naturally
+
+| Task | Description | Status |
+|------|-------------|--------|
+| Array variable detection | Recognize lists in user input | [ ] |
+| Batch execution | Run skill N times | [ ] |
+| Batch progress UI | "Added 2/5 contacts" | [ ] |
+| Handle partial failures | "Added 4/5, failed on Carol" | [ ] |
+
+**Key Files**:
+- `src/lib/variable-extractor.ts` (enhance)
+- `src/lib/execution/batch-executor.ts` (NEW)
+
+**Deliverable**: Single request handles multiple items
 
 ---
 
