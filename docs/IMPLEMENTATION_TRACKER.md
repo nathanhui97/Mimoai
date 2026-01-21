@@ -608,9 +608,30 @@ console.log('Batch result:', result);
 - **Total tests: 41 passing** (21 Phase 1 + 20 Phase 2)
 - Ready for Phase 3: Goal-Oriented Execution
 
+### 2025-01-21: Phase 2 Debugging - Phases Not Appearing
+- **Issue**: User reported phases were showing as empty `[]` despite good elevator text
+- **Root Cause Investigation**:
+  1. Discovered actual code path is `post-recording-analyzer.ts` → `callUnifiedAIService()`
+  2. Edge function returns `{ analysis, memory }` directly to client
+  3. AI was generating empty phases AND empty blocks
+  4. The `ensurePhasesExist()` fallback wasn't synthesizing correctly
+
+- **Fixes Applied**:
+  1. Added defensive check for invalid `stepCount` (NaN protection)
+  2. Added extensive console logging to trace AI response
+  3. Fixed off-by-one error in phase synthesis index calculation
+  4. Added final safeguard to guarantee phases is never empty
+  5. Redeployed edge function (version 5)
+
+- **Logging Added** to edge function:
+  - What AI returns for phases
+  - What AI returns for blocks
+  - What `ensurePhasesExist` decides to do
+  - Final phases count
+
+- **To Test**: Record a new workflow and run `MimoDebug.checkPhase2()` to verify phases are populated
+
 ### Next Session
-- **Manual validation**: Record a workflow and verify:
-  - Memory has `phases` array
-  - Post-recording UI shows skill preview
-  - Q&A answers become knowledge rules
+- **Verify fix**: Record a workflow and confirm phases are no longer empty
+- **Check Supabase logs**: Review console output to see what AI is generating
 - If validation passes, start Phase 3: Goal-Oriented Execution

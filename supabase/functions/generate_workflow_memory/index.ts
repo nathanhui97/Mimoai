@@ -426,6 +426,13 @@ function parseUnifiedResponse(responseText: string, currentMemory: CurrentMemory
 
     const parsed = JSON.parse(jsonStr);
 
+    console.log('[GenerateMemory] Parsed AI response keys:', Object.keys(parsed));
+    if (parsed.memory?.understanding) {
+      console.log('[GenerateMemory] AI returned understanding with keys:', Object.keys(parsed.memory.understanding));
+      console.log('[GenerateMemory] AI phases:', JSON.stringify(parsed.memory.understanding.phases)?.substring(0, 500));
+      console.log('[GenerateMemory] AI blocks:', JSON.stringify(parsed.memory.understanding.blocks)?.substring(0, 500));
+    }
+
     // Build the result
     const result: any = {};
 
@@ -456,8 +463,18 @@ function parseUnifiedResponse(responseText: string, currentMemory: CurrentMemory
 
     // Ensure phases exist in understanding (fallback to blocks if needed)
     if (result.memory?.understanding) {
+      console.log('[GenerateMemory] Calling ensurePhasesExist with stepCount:', stepCount);
       result.memory.understanding = ensurePhasesExist(result.memory.understanding, stepCount);
+    } else {
+      console.log('[GenerateMemory] WARNING: No understanding in result.memory, creating default');
+      // Create a minimal memory with understanding if none exists
+      if (!result.memory) {
+        result.memory = {};
+      }
+      result.memory.understanding = ensurePhasesExist({}, stepCount);
     }
+
+    console.log('[GenerateMemory] Final phases count:', result.memory?.understanding?.phases?.length);
 
     return result;
   } catch (error) {
@@ -586,8 +603,18 @@ function deepMerge(target: any, source: any): any {
  * If both are missing, synthesize basic phases from step count.
  */
 function ensurePhasesExist(understanding: any, stepCount: number): any {
+  // Ensure stepCount is a valid positive number
+  const safeStepCount = (typeof stepCount === 'number' && !isNaN(stepCount) && stepCount > 0)
+    ? stepCount
+    : 1;
+
+  console.log('[GenerateMemory] ensurePhasesExist called with stepCount:', stepCount, '-> safeStepCount:', safeStepCount);
+  console.log('[GenerateMemory] Current phases:', JSON.stringify(understanding.phases));
+  console.log('[GenerateMemory] Current blocks:', JSON.stringify(understanding.blocks));
+
   // If phases already exist and are valid, return as-is
   if (understanding.phases && Array.isArray(understanding.phases) && understanding.phases.length > 0) {
+    console.log('[GenerateMemory] Using existing phases (count:', understanding.phases.length, ')');
     // Normalize phases to ensure they have required fields
     understanding.phases = understanding.phases.map((phase: any, index: number) => ({
       name: phase.name || `Phase ${index + 1}`,
@@ -600,7 +627,7 @@ function ensurePhasesExist(understanding: any, stepCount: number): any {
 
   // If we have blocks, convert them to phases
   if (understanding.blocks && Array.isArray(understanding.blocks) && understanding.blocks.length > 0) {
-    console.log('[GenerateMemory] Converting blocks to phases');
+    console.log('[GenerateMemory] Converting', understanding.blocks.length, 'blocks to phases');
     understanding.phases = understanding.blocks.map((block: any, index: number) => ({
       name: block.name || `Phase ${index + 1}`,
       purpose: block.purpose || block.name || 'Complete this phase',
@@ -611,27 +638,27 @@ function ensurePhasesExist(understanding: any, stepCount: number): any {
   }
 
   // No phases or blocks - synthesize basic phases from step count
-  console.log('[GenerateMemory] Synthesizing default phases for', stepCount, 'steps');
+  console.log('[GenerateMemory] Synthesizing default phases for', safeStepCount, 'steps');
 
-  if (stepCount <= 1) {
+  if (safeStepCount <= 1) {
     understanding.phases = [{
       name: 'Complete Task',
       purpose: 'Execute the recorded action',
       stepIndices: [0],
       criticality: 'critical',
     }];
-  } else if (stepCount <= 3) {
+  } else if (safeStepCount <= 3) {
     // Small workflow: single phase
     understanding.phases = [{
       name: 'Execute Task',
       purpose: 'Complete all recorded steps',
-      stepIndices: Array.from({ length: stepCount }, (_, i) => i),
+      stepIndices: Array.from({ length: safeStepCount }, (_, i) => i),
       criticality: 'critical',
     }];
   } else {
     // Larger workflow: synthesize 3 phases (Setup, Main Work, Finish)
-    const setupEnd = Math.max(0, Math.floor(stepCount * 0.2));
-    const mainEnd = Math.max(setupEnd + 1, Math.floor(stepCount * 0.8));
+    const setupEnd = Math.max(0, Math.floor(safeStepCount * 0.2));
+    const mainEnd = Math.max(setupEnd + 1, Math.floor(safeStepCount * 0.8));
 
     understanding.phases = [
       {
@@ -643,17 +670,29 @@ function ensurePhasesExist(understanding: any, stepCount: number): any {
       {
         name: 'Main Task',
         purpose: 'Perform the core actions',
-        stepIndices: Array.from({ length: mainEnd - setupEnd }, (_, i) => setupEnd + 1 + i),
+        stepIndices: Array.from({ length: mainEnd - setupEnd - 1 }, (_, i) => setupEnd + 1 + i),
         criticality: 'critical',
       },
       {
         name: 'Complete',
         purpose: 'Finalize and save the work',
-        stepIndices: Array.from({ length: stepCount - mainEnd }, (_, i) => mainEnd + i),
+        stepIndices: Array.from({ length: safeStepCount - mainEnd }, (_, i) => mainEnd + i),
         criticality: 'critical',
       },
     ].filter(p => p.stepIndices.length > 0);
   }
 
+  // Final safeguard - if phases is STILL empty after all fallbacks, create a minimal default
+  if (!understanding.phases || understanding.phases.length === 0) {
+    console.log('[GenerateMemory] FALLBACK: Creating minimal default phase');
+    understanding.phases = [{
+      name: 'Execute Workflow',
+      purpose: 'Complete the recorded workflow steps',
+      stepIndices: Array.from({ length: safeStepCount }, (_, i) => i),
+      criticality: 'critical',
+    }];
+  }
+
+  console.log('[GenerateMemory] Final phases count:', understanding.phases.length);
   return understanding;
 }
