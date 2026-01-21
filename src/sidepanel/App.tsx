@@ -45,6 +45,90 @@ import type { CorrectionEntry } from '../types/visual';
 import type { SafetyDecision } from '../types/ai';
 import type { StepAnnotation } from '../types/skill';
 // import { SkillStorage } from '../lib/skill-storage';
+
+// ============================================================================
+// Skill Preview Helpers (for post-recording UI)
+// ============================================================================
+
+/**
+ * Synthesize milestones from workflow steps for preview
+ */
+function synthesizeMilestones(steps: WorkflowStep[]): Array<{ name: string; stepCount: number }> {
+  if (steps.length === 0) return [];
+  if (steps.length <= 2) {
+    return [{ name: 'Complete Task', stepCount: steps.length }];
+  }
+
+  const milestones: Array<{ name: string; stepCount: number }> = [];
+
+  // Find navigation/setup steps at the start
+  let setupEnd = 0;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (step.type === 'NAVIGATION' || step.type === 'CLICK') {
+      setupEnd = i;
+      if (i + 1 < steps.length && steps[i + 1].type === 'INPUT') {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+
+  // Find submit/save step at the end
+  let submitStart = steps.length;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i];
+    if (step.type === 'CLICK' && isWorkflowStepPayload(step.payload)) {
+      const text = (step.payload.elementText || step.payload.label || '').toLowerCase();
+      if (text.includes('save') || text.includes('submit') || text.includes('create') || text.includes('add')) {
+        submitStart = i;
+        break;
+      }
+    }
+  }
+
+  // Build milestones
+  if (setupEnd > 0) {
+    milestones.push({ name: 'Open Form', stepCount: setupEnd + 1 });
+  }
+
+  const mainStart = setupEnd > 0 ? setupEnd + 1 : 0;
+  const mainEnd = submitStart < steps.length ? submitStart : steps.length;
+  if (mainEnd > mainStart) {
+    milestones.push({ name: 'Fill Details', stepCount: mainEnd - mainStart });
+  }
+
+  if (submitStart < steps.length) {
+    milestones.push({ name: 'Save', stepCount: steps.length - submitStart });
+  }
+
+  if (milestones.length === 0) {
+    milestones.push({ name: 'Complete Task', stepCount: steps.length });
+  }
+
+  return milestones;
+}
+
+/**
+ * Generate trigger phrase suggestions from workflow name
+ */
+function suggestTriggerPhrases(name: string): string[] {
+  const normalized = name.toLowerCase().trim();
+  if (!normalized) return [];
+
+  const phrases: string[] = [normalized];
+
+  const actionWords = ['add', 'create', 'new', 'update', 'edit', 'delete', 'remove', 'fill', 'enter', 'submit'];
+  const startsWithAction = actionWords.some(a => normalized.startsWith(a));
+
+  if (!startsWithAction) {
+    phrases.push(`do ${normalized}`);
+  }
+
+  return phrases.slice(0, 2);
+}
+
 function App() {
   const {
     state,
@@ -2994,6 +3078,61 @@ function App() {
                   }
                 }}
               />
+
+              {/* Skill Preview - What I'll Learn */}
+              {workflowSteps.length > 0 && (
+                <div className="mb-4 p-3 bg-purple-50 dark:bg-purple-900/20 rounded-xl border border-purple-200 dark:border-purple-800">
+                  <h4 className="text-xs font-medium text-purple-800 dark:text-purple-200 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                    </svg>
+                    What I'll Learn
+                  </h4>
+
+                  {/* Milestones */}
+                  {(() => {
+                    const milestones = synthesizeMilestones(workflowSteps);
+                    return milestones.length > 0 && (
+                      <div className="mb-2">
+                        <div className="flex items-center gap-1 flex-wrap">
+                          {milestones.map((m, i) => (
+                            <div key={i} className="flex items-center">
+                              <span className="px-2 py-0.5 text-xs bg-purple-100 dark:bg-purple-800/50 text-purple-700 dark:text-purple-200 rounded-full">
+                                {m.name}
+                              </span>
+                              {i < milestones.length - 1 && (
+                                <svg className="w-3 h-3 text-purple-400 mx-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                </svg>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Detected Inputs */}
+                  {currentWorkflowVariables && currentWorkflowVariables.variables.length > 0 && (
+                    <div className="mb-2">
+                      <span className="text-xs text-purple-600 dark:text-purple-300">Inputs: </span>
+                      <span className="text-xs text-purple-800 dark:text-purple-100">
+                        {currentWorkflowVariables.variables.map(v => v.fieldName).join(', ')}
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Trigger Phrases */}
+                  {workflowName.trim() && (
+                    <div>
+                      <span className="text-xs text-purple-600 dark:text-purple-300">Say: </span>
+                      <span className="text-xs text-purple-800 dark:text-purple-100 italic">
+                        "{suggestTriggerPhrases(workflowName)[0] || workflowName.toLowerCase()}"
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* AI Analysis Status */}
               <div className="mb-4 p-3 rounded-xl text-sm">
