@@ -2,13 +2,108 @@
  * Post-Recording Confirmation Component
  *
  * A simple confirmation UI that replaces the complex chat-based flow.
- * Shows workflow name input, spreadsheet column naming, and collapsible steps.
+ * Shows workflow name input, spreadsheet column naming, skill preview, and collapsible steps.
  */
 
 import { useState, useMemo } from 'react';
 import type { WorkflowStep } from '../types/workflow';
 import { VariableDetector } from '../lib/variable-detector';
 import { isWorkflowStepPayload } from '../types/workflow';
+
+/**
+ * Synthesize milestones from workflow steps for preview
+ */
+function synthesizeMilestones(steps: WorkflowStep[]): Array<{ name: string; stepCount: number }> {
+  if (steps.length === 0) return [];
+  if (steps.length <= 2) {
+    return [{ name: 'Complete Task', stepCount: steps.length }];
+  }
+
+  const milestones: Array<{ name: string; stepCount: number }> = [];
+
+  // Find navigation/setup steps at the start
+  let setupEnd = 0;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (step.type === 'NAVIGATION' || step.type === 'CLICK') {
+      setupEnd = i;
+      // Stop if we hit an INPUT step
+      if (i + 1 < steps.length && steps[i + 1].type === 'INPUT') {
+        break;
+      }
+    } else {
+      break;
+    }
+  }
+
+  // Find submit/save step at the end
+  let submitStart = steps.length;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i];
+    if (step.type === 'CLICK') {
+      const payload = step.payload as any;
+      const text = (payload?.elementText || payload?.label || '').toLowerCase();
+      if (text.includes('save') || text.includes('submit') || text.includes('create') || text.includes('add')) {
+        submitStart = i;
+        break;
+      }
+    }
+  }
+
+  // Build milestones
+  if (setupEnd > 0) {
+    milestones.push({ name: 'Open Form', stepCount: setupEnd + 1 });
+  }
+
+  const mainStart = setupEnd > 0 ? setupEnd + 1 : 0;
+  const mainEnd = submitStart < steps.length ? submitStart : steps.length;
+  if (mainEnd > mainStart) {
+    milestones.push({ name: 'Fill Details', stepCount: mainEnd - mainStart });
+  }
+
+  if (submitStart < steps.length) {
+    milestones.push({ name: 'Save', stepCount: steps.length - submitStart });
+  }
+
+  // If no milestones detected, create a single one
+  if (milestones.length === 0) {
+    milestones.push({ name: 'Complete Task', stepCount: steps.length });
+  }
+
+  return milestones;
+}
+
+/**
+ * Generate trigger phrase suggestions from workflow name
+ */
+function suggestTriggerPhrases(name: string): string[] {
+  const normalized = name.toLowerCase().trim();
+
+  // Extract action and object
+  const actionWords = ['add', 'create', 'new', 'update', 'edit', 'delete', 'remove', 'fill', 'enter', 'submit'];
+  const phrases: string[] = [];
+
+  // Add the name itself as a trigger
+  if (normalized.length > 0) {
+    phrases.push(normalized);
+  }
+
+  // Generate variations
+  for (const action of actionWords) {
+    if (normalized.includes(action)) {
+      // The name already contains an action word, it's probably good
+      break;
+    }
+  }
+
+  // Add "do [name]" variant if name doesn't start with an action
+  const startsWithAction = actionWords.some(a => normalized.startsWith(a));
+  if (!startsWithAction && normalized.length > 0) {
+    phrases.push(`do ${normalized}`);
+  }
+
+  return phrases.slice(0, 3);
+}
 
 interface PostRecordingConfirmProps {
   workflowSteps: WorkflowStep[];
@@ -64,11 +159,27 @@ export function PostRecordingConfirm({
 }: PostRecordingConfirmProps) {
   const [workflowName, setWorkflowName] = useState(suggestedName);
   const [showSteps, setShowSteps] = useState(false);
+  const [showSkillPreview, setShowSkillPreview] = useState(true);
 
   // Detect variables from steps
   const detectedVariables = useMemo(() => {
     return VariableDetector.detectVariablesSimplified(workflowSteps);
   }, [workflowSteps]);
+
+  // Synthesize milestones for preview
+  const milestones = useMemo(() => {
+    return synthesizeMilestones(workflowSteps);
+  }, [workflowSteps]);
+
+  // Generate trigger phrase suggestions
+  const triggerPhrases = useMemo(() => {
+    return suggestTriggerPhrases(workflowName);
+  }, [workflowName]);
+
+  // Get non-spreadsheet variables (form inputs)
+  const formVariables = useMemo(() => {
+    return detectedVariables.variables.filter(v => !v.cellReference);
+  }, [detectedVariables]);
 
   // Filter to only spreadsheet variables (those with cellReference)
   const spreadsheetVariables = useMemo(() => {
@@ -161,6 +272,102 @@ export function PostRecordingConfirm({
           </div>
         </div>
       )}
+
+      {/* Skill Preview - Collapsible */}
+      <div>
+        <button
+          onClick={() => setShowSkillPreview(!showSkillPreview)}
+          className="w-full flex items-center justify-between p-3 bg-purple-50 dark:bg-purple-900/20 rounded-xl border border-purple-200 dark:border-purple-800 hover:bg-purple-100 dark:hover:bg-purple-900/30 transition-colors"
+        >
+          <span className="text-sm font-medium text-purple-900 dark:text-purple-100 flex items-center gap-2">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+            </svg>
+            What I'll Learn
+          </span>
+          <svg
+            className={`w-4 h-4 text-purple-500 transition-transform duration-200 ${showSkillPreview ? 'rotate-180' : ''}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+
+        {showSkillPreview && (
+          <div className="mt-2 p-4 bg-card rounded-xl border border-border space-y-4">
+            {/* Milestones Timeline */}
+            {milestones.length > 0 && (
+              <div>
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                  Milestones
+                </h4>
+                <div className="flex items-center gap-1">
+                  {milestones.map((milestone, index) => (
+                    <div key={index} className="flex items-center">
+                      <div className="flex flex-col items-center">
+                        <div className="w-6 h-6 rounded-full bg-primary/10 border-2 border-primary flex items-center justify-center">
+                          <span className="text-xs font-medium text-primary">{index + 1}</span>
+                        </div>
+                        <span className="text-xs text-foreground mt-1 text-center max-w-[70px] truncate">
+                          {milestone.name}
+                        </span>
+                      </div>
+                      {index < milestones.length - 1 && (
+                        <div className="w-6 h-0.5 bg-primary/30 mx-1 mb-4" />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Detected Inputs */}
+            {(formVariables.length > 0 || spreadsheetVariables.length > 0) && (
+              <div>
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                  Inputs I'll Need
+                </h4>
+                <div className="flex flex-wrap gap-1.5">
+                  {formVariables.map((v, i) => (
+                    <span
+                      key={`form-${i}`}
+                      className="px-2 py-0.5 text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-200 rounded-full"
+                    >
+                      {v.fieldName}
+                    </span>
+                  ))}
+                  {spreadsheetVariables.map((v, i) => (
+                    <span
+                      key={`sheet-${i}`}
+                      className="px-2 py-0.5 text-xs bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200 rounded-full"
+                    >
+                      {editedNames[v.stepId] || v.fieldName}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Trigger Phrases */}
+            {triggerPhrases.length > 0 && workflowName.trim() && (
+              <div>
+                <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                  You Can Say
+                </h4>
+                <div className="space-y-1">
+                  {triggerPhrases.map((phrase, index) => (
+                    <p key={index} className="text-sm text-foreground">
+                      "{phrase}"
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Steps - Collapsible */}
       <div>

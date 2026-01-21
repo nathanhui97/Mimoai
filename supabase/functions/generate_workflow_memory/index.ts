@@ -263,9 +263,34 @@ ${workflow.learnedSkill ? `Learned Skill: ${JSON.stringify({
 ${currentMemory ? `**Current Memory (to enhance):**
 ${JSON.stringify(currentMemory, null, 2)}` : ''}
 ${analysisInstructions}
+## Milestone (Phase) Detection Guidelines
+
+Identify PHASES - high-level stages humans naturally think in when performing a task:
+
+**Common Phase Patterns:**
+- "Navigate/Setup" → Steps to get to the right place (going to URL, clicking menu)
+- "Open Form" → Opening a creation dialog/form/modal
+- "Fill Details" → Entering data into fields (1-5 INPUT steps)
+- "Review" → Optional review/verification step
+- "Save/Submit" → Committing the changes (clicking Save, Submit, Create)
+- "Verify" → Checking the result (waiting for success message)
+
+**Phase Rules:**
+1. Each phase should contain 1-5 steps (humans don't think in 20-step phases)
+2. Phase names should be action-oriented verbs (e.g., "Open Form" not "The Form")
+3. At least one phase should be marked "critical"
+4. Phases should follow the user's mental model of the task
+5. Group consecutive steps that accomplish a single sub-goal
+
+**Example:**
+For a "Add Contact" workflow with 4 steps (Click New → Type Name → Type Email → Click Save):
+- Phase 1: "Open Form" (step 0) - critical
+- Phase 2: "Fill Contact Details" (steps 1-2) - critical
+- Phase 3: "Save Contact" (step 3) - critical
+
 ## Block Detection Guidelines
 
-Identify BLOCKS - logical groupings of steps that form a unit:
+Identify BLOCKS - execution-level groupings for repeat/loop logic:
 
 **Block Boundaries** (signals that a new block starts):
 - URL changes between steps
@@ -302,6 +327,14 @@ Return ONLY valid JSON:
     },
     "understanding": {
       "elevator": "One-liner description",
+      "phases": [
+        {
+          "name": "Phase Name (e.g., 'Open Form', 'Fill Details', 'Save')",
+          "purpose": "What this phase accomplishes in human terms",
+          "stepIndices": [0, 1],
+          "criticality": "critical|important|optional"
+        }
+      ],
       "blocks": [
         {
           "blockId": "block_0",
@@ -402,6 +435,11 @@ function parseUnifiedResponse(responseText: string, currentMemory: CurrentMemory
     } else if (currentMemory) {
       // If no memory in response but we had current memory, return it enhanced
       result.memory = currentMemory;
+    }
+
+    // Ensure phases exist in understanding (fallback to blocks if needed)
+    if (result.memory?.understanding) {
+      result.memory.understanding = ensurePhasesExist(result.memory.understanding, stepCount);
     }
 
     return result;
@@ -523,4 +561,82 @@ function deepMerge(target: any, source: any): any {
   }
 
   return result;
+}
+
+/**
+ * Ensure phases exist in understanding.
+ * If phases are missing but blocks exist, convert blocks to phases.
+ * If both are missing, synthesize basic phases from step count.
+ */
+function ensurePhasesExist(understanding: any, stepCount: number): any {
+  // If phases already exist and are valid, return as-is
+  if (understanding.phases && Array.isArray(understanding.phases) && understanding.phases.length > 0) {
+    // Normalize phases to ensure they have required fields
+    understanding.phases = understanding.phases.map((phase: any, index: number) => ({
+      name: phase.name || `Phase ${index + 1}`,
+      purpose: phase.purpose || phase.name || 'Complete this phase',
+      stepIndices: phase.stepIndices || [],
+      criticality: phase.criticality || 'important',
+    }));
+    return understanding;
+  }
+
+  // If we have blocks, convert them to phases
+  if (understanding.blocks && Array.isArray(understanding.blocks) && understanding.blocks.length > 0) {
+    console.log('[GenerateMemory] Converting blocks to phases');
+    understanding.phases = understanding.blocks.map((block: any, index: number) => ({
+      name: block.name || `Phase ${index + 1}`,
+      purpose: block.purpose || block.name || 'Complete this phase',
+      stepIndices: block.stepIndices || [],
+      criticality: block.criticality || 'important',
+    }));
+    return understanding;
+  }
+
+  // No phases or blocks - synthesize basic phases from step count
+  console.log('[GenerateMemory] Synthesizing default phases for', stepCount, 'steps');
+
+  if (stepCount <= 1) {
+    understanding.phases = [{
+      name: 'Complete Task',
+      purpose: 'Execute the recorded action',
+      stepIndices: [0],
+      criticality: 'critical',
+    }];
+  } else if (stepCount <= 3) {
+    // Small workflow: single phase
+    understanding.phases = [{
+      name: 'Execute Task',
+      purpose: 'Complete all recorded steps',
+      stepIndices: Array.from({ length: stepCount }, (_, i) => i),
+      criticality: 'critical',
+    }];
+  } else {
+    // Larger workflow: synthesize 3 phases (Setup, Main Work, Finish)
+    const setupEnd = Math.max(0, Math.floor(stepCount * 0.2));
+    const mainEnd = Math.max(setupEnd + 1, Math.floor(stepCount * 0.8));
+
+    understanding.phases = [
+      {
+        name: 'Setup',
+        purpose: 'Navigate and prepare for the task',
+        stepIndices: Array.from({ length: setupEnd + 1 }, (_, i) => i),
+        criticality: 'important',
+      },
+      {
+        name: 'Main Task',
+        purpose: 'Perform the core actions',
+        stepIndices: Array.from({ length: mainEnd - setupEnd }, (_, i) => setupEnd + 1 + i),
+        criticality: 'critical',
+      },
+      {
+        name: 'Complete',
+        purpose: 'Finalize and save the work',
+        stepIndices: Array.from({ length: stepCount - mainEnd }, (_, i) => mainEnd + i),
+        criticality: 'critical',
+      },
+    ].filter(p => p.stepIndices.length > 0);
+  }
+
+  return understanding;
 }
