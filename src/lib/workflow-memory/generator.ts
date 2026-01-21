@@ -384,9 +384,19 @@ async function enhanceWithAI(
   }
 
   const enhanced = await response.json();
+
+  // Edge function returns { memory: {...}, analysis: {...} }
+  // We need to extract the memory object and merge it properly
+  const enhancedMemory = enhanced.memory || enhanced;
+
   return {
     ...memory,
-    ...enhanced,
+    ...enhancedMemory,
+    // Ensure understanding is properly merged (not replaced)
+    understanding: {
+      ...memory.understanding,
+      ...(enhancedMemory.understanding || {}),
+    },
     generatedAt: Date.now(),
   };
 }
