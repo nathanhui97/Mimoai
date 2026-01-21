@@ -358,5 +358,6 @@ console.log('Batch result:', result);
 - Ready for Phase 2
 
 ### Next Session
-- Start with Phase 2: Enhanced Learning
-- Phase 1 is fully tested and verified
+- **Manual validation**: Run `MimoDebug.testSkills()` in sidepanel console
+- If validation passes, start Phase 2: Enhanced Learning
+- Phase 1 unit tests pass, manual validation pending
