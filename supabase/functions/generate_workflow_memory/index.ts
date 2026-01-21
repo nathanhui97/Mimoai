@@ -346,8 +346,8 @@ Return ONLY valid JSON:
       "elevator": "One-liner description",
       "phases": [
         {
-          "name": "Phase Name (e.g., 'Open Form', 'Fill Details', 'Save')",
-          "purpose": "What this phase accomplishes in human terms",
+          "name": "TASK-SPECIFIC name (e.g., 'Select Restaurant', 'Configure Discount', NOT 'Interaction' or 'Data Entry')",
+          "purpose": "Specific description of what this accomplishes (NOT 'Interact with the page')",
           "stepIndices": [0, 1],
           "criticality": "critical|important|optional"
         }
@@ -355,8 +355,8 @@ Return ONLY valid JSON:
       "blocks": [
         {
           "blockId": "block_0",
-          "name": "Block Name",
-          "purpose": "What this block does",
+          "name": "TASK-SPECIFIC name (e.g., 'Enter Contact Info', NOT 'Data Entry' or 'Interaction')",
+          "purpose": "Specific purpose (e.g., 'Fill in customer name and email', NOT 'Enter the required information')",
           "stepIndices": [0, 1],
           "criticality": "critical|important|optional",
           "blockType": "form_fill|table_row|list_item|menu_navigation|one_time|submission",
