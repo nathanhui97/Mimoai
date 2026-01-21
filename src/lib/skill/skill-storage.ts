@@ -7,7 +7,6 @@
  */
 
 import { WorkflowStorage } from '../storage';
-import type { SavedWorkflow } from '../../types/workflow';
 import type { Skill, SkillSummary, SkillIndex } from './types';
 import { getSkill, getSkillSummary } from './skill-view';
 import { buildSkillIndex } from './skill-index';

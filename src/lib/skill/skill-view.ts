@@ -487,7 +487,7 @@ function clarificationToRule(item: ClarificationItem): KnowledgeRule | null {
   };
 }
 
-function convertMemoryInput(input: any, isRequired: boolean): SkillInput {
+function convertMemoryInput(input: any, _isRequired: boolean): SkillInput {
   return {
     name: input.name,
     variableName: input.variableName || input.name.toLowerCase().replace(/\s+/g, '_'),
@@ -623,7 +623,7 @@ function extractElementHints(step: WorkflowStep): ElementHints {
   };
 }
 
-function extractContextTerms(workflow: SavedWorkflow, memory?: WorkflowMemory): string[] {
+function extractContextTerms(_workflow: SavedWorkflow, memory?: WorkflowMemory): string[] {
   const terms: string[] = [];
 
   // Add domain
@@ -713,7 +713,7 @@ function inferActionType(
   return 'other';
 }
 
-function calculateConfidence(workflow: SavedWorkflow, memory?: WorkflowMemory): number {
+function calculateConfidence(_workflow: SavedWorkflow, memory?: WorkflowMemory): number {
   let score = 0;
   let checks = 0;
 
@@ -744,7 +744,6 @@ function calculateReadiness(workflow: SavedWorkflow, memory?: WorkflowMemory): b
   // Minimum requirements for a skill to be "ready"
   const hasSteps = workflow.steps.length > 0;
   const hasGoal = !!(memory?.identity?.purpose || workflow.description);
-  const hasInputs = !!(memory?.inputs || workflow.variables?.variables?.length);
-
+  // Note: Could add hasInputs check for stricter readiness in the future
   return hasSteps && hasGoal;
 }

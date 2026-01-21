@@ -6,7 +6,6 @@
  */
 
 import type { Skill, SkillIndex, SkillSummary } from './types';
-import { getSkillSummary } from './skill-view';
 
 // ============================================================================
 // Index Building
@@ -122,7 +121,7 @@ export function findSkillsForQuery(
     maxResults = 5,
     minConfidence = 0.3,
     domain,
-    application,
+    application: _application,
   } = options || {};
 
   const matches: SkillMatch[] = [];
@@ -133,10 +132,7 @@ export function findSkillsForQuery(
   const candidateIdSet = new Set<string>();
   for (const summary of index.summaries) {
     if (domain && summary.domain !== domain) continue;
-    if (application) {
-      const skillApp = index.summaries.find(s => s.id === summary.id);
-      // Skip if application doesn't match
-    }
+    // Note: application filtering not yet implemented
     candidateIdSet.add(summary.id);
   }
   const candidateIds = Array.from(candidateIdSet);
@@ -302,8 +298,6 @@ function calculateSimilarity(a: string, b: string): number {
   // Jaccard similarity on words
   const wordsA = a.split(/\s+/);
   const wordsB = b.split(/\s+/);
-
-  const setA = new Set(wordsA);
   const setB = new Set(wordsB);
 
   const intersection = wordsA.filter(x => setB.has(x));

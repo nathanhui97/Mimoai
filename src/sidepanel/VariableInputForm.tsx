@@ -2,11 +2,64 @@
  * Variable Input Form Component
  *
  * A clean modal for entering workflow variable values before execution.
+ * Supports multi-item detection: when user types "Alice, Bob, Carol",
+ * the form shows that 3 iterations will be executed.
  */
 
 import { useMemo, useState, useEffect } from 'react';
 import type { WorkflowVariables, VariableDefinition } from '../lib/variable-detector';
 import type { WorkflowMemory } from '../lib/workflow-memory/types';
+
+/**
+ * Detect multiple items in a text value (e.g., "Alice, Bob, and Carol" → 3 items)
+ */
+function detectMultipleItems(value: string, separators: string[] = ['and', ',', ';']): {
+  items: string[];
+  isMultiple: boolean;
+} {
+  if (!value.trim()) {
+    return { items: [], isMultiple: false };
+  }
+
+  // Build regex pattern for separators
+  const sepPattern = separators.map(s => {
+    if (s === ',') return ',\\s*';
+    if (s === ';') return ';\\s*';
+    return `\\s+${s}\\s+`;
+  }).join('|');
+
+  // Try to match "A, B, and C" pattern first
+  const andPattern = /(.+?)\s*,\s*(.+?)\s*(?:,\s*)?(?:and|&)\s+(.+)/i;
+  const match = value.match(andPattern);
+  if (match) {
+    const items = match.slice(1)
+      .flatMap(v => v.split(/\s*,\s*/))
+      .map(v => v.trim())
+      .filter(v => v.length > 0);
+    if (items.length > 1) {
+      return { items, isMultiple: true };
+    }
+  }
+
+  // Try "A and B" pattern
+  const simpleAndPattern = /(.+?)\s+(?:and|&)\s+(.+)/i;
+  const simpleMatch = value.match(simpleAndPattern);
+  if (simpleMatch) {
+    const items = simpleMatch.slice(1).map(v => v.trim()).filter(v => v.length > 0);
+    if (items.length > 1) {
+      return { items, isMultiple: true };
+    }
+  }
+
+  // Try comma/semicolon separated
+  const regex = new RegExp(sepPattern, 'gi');
+  const parts = value.split(regex).map(s => s.trim()).filter(s => s.length > 0);
+  if (parts.length > 1) {
+    return { items: parts, isMultiple: true };
+  }
+
+  return { items: [value], isMultiple: false };
+}
 
 interface VariableInputFormProps {
   variables: WorkflowVariables;
@@ -76,6 +129,29 @@ export function VariableInputForm({
   onConfirm,
   onCancel,
 }: VariableInputFormProps) {
+  // Determine which fields support array values
+  const arrayCapableFields = useMemo(() => {
+    const arrayCapable = new Set<string>();
+    const inputs = [
+      ...(workflowMemory?.inputs?.required || []),
+      ...(workflowMemory?.inputs?.optional || []),
+    ];
+    for (const input of inputs) {
+      // Check for isArray property (exists on InputFieldWithArraySupport)
+      if ('isArray' in input && input.isArray) {
+        if (input.name) arrayCapable.add(input.name);
+        if ((input as any).variableName) arrayCapable.add((input as any).variableName);
+      }
+    }
+    return arrayCapable;
+  }, [workflowMemory]);
+
+  // Helper to check if a variable supports arrays
+  const isVariableArrayCapable = (variable: VariableDefinition): boolean => {
+    return arrayCapableFields.has(variable.fieldName) ||
+           arrayCapableFields.has(variable.variableName);
+  };
+
   const repeatableFieldNames = useMemo(() => {
     const repeatable = new Set<string>();
     const inputs = [
@@ -86,7 +162,7 @@ export function VariableInputForm({
       // Check for isArray property (exists on InputFieldWithArraySupport)
       if ('isArray' in input && input.isArray) {
         if (input.name) repeatable.add(input.name);
-        if (input.variableName) repeatable.add(input.variableName);
+        if ((input as any).variableName) repeatable.add((input as any).variableName);
       }
     }
     return repeatable;
@@ -206,10 +282,15 @@ export function VariableInputForm({
   const renderVariableField = (
     variable: VariableDefinition,
     value: string,
-    onValueChange: (value: string) => void
+    onValueChange: (value: string) => void,
+    isArrayCapable: boolean = false
   ) => {
     const inputType = getInputType(variable.inputType);
     const hasError = touched[variable.stepId] && errors[variable.stepId];
+
+    // Check if input contains multiple items
+    const multipleCheck = detectMultipleItems(value);
+    const showMultipleIndicator = isArrayCapable && multipleCheck.isMultiple;
 
     return (
       <div key={variable.stepId}>
@@ -218,6 +299,11 @@ export function VariableInputForm({
           className="block text-sm font-medium text-foreground mb-1.5"
         >
           {variable.fieldName}
+          {isArrayCapable && (
+            <span className="ml-2 text-xs text-muted-foreground font-normal">
+              (supports multiple items)
+            </span>
+          )}
         </label>
 
         {variable.isDropdown && variable.options && variable.options.length > 0 ? (
@@ -254,17 +340,42 @@ export function VariableInputForm({
             value={value}
             onChange={(e) => onValueChange(e.target.value)}
             onBlur={() => handleBlur(variable, value)}
-            placeholder={`Enter ${variable.fieldName.toLowerCase()}`}
+            placeholder={isArrayCapable
+              ? `Enter ${variable.fieldName.toLowerCase()} (e.g., "Alice, Bob, Carol")`
+              : `Enter ${variable.fieldName.toLowerCase()}`
+            }
             className={`w-full px-4 py-3 border rounded-xl bg-muted/30 text-foreground transition-all duration-200 ${
               hasError
                 ? 'border-red-400 focus:ring-2 focus:ring-red-200 focus:border-red-400'
-                : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
+                : showMultipleIndicator
+                  ? 'border-primary/60 focus:ring-2 focus:ring-primary/30 focus:border-primary'
+                  : 'border-border/60 focus:ring-2 focus:ring-primary/20 focus:border-primary/40'
             } focus:outline-none placeholder:text-muted-foreground/50`}
           />
         )}
 
         {hasError && (
           <p className="text-xs text-red-500 mt-1.5">{errors[variable.stepId]}</p>
+        )}
+
+        {showMultipleIndicator && (
+          <div className="mt-2 p-2 bg-primary/10 rounded-lg border border-primary/20">
+            <p className="text-xs text-primary font-medium">
+              Will run {multipleCheck.items.length} times:
+            </p>
+            <ul className="mt-1 text-xs text-muted-foreground">
+              {multipleCheck.items.slice(0, 5).map((item, idx) => (
+                <li key={idx} className="truncate">
+                  {idx + 1}. {item}
+                </li>
+              ))}
+              {multipleCheck.items.length > 5 && (
+                <li className="text-muted-foreground/70">
+                  ...and {multipleCheck.items.length - 5} more
+                </li>
+              )}
+            </ul>
+          </div>
         )}
       </div>
     );
@@ -351,7 +462,12 @@ export function VariableInputForm({
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           {!hasRepeatableFields && variables.variables.map((variable) =>
-            renderVariableField(variable, values[variable.stepId], (nextValue) => handleChange(variable.stepId, nextValue))
+            renderVariableField(
+              variable,
+              values[variable.stepId],
+              (nextValue) => handleChange(variable.stepId, nextValue),
+              isVariableArrayCapable(variable)
+            )
           )}
 
           {hasRepeatableFields && (
@@ -374,7 +490,8 @@ export function VariableInputForm({
                             return next;
                           });
                         }
-                      }
+                      },
+                      false // Fixed variables don't support array input
                     )
                   )}
                 </div>
@@ -438,7 +555,8 @@ export function VariableInputForm({
                             return next;
                           });
                         }
-                      }
+                      },
+                      false // Repeatable fields use manual entry adding, not array detection
                     )
                   )}
 

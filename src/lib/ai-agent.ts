@@ -37,6 +37,7 @@ import type { WorkflowMemory } from './workflow-memory/types';
 import { CandidateFinder } from './agent/candidate-finder';
 import { HintExtractor } from './agent/hint-extractor';
 import { StuckDetector, type StuckContext } from './stuck-detector';
+import { StrategicReasoner, type ExecutionPlan } from './agent/strategic-reasoner';
 
 // ============================================================================
 // Types
@@ -411,7 +412,10 @@ export interface AgentState {
   startTime: number;
   variableValues?: Record<string, string>;
   userContext?: UserContext;
-  memory?: Record<string, string | boolean | number>; // NEW: Store values read during execution
+  memory?: Record<string, string | boolean | number>; // Store values read during execution
+  // Strategic reasoning
+  executionPlan?: ExecutionPlan;
+  currentIteration?: number;
   // Cooperative pausing support
   pauseRequested?: boolean;
   pauseReason?: 'user' | 'agent_needs_help' | 'confirmation_needed';
@@ -500,7 +504,7 @@ export class AIAgent {
     console.log(`[AIAgent] 📝 Workflow Name: ${workflow.name || 'Unnamed'}`);
     console.log(`[AIAgent] 📅 Created: ${workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : 'Unknown'}`);
     console.log(`[AIAgent] 📊 Total steps: ${workflow.steps.length}`);
-    
+
     // Clear any existing TabManager state from previous workflows
     try {
       const { TabManager } = await import('../content/universal-execution/tab-manager');
@@ -509,26 +513,49 @@ export class AIAgent {
     } catch (error) {
       console.warn('[AIAgent] Could not clear tab manager state:', error);
     }
-    
+
+    // =====================================================================
+    // STRATEGIC REASONING PHASE
+    // Think about WHAT we're trying to accomplish before HOW to do it
+    // =====================================================================
+    console.log('[AIAgent] 🧠 Strategic Reasoning Phase...');
+    const executionPlan = StrategicReasoner.createExecutionPlan(
+      workflow,
+      variableValues || {},
+      undefined // userQuery - could be added later
+    );
+    StrategicReasoner.logPlan(executionPlan);
+
+    // Check if we need to iterate for multiple items
+    if (executionPlan.iterations.length > 1) {
+      console.log(`[AIAgent] 🔄 Multi-item execution: ${executionPlan.iterations.length} iterations`);
+      return this.runWithIterations(workflow, executionPlan, userContext);
+    }
+
+    // Single execution - use first (and only) iteration's variable values
+    const effectiveVariables = executionPlan.iterations[0]?.variableValues || variableValues || {};
+
     // Initialize state
     this.state = {
       workflowId: workflow.id,
       goal: this.inferGoal(workflow),
       analyzedIntent: workflow.analyzedIntent,
       workflowMemory: workflow.memory,
-      hints: this.extractHints(workflow, variableValues),
+      hints: this.extractHints(workflow, effectiveVariables),
       history: [],
       currentHintIndex: 0,
       status: 'running',
       startTime: Date.now(),
-      variableValues,
+      variableValues: effectiveVariables,
       userContext,
-      memory: {}, // NEW: Initialize agent memory
+      memory: {},
+      executionPlan,
+      currentIteration: 0,
     };
 
     console.log(`[AIAgent] Goal: ${this.state.goal}`);
     console.log(`[AIAgent] Hints: ${this.state.hints.length} steps`);
-    
+
     // Log intent analysis if available
     if (this.state.analyzedIntent) {
       console.log('[AIAgent] 🧠 Workflow Intent Available:');
@@ -541,17 +568,111 @@ export class AIAgent {
     } else {
       console.log('[AIAgent] ⚠️ No analyzedIntent available (workflow may be older)');
     }
-    
+
     // Log variable values for debugging
-    if (variableValues && Object.keys(variableValues).length > 0) {
-      console.log(`[AIAgent] 📝 Variable values received:`, variableValues);
-      console.log(`[AIAgent] 📝 Variable keys:`, Object.keys(variableValues));
-      console.log(`[AIAgent] 📝 Variable entries:`, Object.entries(variableValues).map(([k, v]) => `${k}="${v}"`).join(', '));
+    if (effectiveVariables && Object.keys(effectiveVariables).length > 0) {
+      console.log(`[AIAgent] 📝 Variable values received:`, effectiveVariables);
+      console.log(`[AIAgent] 📝 Variable keys:`, Object.keys(effectiveVariables));
+      console.log(`[AIAgent] 📝 Variable entries:`, Object.entries(effectiveVariables).map(([k, v]) => `${k}="${v}"`).join(', '));
     } else {
       console.log(`[AIAgent] ⚠️ No variable values provided!`);
     }
-    
+
     return this.continueExecution();
+  }
+
+  /**
+   * Run workflow with multiple iterations (for multi-item execution)
+   * This is the strategic execution loop that handles "add Alice, Bob, Carol"
+   */
+  private async runWithIterations(
+    workflow: SavedWorkflow,
+    plan: ExecutionPlan,
+    userContext?: UserContext
+  ): Promise<AgentResult> {
+    const startTime = Date.now();
+    const allHistory: ActionHistoryEntry[] = [];
+    let totalStepsCompleted = 0;
+    let lastError: string | undefined;
+
+    console.log(`[AIAgent] 🔄 Starting ${plan.iterations.length} iterations`);
+
+    for (let i = 0; i < plan.iterations.length; i++) {
+      const iteration = plan.iterations[i];
+      console.log(`\n[AIAgent] ========== ITERATION ${i + 1}/${plan.iterations.length} ==========`);
+      console.log(`[AIAgent] ${iteration.description}`);
+      console.log(`[AIAgent] Variables:`, iteration.variableValues);
+
+      // Notify progress callback about iteration
+      this.onProgress?.(0, {
+        type: 'wait',
+        params: {},
+        reasoning: `Starting iteration ${i + 1}/${plan.iterations.length}: ${iteration.description}`,
+        confidence: 1.0,
+      }, 'thinking');
+
+      // Reset state for this iteration
+      this.aborted = false;
+      this.state = {
+        workflowId: workflow.id,
+        goal: this.inferGoal(workflow),
+        analyzedIntent: workflow.analyzedIntent,
+        workflowMemory: workflow.memory,
+        hints: this.extractHints(workflow, iteration.variableValues),
+        history: [],
+        currentHintIndex: 0,
+        status: 'running',
+        startTime: Date.now(),
+        variableValues: iteration.variableValues,
+        userContext,
+        memory: {},
+        executionPlan: plan,
+        currentIteration: i,
+      };
+
+      // Execute this iteration
+      const result = await this.continueExecution();
+
+      // Collect results
+      allHistory.push(...result.history);
+      totalStepsCompleted += result.stepsCompleted;
+
+      if (!result.success) {
+        lastError = result.error;
+        console.log(`[AIAgent] ❌ Iteration ${i + 1} failed: ${result.error}`);
+        // Continue with next iteration unless aborted
+        if (this.aborted) {
+          break;
+        }
+      } else {
+        console.log(`[AIAgent] ✅ Iteration ${i + 1} completed successfully`);
+      }
+
+      // Delay between iterations (if not last)
+      if (i < plan.iterations.length - 1) {
+        const delayMs = 1000; // 1 second between iterations
+        console.log(`[AIAgent] ⏳ Waiting ${delayMs}ms before next iteration...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+    }
+
+    const elapsedMs = Date.now() - startTime;
+    const success = !lastError && !this.aborted;
+
+    console.log(`\n[AIAgent] ========== ALL ITERATIONS COMPLETE ==========`);
+    console.log(`[AIAgent] Success: ${success}`);
+    console.log(`[AIAgent] Total steps completed: ${totalStepsCompleted}`);
+    console.log(`[AIAgent] Total time: ${elapsedMs}ms`);
+
+    return {
+      success,
+      stepsCompleted: totalStepsCompleted,
+      totalSteps: workflow.steps.length * plan.iterations.length,
+      history: allHistory,
+      elapsedMs,
+      finalStatus: success ? 'completed' : 'failed',
+      error: lastError,
+    };
   }
   
   /**
