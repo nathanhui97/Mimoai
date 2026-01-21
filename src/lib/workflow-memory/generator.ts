@@ -479,67 +479,13 @@ function extractTags(workflow: SavedWorkflow): string[] {
   return [...new Set(tags)];
 }
 
-function buildPhases(workflow: SavedWorkflow): WorkflowPhase[] {
-  const phases: WorkflowPhase[] = [];
-  const steps = workflow.steps;
-
-  // Simple phase detection based on step types
-  let currentPhase: WorkflowPhase | null = null;
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    const stepType = step.type;
-
-    // Determine phase based on step type
-    let phaseName: string;
-    let phasePurpose: string;
-
-    if (stepType === 'NAVIGATION') {
-      phaseName = 'Navigation';
-      phasePurpose = 'Navigate to the correct page';
-    } else if (stepType === 'INPUT') {
-      phaseName = 'Data Entry';
-      phasePurpose = 'Enter the required information';
-    } else if (stepType === 'CLICK') {
-      // Could be navigation, form interaction, or submission
-      const payload = step.payload;
-      if (isWorkflowStepPayload(payload)) {
-        const text = (payload.elementText || payload.label || '').toLowerCase();
-        if (text.includes('save') || text.includes('submit') || text.includes('create')) {
-          phaseName = 'Submission';
-          phasePurpose = 'Submit the form or save changes';
-        } else if (text.includes('next') || text.includes('continue')) {
-          phaseName = 'Navigation';
-          phasePurpose = 'Continue to next step';
-        } else {
-          phaseName = 'Interaction';
-          phasePurpose = 'Interact with the page';
-        }
-      } else {
-        phaseName = 'Interaction';
-        phasePurpose = 'Interact with the page';
-      }
-    } else {
-      phaseName = 'Interaction';
-      phasePurpose = 'Interact with the page';
-    }
-
-    // Add to current phase or create new one
-    if (currentPhase && currentPhase.name === phaseName) {
-      currentPhase.stepIndices.push(i);
-    } else {
-      if (currentPhase) phases.push(currentPhase);
-      currentPhase = {
-        name: phaseName,
-        purpose: phasePurpose,
-        stepIndices: [i],
-        criticality: phaseName === 'Submission' ? 'critical' : 'important',
-      };
-    }
-  }
-
-  if (currentPhase) phases.push(currentPhase);
-  return phases;
+function buildPhases(_workflow: SavedWorkflow): WorkflowPhase[] {
+  // Return empty array - let the AI edge function generate semantic phases
+  // Previously this generated generic phases like "Interaction", "Data Entry"
+  // which were not useful for progress tracking or user communication.
+  // The edge function will generate task-specific phases like:
+  // "Select Restaurant", "Configure BOGO Discount", "Submit Promotion"
+  return [];
 }
 
 function extractPrerequisites(workflow: SavedWorkflow): string[] {
