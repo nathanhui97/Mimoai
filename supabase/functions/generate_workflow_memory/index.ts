@@ -265,28 +265,45 @@ ${JSON.stringify(currentMemory, null, 2)}` : ''}
 ${analysisInstructions}
 ## Milestone (Phase) Detection Guidelines
 
-Identify PHASES - high-level stages humans naturally think in when performing a task:
+Identify PHASES - high-level stages humans naturally think in when performing a task.
 
-**Common Phase Patterns:**
-- "Navigate/Setup" → Steps to get to the right place (going to URL, clicking menu)
-- "Open Form" → Opening a creation dialog/form/modal
-- "Fill Details" → Entering data into fields (1-5 INPUT steps)
-- "Review" → Optional review/verification step
-- "Save/Submit" → Committing the changes (clicking Save, Submit, Create)
-- "Verify" → Checking the result (waiting for success message)
+**CRITICAL: Phase names must be TASK-SPECIFIC, not generic!**
+
+**BAD phase names (DO NOT USE):**
+- "Interaction" - too vague
+- "Data Entry" - describes step type, not purpose
+- "Navigation" - generic
+- "Click Button" - describes action, not goal
+- "Enter Information" - meaningless
+
+**GOOD phase names (USE THESE PATTERNS):**
+- "Select Restaurant" - specific to the task
+- "Configure BOGO Discount" - describes what's being accomplished
+- "Set Promotion Dates" - task-specific detail
+- "Review & Submit" - meaningful milestone
 
 **Phase Rules:**
-1. Each phase should contain 1-5 steps (humans don't think in 20-step phases)
-2. Phase names should be action-oriented verbs (e.g., "Open Form" not "The Form")
-3. At least one phase should be marked "critical"
-4. Phases should follow the user's mental model of the task
-5. Group consecutive steps that accomplish a single sub-goal
+1. Names must describe WHAT is being accomplished, not HOW (not "click" or "type")
+2. Names must be SPECIFIC to this workflow (not generic like "Data Entry")
+3. Each phase should contain 1-5 related steps
+4. Phases should match how a human would describe the task verbally
+5. At least one phase must be marked "critical"
 
-**Example:**
-For a "Add Contact" workflow with 4 steps (Click New → Type Name → Type Email → Click Save):
-- Phase 1: "Open Form" (step 0) - critical
-- Phase 2: "Fill Contact Details" (steps 1-2) - critical
+**Example - BOGO Promotion Setup (8 steps):**
+- Phase 1: "Open Promotions Tool" (step 0) - critical
+- Phase 2: "Select Restaurant" (step 1) - critical
+- Phase 3: "Choose BOGO Type" (steps 2-3) - critical
+- Phase 4: "Configure Discount" (steps 4-5) - critical
+- Phase 5: "Submit Promotion" (steps 6-7) - critical
+
+**Example - Add Contact (4 steps):**
+- Phase 1: "Open Contact Form" (step 0) - critical
+- Phase 2: "Enter Contact Details" (steps 1-2) - critical
 - Phase 3: "Save Contact" (step 3) - critical
+
+**Think:** If someone asked "what are you doing?", would your phase name be a good answer?
+- "I'm doing Data Entry" ❌ - meaningless
+- "I'm configuring the discount amount" ✅ - specific and clear
 
 ## Block Detection Guidelines
 
