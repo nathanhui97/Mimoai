@@ -8,6 +8,13 @@ import { VersionChecker, EXTENSION_VERSION, BUILD_HASH } from '../lib/version-ch
 import type { ExtensionMessage, MessageResponse, TabSwitchedMessage, StartRecordingInTabMessage, StopRecordingInTabMessage, ResumeRecordingMessage } from '../types/messages';
 import { getExecutionController, type PauseReason, type HumanHelpContext } from './execution-controller';
 import { notificationService } from './notification-service';
+// Static import of VisionAgent to avoid Vite's dynamic import preload code (which uses document)
+import { VisionAgent } from '../lib/vision/agent';
+// Vision module config initializers
+import { initVisionConfig, initElementFinderConfig } from '../lib/vision/eyes';
+import { initReasonerConfig, initVerifierConfig } from '../lib/vision/brain';
+// AI config for Supabase credentials
+import { aiConfig } from '../lib/ai-config';
 
 // Check version on service worker startup
 console.log(`🚀 Service Worker loaded (${EXTENSION_VERSION}) [${BUILD_HASH}]`);
@@ -1199,6 +1206,164 @@ chrome.runtime.onMessage.addListener(
           sendResponse({
             success: false,
             error: error instanceof Error ? error.message : 'Failed to mark completion',
+          });
+        }
+      })();
+      return true; // Keep channel open for async
+    }
+
+    // ============================================================================
+    // Vision-Only Execution (Phase 4) - VisionAgent runs from service worker
+    // ============================================================================
+
+    // Handle EXECUTE_WORKFLOW_VISION - run VisionAgent from service worker using CDP
+    if (message.type === 'EXECUTE_WORKFLOW_VISION') {
+      (async () => {
+        try {
+          const { workflow, variableValues, tabId } = message.payload as {
+            workflow: any;
+            variableValues?: Record<string, string>;
+            tabId: number;
+          };
+
+          if (!workflow) {
+            sendResponse({
+              success: false,
+              error: 'EXECUTE_WORKFLOW_VISION requires workflow in payload',
+            });
+            return;
+          }
+
+          if (!tabId) {
+            sendResponse({
+              success: false,
+              error: 'EXECUTE_WORKFLOW_VISION requires tabId in payload',
+            });
+            return;
+          }
+
+          console.log('[ServiceWorker] 🔵 Starting Vision Execution for workflow:', workflow.name);
+          console.log('[ServiceWorker] 🔵 Workflow details:', {
+            id: workflow.id,
+            name: workflow.name,
+            stepsCount: workflow.steps?.length || 0,
+            hasMemory: !!workflow.memory,
+            phasesCount: workflow.memory?.understanding?.phases?.length || 0,
+          });
+          console.log('[ServiceWorker] 🔵 Target tabId:', tabId);
+
+          // Create execution session with minimal AgentState for VisionAgent
+          const session = await executionController.createSession({
+            workflowId: workflow.id,
+            workflowName: workflow.name,
+            workflowSteps: workflow.steps || [],
+            totalSteps: workflow.memory?.understanding?.phases?.length || workflow.steps?.length || 1,
+            tabId,
+            agentState: {
+              goal: workflow.memory?.identity?.purpose || workflow.description || 'Execute workflow',
+              hints: [],
+              history: [],
+              currentHintIndex: 0,
+              status: 'running',
+              startTime: Date.now(),
+            },
+          });
+
+          // Broadcast session start
+          executionController.broadcastStatus(session);
+
+          // Send immediate response - execution runs in background
+          sendResponse({ success: true, data: { sessionId: session.id } });
+
+          // VisionAgent is statically imported at the top of this file
+          console.log('[ServiceWorker] 🔵 Using VisionAgent (static import)...');
+
+          // Initialize vision module configs with Supabase credentials
+          const visionApiConfig = {
+            apiUrl: `${aiConfig.getSupabaseUrl()}/functions/v1/vision_analyze`,
+            apiKey: aiConfig.getSupabaseAnonKey(),
+          };
+          console.log('[ServiceWorker] 🔵 Initializing vision configs with API URL:', visionApiConfig.apiUrl);
+          initVisionConfig(visionApiConfig);
+          initElementFinderConfig(visionApiConfig);
+          initReasonerConfig(visionApiConfig);
+          initVerifierConfig(visionApiConfig);
+
+          console.log('[ServiceWorker] 🔵 Creating VisionAgent instance...');
+          const agent = new VisionAgent({
+            maxActions: 50,
+            taskTimeout: 300000, // 5 minutes
+            actionDelay: 500,
+            pauseOnError: false,
+            captureHistory: true,
+            onProgress: (progress) => {
+              console.log('[ServiceWorker] 🔵 VisionAgent progress:', progress.currentAction);
+              // Broadcast progress to sidepanel
+              chrome.runtime.sendMessage({
+                type: 'AGENT_THINKING',
+                payload: {
+                  type: 'progress',
+                  stepNumber: progress.actionsExecuted,
+                  phase: progress.currentPhase,
+                  action: progress.currentAction,
+                },
+              }).catch(() => {});
+            },
+            onAction: (action) => {
+              console.log('[ServiceWorker] VisionAgent action:', action.decision.action.type);
+              // Update progress (don't pass agentState since VisionAgent has different state structure)
+              executionController.updateProgress(
+                action.decision.action.type === 'done' ? session.totalSteps : session.currentStepIndex + 1
+              ).catch(() => {});
+            },
+          });
+
+          // Execute using VisionAgent
+          console.log('[ServiceWorker] 🔵 Starting VisionAgent.executeWithWorkflow...');
+          const result = await agent.executeWithWorkflow(tabId, workflow, variableValues || {});
+
+          console.log('[ServiceWorker] 🔵 Vision execution completed:', {
+            success: result.success,
+            actionsExecuted: result.actionsExecuted,
+            error: result.error,
+          });
+
+          // Mark completion
+          await executionController.markCompleted(result.success);
+
+          // Notify sidepanel of completion
+          chrome.runtime.sendMessage({
+            type: 'AGENT_EXECUTION_COMPLETED',
+            payload: {
+              success: result.success,
+              stepsCompleted: result.actionsExecuted,
+              finalStatus: result.success ? 'completed' : 'failed',
+              error: result.error,
+            },
+          }).catch(() => {});
+
+          // Show notification on completion
+          if (result.success) {
+            await notificationService.notifyTaskComplete(workflow.name, undefined);
+          }
+
+        } catch (error) {
+          console.error('[ServiceWorker] Vision execution error:', error);
+
+          // Notify sidepanel of failure
+          chrome.runtime.sendMessage({
+            type: 'AGENT_EXECUTION_COMPLETED',
+            payload: {
+              success: false,
+              stepsCompleted: 0,
+              finalStatus: 'failed',
+              error: error instanceof Error ? error.message : 'Vision execution failed',
+            },
+          }).catch(() => {});
+
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Vision execution failed',
           });
         }
       })();

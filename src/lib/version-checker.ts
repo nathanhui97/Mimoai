@@ -142,6 +142,12 @@ export class VersionChecker {
    * Show visual notification to user that tab needs reload
    */
   private static showReloadNotification(): void {
+    // Skip if document is not available (service worker context)
+    if (typeof document === 'undefined') {
+      console.log('[VersionChecker] Cannot show notification - not in document context');
+      return;
+    }
+
     try {
       // Create a prominent banner at the top of the page
       const banner = document.createElement('div');
