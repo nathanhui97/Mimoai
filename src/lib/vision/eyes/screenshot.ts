@@ -60,8 +60,28 @@ export async function captureScreenshot(): Promise<Screenshot> {
 
 /**
  * Capture screenshot via CDP (for when we have debugger attached)
+ *
+ * IMPORTANT: We capture at CSS pixel resolution (deviceScaleFactor: 1) to ensure
+ * coordinates from vision AI match CDP mouse event coordinates.
  */
 export async function captureScreenshotCDP(tabId: number): Promise<Screenshot> {
+  // First, get the layout metrics to know the actual viewport size
+  const layoutMetrics: any = await new Promise((resolve) => {
+    chrome.debugger.sendCommand({ tabId }, 'Page.getLayoutMetrics', {}, (result: any) => {
+      if (chrome.runtime.lastError) {
+        // Fallback if getLayoutMetrics fails
+        resolve(null);
+        return;
+      }
+      resolve(result);
+    });
+  });
+
+  const viewportWidth = layoutMetrics?.cssLayoutViewport?.clientWidth || layoutMetrics?.layoutViewport?.clientWidth || 1920;
+  const viewportHeight = layoutMetrics?.cssLayoutViewport?.clientHeight || layoutMetrics?.layoutViewport?.clientHeight || 1080;
+
+  console.log(`[Screenshot] Capturing at CSS viewport: ${viewportWidth}x${viewportHeight}`);
+
   return new Promise((resolve, reject) => {
     chrome.debugger.sendCommand(
       { tabId },
@@ -70,6 +90,15 @@ export async function captureScreenshotCDP(tabId: number): Promise<Screenshot> {
         format: 'png',
         quality: 100,
         captureBeyondViewport: false,
+        // CRITICAL: Set clip to viewport size and deviceScaleFactor to 1
+        // This ensures the image dimensions match CSS pixel coordinates
+        clip: {
+          x: 0,
+          y: 0,
+          width: viewportWidth,
+          height: viewportHeight,
+          scale: 1, // CSS pixels, not device pixels
+        },
       },
       (result: any) => {
         if (chrome.runtime.lastError) {
@@ -88,8 +117,8 @@ export async function captureScreenshotCDP(tabId: number): Promise<Screenshot> {
             data: `data:image/png;base64,${result.data}`,
             timestamp: Date.now(),
             viewport: {
-              width: tab?.width || 1920,
-              height: tab?.height || 1080,
+              width: viewportWidth,
+              height: viewportHeight,
             },
             url: tab?.url || '',
             title: tab?.title || '',

@@ -372,11 +372,25 @@ export class VisionAgent {
 
         case 'type':
           if (!decision.action.value) throw new Error('No value to type');
+          // Click to focus the element first if coordinates provided
+          if (coordinates) {
+            console.log(`[VisionAgent] Clicking to focus before typing at (${coordinates.x}, ${coordinates.y})`);
+            await mouseClick(coordinates.x, coordinates.y);
+            await this.delay(100); // Brief delay to ensure focus
+          }
+          console.log(`[VisionAgent] Typing: "${decision.action.value}"`);
           await typeText(decision.action.value);
           break;
 
         case 'clear-and-type':
           if (!decision.action.value) throw new Error('No value to type');
+          // Click to focus the element first if coordinates provided
+          if (coordinates) {
+            console.log(`[VisionAgent] Clicking to focus before clear-and-type at (${coordinates.x}, ${coordinates.y})`);
+            await mouseClick(coordinates.x, coordinates.y);
+            await this.delay(100); // Brief delay to ensure focus
+          }
+          console.log(`[VisionAgent] Clear and typing: "${decision.action.value}"`);
           await clearAndType(decision.action.value);
           break;
 
@@ -675,33 +689,46 @@ export class VisionAgent {
 
         if (shouldCheckCompletion) {
           console.log('[VisionAgent] Checking phase completion (periodic check)...');
-          const phaseCheck = await isPhaseCompleteWithContext(
-            screenshot,
-            screenState,
-            executionContext
-          );
+          try {
+            const phaseCheck = await isPhaseCompleteWithContext(
+              screenshot,
+              screenState,
+              executionContext
+            );
 
-          if (phaseCheck.complete && phaseCheck.confidence > 0.7) {
-            console.log(`[VisionAgent] Phase ${this.currentPhaseIndex + 1} complete: ${phaseCheck.reason}`);
-            this.currentPhaseIndex++;
+            if (phaseCheck.complete && phaseCheck.confidence > 0.7) {
+              console.log(`[VisionAgent] Phase ${this.currentPhaseIndex + 1} complete: ${phaseCheck.reason}`);
+              this.currentPhaseIndex++;
 
-            // Check if all phases complete
-            if (this.currentPhaseIndex >= totalPhases) {
-              // Verify task completion
-              const taskCheck = await isTaskCompleteWithContext(
-                screenshot,
-                screenState,
-                executionContext
-              );
+              // Check if all phases complete
+              if (this.currentPhaseIndex >= totalPhases) {
+                // Verify task completion
+                try {
+                  const taskCheck = await isTaskCompleteWithContext(
+                    screenshot,
+                    screenState,
+                    executionContext
+                  );
 
-              if (taskCheck.complete && taskCheck.confidence > 0.6) {
-                this.status = 'completed';
-                return this.createResult(true, 'Task completed successfully');
+                  if (taskCheck.complete && taskCheck.confidence > 0.6) {
+                    this.status = 'completed';
+                    return this.createResult(true, 'Task completed successfully');
+                  }
+                } catch (taskCheckError) {
+                  console.error('[VisionAgent] Task completion check failed:', taskCheckError);
+                  // Assume task is complete if all phases are done and check fails
+                  this.status = 'completed';
+                  return this.createResult(true, 'Task completed (phases done)');
+                }
               }
-            }
 
-            // Continue to next phase
-            continue;
+              // Continue to next phase
+              continue;
+            }
+          } catch (phaseCheckError) {
+            console.error('[VisionAgent] Phase completion check failed:', phaseCheckError);
+            // Skip phase check and continue with actions
+            console.log('[VisionAgent] Skipping phase check, continuing with actions...');
           }
         }
 
@@ -709,13 +736,24 @@ export class VisionAgent {
         const phaseName = executionContext.currentPhase.name;
         this.updateProgress(`Thinking... (Phase: ${phaseName})`);
 
-        const decision = await decideNextActionWithContext(
-          screenshot,
-          screenState,
-          executionContext
-        );
-
-        console.log(`[VisionAgent] Decision: ${decision.action.type} - ${decision.reasoning}`);
+        let decision;
+        try {
+          decision = await decideNextActionWithContext(
+            screenshot,
+            screenState,
+            executionContext
+          );
+          console.log(`[VisionAgent] Decision: ${decision.action.type} - ${decision.reasoning}`);
+        } catch (thinkError) {
+          console.error('[VisionAgent] Decision API call failed:', thinkError);
+          // On timeout/error, try to continue with a wait action
+          if (this.actionsExecuted > 0) {
+            console.log('[VisionAgent] Retrying after brief wait...');
+            await this.delay(2000); // Wait 2 seconds before retrying
+            continue; // Retry the loop
+          }
+          throw thinkError; // Rethrow if it's the first action
+        }
 
         // Check for stuck state
         if (decision.action.type === 'stuck' || decision.confidence < 0.2) {

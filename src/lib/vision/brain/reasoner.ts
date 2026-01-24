@@ -67,6 +67,55 @@ export function initReasonerConfig(config: VisionConfig): void {
 }
 
 /**
+ * Timeout for API calls in milliseconds (30 seconds)
+ */
+const API_TIMEOUT_MS = 30000;
+
+/**
+ * Fetch with timeout - prevents indefinite hanging
+ */
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = API_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    console.log(`[Reasoner] API call timeout after ${timeoutMs}ms, aborting...`);
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Vision API timeout after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Strip large data from demonstration to reduce payload size
+ */
+function stripDemonstrationScreenshots(demonstration: unknown[]): unknown[] {
+  if (!demonstration) return [];
+  return demonstration.map((d: unknown) => {
+    const step = d as Record<string, unknown>;
+    // Remove referenceScreenshot to keep payload small
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { referenceScreenshot, ...rest } = step;
+    return rest;
+  });
+}
+
+/**
  * Get the current vision config
  */
 async function getVisionConfig(): Promise<VisionConfig> {
@@ -99,7 +148,9 @@ export async function decideNextAction(
   const config = await getVisionConfig();
   const currentPhase = taskModel.phases[currentPhaseIndex];
 
-  const response = await fetch(config.apiUrl, {
+  console.log('[Reasoner] decideNextAction: starting API call...');
+
+  const response = await fetchWithTimeout(config.apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -140,6 +191,8 @@ export async function decideNextAction(
     }),
   });
 
+  console.log('[Reasoner] decideNextAction: API call completed');
+
   if (!response.ok) {
     const error = await response.text();
     throw new Error(`Vision API error: ${error}`);
@@ -173,7 +226,9 @@ export async function decideNextActionWithContext(
 ): Promise<Decision> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
+  console.log('[Reasoner] decideNextActionWithContext: starting API call...');
+
+  const response = await fetchWithTimeout(config.apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -195,8 +250,16 @@ export async function decideNextActionWithContext(
         // FULL task context
         task: executionContext.task,
 
-        // Current phase with step guidance
-        currentPhase: executionContext.currentPhase,
+        // Current phase with step guidance (strip screenshots from guidance)
+        currentPhase: {
+          ...executionContext.currentPhase,
+          stepGuidance: executionContext.currentPhase.stepGuidance?.map((g: unknown) => {
+            const step = g as Record<string, unknown>;
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { referenceScreenshot, ...rest } = step;
+            return rest;
+          }),
+        },
 
         // User-taught rules (from Q&A)
         knowledge: executionContext.knowledge,
@@ -207,8 +270,8 @@ export async function decideNextActionWithContext(
         // Adaptation strategies
         adaptations: executionContext.adaptations,
 
-        // How user demonstrated it
-        demonstration: executionContext.demonstration,
+        // How user demonstrated it (strip screenshots to reduce size)
+        demonstration: stripDemonstrationScreenshots(executionContext.demonstration),
 
         // Past experience
         experience: executionContext.experience,
@@ -225,6 +288,8 @@ export async function decideNextActionWithContext(
       },
     }),
   });
+
+  console.log('[Reasoner] decideNextActionWithContext: API call completed, parsing response...');
 
   if (!response.ok) {
     const error = await response.text();
@@ -255,7 +320,9 @@ export async function isPhaseCompleteWithContext(
 ): Promise<{ complete: boolean; confidence: number; reason: string }> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
+  console.log('[Reasoner] isPhaseCompleteWithContext: starting API call...');
+
+  const response = await fetchWithTimeout(config.apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -265,11 +332,16 @@ export async function isPhaseCompleteWithContext(
       type: 'check_phase_complete_rich',
       screenshot: extractBase64(screenshot),
       context: {
-        // Current phase info
+        // Current phase info (strip screenshots from guidance)
         currentPhase: {
           name: executionContext.currentPhase.name,
           intent: executionContext.currentPhase.intent,
-          stepGuidance: executionContext.currentPhase.stepGuidance,
+          stepGuidance: executionContext.currentPhase.stepGuidance?.map((g: unknown) => {
+            const step = g as Record<string, unknown>;
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const { referenceScreenshot, ...rest } = step;
+            return rest;
+          }),
         },
 
         // Success criteria to check
@@ -288,6 +360,8 @@ export async function isPhaseCompleteWithContext(
       },
     }),
   });
+
+  console.log('[Reasoner] isPhaseCompleteWithContext: API call completed');
 
   if (!response.ok) {
     const error = await response.text();
@@ -317,7 +391,9 @@ export async function isTaskCompleteWithContext(
 ): Promise<{ complete: boolean; confidence: number; reason: string }> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
+  console.log('[Reasoner] isTaskCompleteWithContext: starting API call...');
+
+  const response = await fetchWithTimeout(config.apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -346,6 +422,8 @@ export async function isTaskCompleteWithContext(
       },
     }),
   });
+
+  console.log('[Reasoner] isTaskCompleteWithContext: API call completed');
 
   if (!response.ok) {
     const error = await response.text();
@@ -379,39 +457,59 @@ export async function getRecoverySuggestionsWithContext(
 }> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(config.apiKey && { Authorization: `Bearer ${config.apiKey}` }),
-    },
-    body: JSON.stringify({
-      type: 'get_recovery_rich',
-      screenshot: extractBase64(screenshot),
-      context: {
-        stuckReason,
-        task: executionContext.task,
-        currentPhase: executionContext.currentPhase,
-        knowledge: executionContext.knowledge,
-        adaptations: executionContext.adaptations,
-        screenState: {
-          pageType: screenState.pageType,
-          pageDescription: screenState.pageDescription,
-        },
-        recentHistory: executionContext.recentHistory,
-      },
-    }),
-  });
+  console.log('[Reasoner] getRecoverySuggestionsWithContext: starting API call...');
 
-  if (!response.ok) {
+  try {
+    const response = await fetchWithTimeout(config.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.apiKey && { Authorization: `Bearer ${config.apiKey}` }),
+      },
+      body: JSON.stringify({
+        type: 'get_recovery_rich',
+        screenshot: extractBase64(screenshot),
+        context: {
+          stuckReason,
+          task: executionContext.task,
+          currentPhase: {
+            ...executionContext.currentPhase,
+            stepGuidance: executionContext.currentPhase.stepGuidance?.map((g: unknown) => {
+              const step = g as Record<string, unknown>;
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { referenceScreenshot, ...rest } = step;
+              return rest;
+            }),
+          },
+          knowledge: executionContext.knowledge,
+          adaptations: executionContext.adaptations,
+          screenState: {
+            pageType: screenState.pageType,
+            pageDescription: screenState.pageDescription,
+          },
+          recentHistory: executionContext.recentHistory,
+        },
+      }),
+    });
+
+    console.log('[Reasoner] getRecoverySuggestionsWithContext: API call completed');
+
+    if (!response.ok) {
+      return {
+        suggestions: ['Unable to get recovery suggestions'],
+        alternativeActions: [],
+      };
+    }
+
+    const result = await response.json();
+    return result.result || { suggestions: [], alternativeActions: [] };
+  } catch (error) {
+    console.error('[Reasoner] getRecoverySuggestionsWithContext error:', error);
     return {
-      suggestions: ['Unable to get recovery suggestions'],
+      suggestions: ['Recovery suggestions unavailable due to timeout'],
       alternativeActions: [],
     };
   }
-
-  const result = await response.json();
-  return result.result || { suggestions: [], alternativeActions: [] };
 }
 
 /**
@@ -424,7 +522,9 @@ export async function isPhaseComplete(
 ): Promise<{ complete: boolean; confidence: number; reason: string }> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
+  console.log('[Reasoner] isPhaseComplete: starting API call...');
+
+  const response = await fetchWithTimeout(config.apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -447,6 +547,8 @@ export async function isPhaseComplete(
       },
     }),
   });
+
+  console.log('[Reasoner] isPhaseComplete: API call completed');
 
   if (!response.ok) {
     const error = await response.text();
@@ -476,7 +578,9 @@ export async function isTaskComplete(
 ): Promise<{ complete: boolean; confidence: number; reason: string }> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
+  console.log('[Reasoner] isTaskComplete: starting API call...');
+
+  const response = await fetchWithTimeout(config.apiUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -502,6 +606,8 @@ export async function isTaskComplete(
       },
     }),
   });
+
+  console.log('[Reasoner] isTaskComplete: API call completed');
 
   if (!response.ok) {
     const error = await response.text();
@@ -580,42 +686,54 @@ export async function getRecoverySuggestions(
 }> {
   const config = await getVisionConfig();
 
-  const response = await fetch(config.apiUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(config.apiKey && { Authorization: `Bearer ${config.apiKey}` }),
-    },
-    body: JSON.stringify({
-      type: 'get_recovery',
-      screenshot: extractBase64(screenshot),
-      context: {
-        stuckReason,
-        task: {
-          name: taskModel.name,
-          description: taskModel.description,
-        },
-        screenState: {
-          pageType: screenState.pageType,
-          pageDescription: screenState.pageDescription,
-        },
-        recentHistory: history.slice(-5).map((h) => ({
-          action: h.decision.action,
-          result: h.verification.success,
-        })),
-      },
-    }),
-  });
+  console.log('[Reasoner] getRecoverySuggestions: starting API call...');
 
-  if (!response.ok) {
+  try {
+    const response = await fetchWithTimeout(config.apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(config.apiKey && { Authorization: `Bearer ${config.apiKey}` }),
+      },
+      body: JSON.stringify({
+        type: 'get_recovery',
+        screenshot: extractBase64(screenshot),
+        context: {
+          stuckReason,
+          task: {
+            name: taskModel.name,
+            description: taskModel.description,
+          },
+          screenState: {
+            pageType: screenState.pageType,
+            pageDescription: screenState.pageDescription,
+          },
+          recentHistory: history.slice(-5).map((h) => ({
+            action: h.decision.action,
+            result: h.verification.success,
+          })),
+        },
+      }),
+    });
+
+    console.log('[Reasoner] getRecoverySuggestions: API call completed');
+
+    if (!response.ok) {
+      return {
+        suggestions: ['Unable to get recovery suggestions'],
+        alternativeActions: [],
+      };
+    }
+
+    const result = await response.json();
+    return result.result || { suggestions: [], alternativeActions: [] };
+  } catch (error) {
+    console.error('[Reasoner] getRecoverySuggestions error:', error);
     return {
-      suggestions: ['Unable to get recovery suggestions'],
+      suggestions: ['Recovery suggestions unavailable due to timeout'],
       alternativeActions: [],
     };
   }
-
-  const result = await response.json();
-  return result.result || { suggestions: [], alternativeActions: [] };
 }
 
 /**
