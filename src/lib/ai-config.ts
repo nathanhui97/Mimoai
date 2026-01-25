@@ -32,6 +32,7 @@ export interface AIConfig {
   correctionLearningEnabled: boolean;
   aiSelfHealingEnabled: boolean;
   aiLabelEnhancementEnabled: boolean; // Enable AI label enhancement for low-confidence labels
+  useUnifiedExecution: boolean; // Enable new unified execution architecture
   // Debug mode - controls verbose logging (OPTIMIZATION)
   debugMode: boolean;
   // Timeouts
@@ -81,6 +82,7 @@ class AIConfigManager {
       correctionLearningEnabled: true, // Enable learning from user corrections
       aiSelfHealingEnabled: true, // Enable AI-powered self-healing during replay
       aiLabelEnhancementEnabled: true, // Enable AI label enhancement for low-confidence labels
+      useUnifiedExecution: true, // Enable unified execution architecture (fully implemented with recovery)
       
       // Debug mode - set to false for production to reduce logging overhead
       debugMode: false, // OPTIMIZATION: Disable verbose logging by default

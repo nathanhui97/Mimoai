@@ -413,3 +413,170 @@ describe('RecordingManager - Error Handling', () => {
 // - Testing complex scenarios (multi-tab, spreadsheets, etc.)
 // - Integration tests with real DOM structures
 
+describe('RecordingManager - New Event Types', () => {
+  let manager: RecordingManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    manager = new RecordingManager();
+  });
+
+  test('start() registers double-click listener', () => {
+    manager.start();
+
+    const eventTypes = mockAddEventListener.mock.calls.map((call) => call[0]);
+    expect(eventTypes).toContain('dblclick');
+  });
+
+  test('start() registers context menu (right-click) listener', () => {
+    manager.start();
+
+    const eventTypes = mockAddEventListener.mock.calls.map((call) => call[0]);
+    expect(eventTypes).toContain('contextmenu');
+  });
+
+  test('start() registers drag start listener', () => {
+    manager.start();
+
+    const eventTypes = mockAddEventListener.mock.calls.map((call) => call[0]);
+    expect(eventTypes).toContain('dragstart');
+  });
+
+  test('start() registers drop listener', () => {
+    manager.start();
+
+    const eventTypes = mockAddEventListener.mock.calls.map((call) => call[0]);
+    expect(eventTypes).toContain('drop');
+  });
+
+  test('start() registers mouseenter listener for hover', () => {
+    manager.start();
+
+    const eventTypes = mockAddEventListener.mock.calls.map((call) => call[0]);
+    expect(eventTypes).toContain('mouseenter');
+  });
+
+  test('stop() removes all new event listeners', async () => {
+    manager.start();
+    await manager.stop();
+
+    // Verify removeEventListener was called for new event types
+    const removedEventTypes = mockRemoveEventListener.mock.calls.map((call) => call[0]);
+
+    expect(removedEventTypes).toContain('dblclick');
+    expect(removedEventTypes).toContain('contextmenu');
+    expect(removedEventTypes).toContain('dragstart');
+    expect(removedEventTypes).toContain('drop');
+    expect(removedEventTypes).toContain('mouseenter');
+  });
+
+  test('handleDoubleClick() is bound correctly', () => {
+    manager.start();
+
+    // Find the dblclick handler
+    const dblclickCall = mockAddEventListener.mock.calls.find(
+      (call) => call[0] === 'dblclick'
+    );
+
+    expect(dblclickCall).toBeDefined();
+    expect(typeof dblclickCall?.[1]).toBe('function');
+    // Capture phase should be true
+    expect(dblclickCall?.[2]).toBe(true);
+  });
+
+  test('handleRightClick() is bound correctly', () => {
+    manager.start();
+
+    // Find the contextmenu handler
+    const contextCall = mockAddEventListener.mock.calls.find(
+      (call) => call[0] === 'contextmenu'
+    );
+
+    expect(contextCall).toBeDefined();
+    expect(typeof contextCall?.[1]).toBe('function');
+    // Capture phase should be true
+    expect(contextCall?.[2]).toBe(true);
+  });
+
+  test('drag-drop handlers use capture phase', () => {
+    manager.start();
+
+    const dragstartCall = mockAddEventListener.mock.calls.find(
+      (call) => call[0] === 'dragstart'
+    );
+    const dropCall = mockAddEventListener.mock.calls.find(
+      (call) => call[0] === 'drop'
+    );
+
+    expect(dragstartCall?.[2]).toBe(true); // capture phase
+    expect(dropCall?.[2]).toBe(true); // capture phase
+  });
+
+  test('captureModifiers() returns undefined when no modifiers', () => {
+    const event = new MouseEvent('click', {
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      metaKey: false,
+    });
+
+    // Access private method
+    const modifiers = (manager as any).captureModifiers(event);
+    expect(modifiers).toBeUndefined();
+  });
+
+  test('captureModifiers() captures ctrl key', () => {
+    const event = new MouseEvent('click', {
+      ctrlKey: true,
+    });
+
+    const modifiers = (manager as any).captureModifiers(event);
+    expect(modifiers).toEqual({ ctrl: true });
+  });
+
+  test('captureModifiers() captures multiple modifiers', () => {
+    const event = new MouseEvent('click', {
+      ctrlKey: true,
+      shiftKey: true,
+    });
+
+    const modifiers = (manager as any).captureModifiers(event);
+    expect(modifiers).toEqual({ ctrl: true, shift: true });
+  });
+});
+
+describe('RecordingManager - Drag and Drop State', () => {
+  let manager: RecordingManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    manager = new RecordingManager();
+  });
+
+  test('pendingDragSource is cleared after stop()', async () => {
+    manager.start();
+
+    // Manually set pending drag source
+    (manager as any).pendingDragSource = {
+      element: document.createElement('div'),
+      selector: '.test',
+      coordinates: { x: 100, y: 100 },
+    };
+
+    await manager.stop();
+
+    expect((manager as any).pendingDragSource).toBeNull();
+  });
+
+  test('hoverDebounceTimer is cleared after stop()', async () => {
+    manager.start();
+
+    // Manually set hover timer
+    (manager as any).hoverDebounceTimer = setTimeout(() => {}, 1000);
+
+    await manager.stop();
+
+    expect((manager as any).hoverDebounceTimer).toBeNull();
+  });
+});
+

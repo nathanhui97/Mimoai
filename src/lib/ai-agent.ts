@@ -505,6 +505,13 @@ export class AIAgent {
     console.log(`[AIAgent] 📅 Created: ${workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : 'Unknown'}`);
     console.log(`[AIAgent] 📊 Total steps: ${workflow.steps.length}`);
 
+    // Check if unified execution is enabled
+    const config = aiConfig.getConfig();
+    if (config.useUnifiedExecution) {
+      console.log('[AIAgent] 🚀 Using Unified Execution Architecture');
+      return this.runWithUnifiedExecution(workflow, variableValues, userContext);
+    }
+
     // Clear any existing TabManager state from previous workflows
     try {
       const { TabManager } = await import('../content/universal-execution/tab-manager');
@@ -579,6 +586,67 @@ export class AIAgent {
     }
 
     return this.continueExecution();
+  }
+
+  /**
+   * Run workflow using the new Unified Execution Architecture
+   * This delegates to ExecutionCoordinator for cleaner, faster execution
+   */
+  private async runWithUnifiedExecution(
+    workflow: SavedWorkflow,
+    variableValues?: Record<string, string>,
+    userContext?: UserContext
+  ): Promise<AgentResult> {
+    const startTime = Date.now();
+
+    try {
+      // Dynamic import to avoid circular dependencies
+      const { ExecutionCoordinator } = await import('./execution');
+
+      const coordinator = new ExecutionCoordinator({
+        maxSteps: this.maxSteps,
+        stepTimeout: 30000, // Use the stored stepTimeout
+        onProgress: (stepIndex, totalSteps, status) => {
+          this.onProgress?.(stepIndex, {
+            type: status === 'in_progress' ? 'wait' : 'done',
+            params: {},
+            reasoning: `Step ${stepIndex + 1}/${totalSteps}: ${status}`,
+            confidence: 1.0,
+          }, status === 'completed' ? 'completed' : status === 'failed' ? 'failed' : 'acting');
+        },
+        onThinkingEvent: this.onThinkingEvent,
+      });
+
+      const result = await coordinator.execute(workflow, {
+        variableValues,
+        userContext,
+      });
+
+      // Convert ExecutionResult to AgentResult
+      return {
+        success: result.success,
+        stepsCompleted: result.stepsCompleted,
+        totalSteps: result.totalSteps,
+        history: [], // Unified execution tracks history differently
+        elapsedMs: result.elapsedMs,
+        finalStatus: result.status === 'completed' ? 'completed' :
+                     result.status === 'failed' ? 'failed' :
+                     result.status === 'paused' ? 'paused' : 'stopped',
+        error: result.error,
+      };
+
+    } catch (error) {
+      console.error('[AIAgent] Unified execution error:', error);
+      return {
+        success: false,
+        stepsCompleted: 0,
+        totalSteps: workflow.steps.length,
+        history: [],
+        elapsedMs: Date.now() - startTime,
+        finalStatus: 'failed',
+        error: error instanceof Error ? error.message : 'Unified execution failed',
+      };
+    }
   }
 
   /**

@@ -10,6 +10,9 @@
  */
 export type Intent =
   | { kind: 'CLICK' }
+  | { kind: 'DOUBLE_CLICK' }
+  | { kind: 'RIGHT_CLICK' }
+  | { kind: 'DRAG_DROP'; sourceTarget?: string; dropTarget?: string }
   | { kind: 'TYPE'; valueVar: string }
   | { kind: 'OPEN_ROW_ACTIONS'; rowKeyVar: string }
   | { kind: 'SELECT_DROPDOWN_OPTION'; optionVar: string }
@@ -54,7 +57,7 @@ export function isIntent(obj: unknown): obj is Intent {
   if (typeof intent.kind !== 'string') return false;
   
   const validKinds = [
-    'CLICK', 'TYPE', 'OPEN_ROW_ACTIONS', 'SELECT_DROPDOWN_OPTION',
+    'CLICK', 'DOUBLE_CLICK', 'RIGHT_CLICK', 'DRAG_DROP', 'TYPE', 'OPEN_ROW_ACTIONS', 'SELECT_DROPDOWN_OPTION',
     'NAVIGATE', 'SUBMIT_FORM', 'TOGGLE_CHECKBOX', 'SCROLL_TO',
     'HOVER', 'FOCUS', 'PRESS_KEY', 'READ', 'ASSERT'
   ];

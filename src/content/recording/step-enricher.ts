@@ -42,7 +42,7 @@ export class StepEnricher {
    */
   enrichStep(
     element: Element,
-    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
+    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE' | 'DOUBLE_CLICK' | 'RIGHT_CLICK' | 'HOVER' | 'DRAG_DROP',
     value?: string,
     key?: string
   ): StepEnrichmentResult | null {
@@ -59,6 +59,22 @@ export class StepEnricher {
       switch (stepType) {
         case 'CLICK':
           intent = inferClickIntent(element);
+          break;
+        case 'DOUBLE_CLICK':
+          // Double-click typically selects text or opens an editor
+          intent = { kind: 'DOUBLE_CLICK' };
+          break;
+        case 'RIGHT_CLICK':
+          // Right-click opens context menu
+          intent = { kind: 'RIGHT_CLICK' };
+          break;
+        case 'HOVER':
+          // Hover typically shows tooltip or triggers visual change
+          intent = { kind: 'HOVER' };
+          break;
+        case 'DRAG_DROP':
+          // Drag-drop moves an element
+          intent = { kind: 'DRAG_DROP' };
           break;
         case 'INPUT':
           intent = inferInputIntent(element, value || '');

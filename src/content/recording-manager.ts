@@ -65,6 +65,16 @@ export class RecordingManager {
   private scrollHandler: ((event: Event) => void) | null = null;
   private copyHandler: ((event: ClipboardEvent) => void) | null = null;
   private pasteHandler: ((event: ClipboardEvent) => void) | null = null;
+  private dblclickHandler: ((event: MouseEvent) => void) | null = null;
+  private contextmenuHandler: ((event: MouseEvent) => void) | null = null;
+  private dragstartHandler: ((event: DragEvent) => void) | null = null;
+  private dropHandler: ((event: DragEvent) => void) | null = null;
+  private mouseenterHandler: ((event: MouseEvent) => void) | null = null;
+  // Drag-drop state tracking
+  private pendingDragSource: { element: Element; selector: string; coordinates: { x: number; y: number } } | null = null;
+  // Hover state tracking
+  private hoverDebounceTimer: number | null = null;
+  private readonly HOVER_TRIGGER_DELAY = 500; // 500ms hover before recording (matches tooltip delay)
   private scrollDebounceTimer: number | null = null;
   // Modal/container scroll support: Track scroll listeners on elements
   private elementScrollListeners: Map<Element, (event: Event) => void> = new Map();
@@ -233,7 +243,42 @@ export class RecordingManager {
     }) as (event: ClipboardEvent) => void;
     document.addEventListener('paste', this.pasteHandler, true);
 
-    console.log('Recording started');
+    // Setup double-click handler - capture phase for consistency
+    this.dblclickHandler = ((event: MouseEvent) => {
+      this.handleDoubleClick(event).catch((error) => {
+        console.error('Error in double-click handler:', error);
+      });
+    }) as (event: MouseEvent) => void;
+    document.addEventListener('dblclick', this.dblclickHandler, true);
+
+    // Setup context menu (right-click) handler - capture phase
+    this.contextmenuHandler = ((event: MouseEvent) => {
+      this.handleRightClick(event).catch((error) => {
+        console.error('Error in context menu handler:', error);
+      });
+    }) as (event: MouseEvent) => void;
+    document.addEventListener('contextmenu', this.contextmenuHandler, true);
+
+    // Setup drag-drop handlers
+    this.dragstartHandler = ((event: DragEvent) => {
+      this.handleDragStart(event);
+    }) as (event: DragEvent) => void;
+    document.addEventListener('dragstart', this.dragstartHandler, true);
+
+    this.dropHandler = ((event: DragEvent) => {
+      this.handleDrop(event).catch((error) => {
+        console.error('Error in drop handler:', error);
+      });
+    }) as (event: DragEvent) => void;
+    document.addEventListener('drop', this.dropHandler, true);
+
+    // Setup hover handler - track significant hovers (e.g., triggering tooltips)
+    this.mouseenterHandler = ((event: MouseEvent) => {
+      this.handleMouseEnter(event);
+    }) as (event: MouseEvent) => void;
+    document.addEventListener('mouseenter', this.mouseenterHandler, true);
+
+    console.log('Recording started - including double-click, right-click, drag-drop, and hover');
   }
 
   /**
@@ -442,6 +487,40 @@ export class RecordingManager {
       document.removeEventListener('paste', this.pasteHandler, true);
       this.pasteHandler = null;
     }
+
+    if (this.dblclickHandler) {
+      document.removeEventListener('dblclick', this.dblclickHandler, true);
+      this.dblclickHandler = null;
+    }
+
+    if (this.contextmenuHandler) {
+      document.removeEventListener('contextmenu', this.contextmenuHandler, true);
+      this.contextmenuHandler = null;
+    }
+
+    if (this.dragstartHandler) {
+      document.removeEventListener('dragstart', this.dragstartHandler, true);
+      this.dragstartHandler = null;
+    }
+
+    if (this.dropHandler) {
+      document.removeEventListener('drop', this.dropHandler, true);
+      this.dropHandler = null;
+    }
+
+    if (this.mouseenterHandler) {
+      document.removeEventListener('mouseenter', this.mouseenterHandler, true);
+      this.mouseenterHandler = null;
+    }
+
+    // Clear hover timer if pending
+    if (this.hoverDebounceTimer !== null) {
+      clearTimeout(this.hoverDebounceTimer);
+      this.hoverDebounceTimer = null;
+    }
+
+    // Clear pending drag source
+    this.pendingDragSource = null;
 
     // ============================================
     // PHASE 4: CLEANUP STATE
@@ -4270,7 +4349,7 @@ export class RecordingManager {
    */
   private enrichStepWithReliableData(
     element: Element,
-    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE',
+    stepType: 'CLICK' | 'INPUT' | 'KEYBOARD' | 'COPY' | 'PASTE' | 'DOUBLE_CLICK' | 'RIGHT_CLICK' | 'HOVER' | 'DRAG_DROP',
     value?: string,
     key?: string
   ): {
@@ -4280,6 +4359,368 @@ export class RecordingManager {
     suggestedCondition: SuggestedCondition;
   } | null {
     return this.stepEnricher.enrichStep(element, stepType, value, key);
+  }
+
+  // ============================================
+  // DOUBLE-CLICK HANDLER
+  // ============================================
+
+  /**
+   * Handle double-click events (e.g., opening editors, selecting words)
+   */
+  private async handleDoubleClick(event: MouseEvent): Promise<void> {
+    if (!this.isRecording) return;
+
+    const target = event.target as HTMLElement;
+    if (!target) return;
+
+    // Find the actual clickable element
+    const clickableElement = this.elementFinder.findActualClickableElementSync(target);
+    if (!clickableElement) return;
+
+    console.log('🖱️ GhostWriter: Double-click detected on:', clickableElement.tagName);
+
+    try {
+      const selectors = SelectorEngine.generateSelectors(clickableElement);
+      const labelResult = LabelFinder.findLabelWithConfidence(clickableElement);
+      const label = labelResult.label !== 'Unknown Field' ? labelResult.label : null;
+
+      const stepPayload: WorkflowStepPayload = {
+        selector: selectors.primary,
+        fallbackSelectors: selectors.fallbacks.length > 0 ? selectors.fallbacks : [selectors.primary],
+        xpath: selectors.xpath,
+        timestamp: Date.now(),
+        url: window.location.href,
+        tabUrl: this.currentTabUrl || undefined,
+        tabTitle: this.currentTabTitle || undefined,
+        tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+        shadowPath: selectors.shadowPath,
+        label: label || undefined,
+        elementText: clickableElement.textContent?.trim().substring(0, 100) || undefined,
+        eventDetails: {
+          coordinates: { x: event.clientX, y: event.clientY },
+          modifiers: this.captureModifiers(event),
+        },
+      };
+
+      // Capture visual snapshot
+      await this.captureVisualSnapshotForStep(clickableElement, stepPayload);
+
+      // Enrich with reliable replayer data
+      const reliableData = this.enrichStepWithReliableData(clickableElement, 'DOUBLE_CLICK');
+      if (reliableData) {
+        stepPayload.locatorBundle = reliableData.locatorBundle;
+        stepPayload.intent = reliableData.intent;
+        stepPayload.scope = reliableData.locatorBundle.scope;
+        stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+      }
+
+      const step: WorkflowStep = {
+        type: 'DOUBLE_CLICK',
+        payload: stepPayload,
+        description: `Double-click on ${label || clickableElement.tagName.toLowerCase()}`,
+      };
+
+      this.sendStep(step);
+      this.lastStep = step;
+      console.log('✅ GhostWriter: DOUBLE_CLICK step created');
+
+    } catch (error) {
+      console.warn('GhostWriter: Failed to handle double-click:', error);
+    }
+  }
+
+  // ============================================
+  // RIGHT-CLICK (CONTEXT MENU) HANDLER
+  // ============================================
+
+  /**
+   * Handle right-click events (context menu triggers)
+   */
+  private async handleRightClick(event: MouseEvent): Promise<void> {
+    if (!this.isRecording) return;
+
+    const target = event.target as HTMLElement;
+    if (!target) return;
+
+    // Find the actual element
+    const clickableElement = this.elementFinder.findActualClickableElementSync(target);
+    if (!clickableElement) return;
+
+    console.log('🖱️ GhostWriter: Right-click detected on:', clickableElement.tagName);
+
+    try {
+      const selectors = SelectorEngine.generateSelectors(clickableElement);
+      const labelResult = LabelFinder.findLabelWithConfidence(clickableElement);
+      const label = labelResult.label !== 'Unknown Field' ? labelResult.label : null;
+
+      const stepPayload: WorkflowStepPayload = {
+        selector: selectors.primary,
+        fallbackSelectors: selectors.fallbacks.length > 0 ? selectors.fallbacks : [selectors.primary],
+        xpath: selectors.xpath,
+        timestamp: Date.now(),
+        url: window.location.href,
+        tabUrl: this.currentTabUrl || undefined,
+        tabTitle: this.currentTabTitle || undefined,
+        tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+        shadowPath: selectors.shadowPath,
+        label: label || undefined,
+        elementText: clickableElement.textContent?.trim().substring(0, 100) || undefined,
+        eventDetails: {
+          mouseButton: 'right',
+          coordinates: { x: event.clientX, y: event.clientY },
+          modifiers: this.captureModifiers(event),
+        },
+      };
+
+      // Capture visual snapshot
+      await this.captureVisualSnapshotForStep(clickableElement, stepPayload);
+
+      // Enrich with reliable replayer data
+      const reliableData = this.enrichStepWithReliableData(clickableElement, 'RIGHT_CLICK');
+      if (reliableData) {
+        stepPayload.locatorBundle = reliableData.locatorBundle;
+        stepPayload.intent = reliableData.intent;
+        stepPayload.scope = reliableData.locatorBundle.scope;
+        stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+      }
+
+      const step: WorkflowStep = {
+        type: 'RIGHT_CLICK',
+        payload: stepPayload,
+        description: `Right-click on ${label || clickableElement.tagName.toLowerCase()}`,
+      };
+
+      this.sendStep(step);
+      this.lastStep = step;
+      console.log('✅ GhostWriter: RIGHT_CLICK step created');
+
+    } catch (error) {
+      console.warn('GhostWriter: Failed to handle right-click:', error);
+    }
+  }
+
+  // ============================================
+  // DRAG AND DROP HANDLERS
+  // ============================================
+
+  /**
+   * Handle drag start - capture the source element
+   */
+  private handleDragStart(event: DragEvent): void {
+    if (!this.isRecording) return;
+
+    const target = event.target as HTMLElement;
+    if (!target) return;
+
+    console.log('🖱️ GhostWriter: Drag started on:', target.tagName);
+
+    try {
+      const selectors = SelectorEngine.generateSelectors(target);
+
+      // Store the drag source for when drop happens
+      this.pendingDragSource = {
+        element: target,
+        selector: selectors.primary,
+        coordinates: { x: event.clientX, y: event.clientY },
+      };
+
+    } catch (error) {
+      console.warn('GhostWriter: Failed to handle drag start:', error);
+    }
+  }
+
+  /**
+   * Handle drop - create DRAG_DROP step with source and target
+   */
+  private async handleDrop(event: DragEvent): Promise<void> {
+    if (!this.isRecording) return;
+
+    // Must have a pending drag source
+    if (!this.pendingDragSource) {
+      console.warn('GhostWriter: Drop without drag start');
+      return;
+    }
+
+    const dropTarget = event.target as HTMLElement;
+    if (!dropTarget) {
+      this.pendingDragSource = null;
+      return;
+    }
+
+    console.log('🖱️ GhostWriter: Drop on:', dropTarget.tagName);
+
+    try {
+      const targetSelectors = SelectorEngine.generateSelectors(dropTarget);
+      const sourceLabelResult = LabelFinder.findLabelWithConfidence(this.pendingDragSource.element as HTMLElement);
+      const targetLabelResult = LabelFinder.findLabelWithConfidence(dropTarget);
+
+      const stepPayload: WorkflowStepPayload = {
+        selector: this.pendingDragSource.selector,
+        fallbackSelectors: [targetSelectors.primary],
+        timestamp: Date.now(),
+        url: window.location.href,
+        tabUrl: this.currentTabUrl || undefined,
+        tabTitle: this.currentTabTitle || undefined,
+        tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+        dragDropDetails: {
+          sourceSelector: this.pendingDragSource.selector,
+          sourceCoordinates: this.pendingDragSource.coordinates,
+          targetSelector: targetSelectors.primary,
+          targetCoordinates: { x: event.clientX, y: event.clientY },
+          dataTransfer: event.dataTransfer ? {
+            types: Array.from(event.dataTransfer.types),
+          } : undefined,
+        },
+      };
+
+      // Capture visual snapshot of drop target
+      await this.captureVisualSnapshotForStep(dropTarget, stepPayload);
+
+      // Enrich with reliable replayer data
+      const reliableData = this.enrichStepWithReliableData(dropTarget, 'DRAG_DROP');
+      if (reliableData) {
+        stepPayload.locatorBundle = reliableData.locatorBundle;
+        stepPayload.intent = reliableData.intent;
+        stepPayload.scope = reliableData.locatorBundle.scope;
+        stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+      }
+
+      const sourceLabel = sourceLabelResult.label !== 'Unknown Field' ? sourceLabelResult.label : 'element';
+      const targetLabel = targetLabelResult.label !== 'Unknown Field' ? targetLabelResult.label : 'target';
+
+      const step: WorkflowStep = {
+        type: 'DRAG_DROP',
+        payload: stepPayload,
+        description: `Drag ${sourceLabel} to ${targetLabel}`,
+      };
+
+      this.sendStep(step);
+      this.lastStep = step;
+      console.log('✅ GhostWriter: DRAG_DROP step created');
+
+    } catch (error) {
+      console.warn('GhostWriter: Failed to handle drop:', error);
+    } finally {
+      // Clear pending drag source
+      this.pendingDragSource = null;
+    }
+  }
+
+  // ============================================
+  // HOVER HANDLER
+  // ============================================
+
+  /**
+   * Handle mouseenter - track significant hovers (those that trigger tooltips/popups)
+   */
+  private handleMouseEnter(event: MouseEvent): void {
+    if (!this.isRecording) return;
+
+    const target = event.target as HTMLElement;
+    if (!target) return;
+
+    // Clear any existing hover timer
+    if (this.hoverDebounceTimer !== null) {
+      clearTimeout(this.hoverDebounceTimer);
+    }
+
+    // Only track hovers on elements that might show tooltips
+    const hasTooltipIndicator = target.hasAttribute('title') ||
+                                target.hasAttribute('data-tooltip') ||
+                                target.hasAttribute('aria-describedby') ||
+                                target.closest('[data-tooltip]') ||
+                                target.closest('[title]');
+
+    if (!hasTooltipIndicator) {
+      return; // Skip elements unlikely to trigger tooltips
+    }
+
+    // Set debounce timer - only record if user hovers for significant time
+    this.hoverDebounceTimer = window.setTimeout(() => {
+      this.recordHoverStep(target, event).catch((error) => {
+        console.warn('GhostWriter: Failed to record hover step:', error);
+      });
+    }, this.HOVER_TRIGGER_DELAY);
+  }
+
+  /**
+   * Record a hover step after debounce
+   */
+  private async recordHoverStep(target: HTMLElement, event: MouseEvent): Promise<void> {
+    if (!this.isRecording) return;
+
+    console.log('🖱️ GhostWriter: Significant hover detected on:', target.tagName);
+
+    try {
+      const selectors = SelectorEngine.generateSelectors(target);
+      const labelResult = LabelFinder.findLabelWithConfidence(target);
+      const label = labelResult.label !== 'Unknown Field' ? labelResult.label : null;
+
+      // Check if a popup appeared
+      const popup = document.querySelector('[role="tooltip"], .tooltip, [data-tooltip-content]');
+      const triggeredPopup = popup && popup.textContent?.trim().length > 0;
+
+      const stepPayload: WorkflowStepPayload = {
+        selector: selectors.primary,
+        fallbackSelectors: selectors.fallbacks.length > 0 ? selectors.fallbacks : [selectors.primary],
+        xpath: selectors.xpath,
+        timestamp: Date.now(),
+        url: window.location.href,
+        tabUrl: this.currentTabUrl || undefined,
+        tabTitle: this.currentTabTitle || undefined,
+        tabIndex: this.currentTabIndex !== null ? this.currentTabIndex : undefined,
+        shadowPath: selectors.shadowPath,
+        label: label || undefined,
+        elementText: target.textContent?.trim().substring(0, 100) || undefined,
+        hoverDetails: {
+          duration: this.HOVER_TRIGGER_DELAY,
+          triggeredPopup: !!triggeredPopup,
+        },
+        eventDetails: {
+          coordinates: { x: event.clientX, y: event.clientY },
+        },
+      };
+
+      // Capture visual snapshot
+      await this.captureVisualSnapshotForStep(target, stepPayload);
+
+      // Enrich with reliable replayer data
+      const reliableData = this.enrichStepWithReliableData(target, 'HOVER');
+      if (reliableData) {
+        stepPayload.locatorBundle = reliableData.locatorBundle;
+        stepPayload.intent = reliableData.intent;
+        stepPayload.scope = reliableData.locatorBundle.scope;
+        stepPayload.disambiguators = reliableData.locatorBundle.disambiguators;
+      }
+
+      const step: WorkflowStep = {
+        type: 'HOVER',
+        payload: stepPayload,
+        description: `Hover on ${label || target.tagName.toLowerCase()}${triggeredPopup ? ' (shows tooltip)' : ''}`,
+      };
+
+      this.sendStep(step);
+      this.lastStep = step;
+      console.log('✅ GhostWriter: HOVER step created');
+
+    } catch (error) {
+      console.warn('GhostWriter: Failed to record hover:', error);
+    }
+  }
+
+  /**
+   * Helper to capture modifier keys from mouse event
+   */
+  private captureModifiers(event: MouseEvent): { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean } | undefined {
+    const modifiers: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean } = {};
+    if (event.ctrlKey) modifiers.ctrl = true;
+    if (event.shiftKey) modifiers.shift = true;
+    if (event.altKey) modifiers.alt = true;
+    if (event.metaKey) modifiers.meta = true;
+
+    // Only return if at least one modifier is set
+    return Object.keys(modifiers).length > 0 ? modifiers : undefined;
   }
 
   // DISABLED: PageModel context capture during recording causes lag

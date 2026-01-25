@@ -13,12 +13,13 @@ export type MessageType =
   | 'AI_VALIDATION_COMPLETED'
   | 'STEP_ENHANCED'
   | 'ANALYZE_WORKFLOW'
-  // Unified workflow execution - all three handled by same engine
-  | 'EXECUTE_WORKFLOW'
-  | 'EXECUTE_WORKFLOW_ADAPTIVE'  // @deprecated - alias for EXECUTE_WORKFLOW
-  | 'EXECUTE_WORKFLOW_VERIFIED'  // @deprecated - alias for EXECUTE_WORKFLOW
-  | 'EXECUTE_WORKFLOW_UNIVERSAL' // New Universal Execution Engine (v2)
+  // @deprecated - these message types are no longer used, use EXECUTE_WORKFLOW_AGENT instead
+  | 'EXECUTE_WORKFLOW'           // @deprecated
+  | 'EXECUTE_WORKFLOW_ADAPTIVE'  // @deprecated
+  | 'EXECUTE_WORKFLOW_VERIFIED'  // @deprecated
+  | 'EXECUTE_WORKFLOW_UNIVERSAL' // @deprecated
   | 'EXECUTE_WORKFLOW_AGENT' // AI Agent execution mode (observe-act loop)
+  | 'EXECUTE_WORKFLOW_VISION' // Vision-only execution mode (CDP-based, runs from service worker)
   // AI Agent progress messages
   | 'AGENT_PROGRESS'
   | 'AGENT_THINKING'

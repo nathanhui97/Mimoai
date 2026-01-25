@@ -17,7 +17,7 @@ import type { Intent, StepGoal } from './intent';
 import type { Scope } from './scope';
 import type { SuggestedCondition } from './conditions';
 
-export type WorkflowStepType = 'CLICK' | 'INPUT' | 'NAVIGATION' | 'KEYBOARD' | 'SCROLL' | 'TAB_SWITCH' | 'COPY' | 'PASTE';
+export type WorkflowStepType = 'CLICK' | 'DOUBLE_CLICK' | 'RIGHT_CLICK' | 'HOVER' | 'DRAG_DROP' | 'INPUT' | 'NAVIGATION' | 'KEYBOARD' | 'SCROLL' | 'TAB_SWITCH' | 'COPY' | 'PASTE';
 
 export interface ElementState {
   visible: boolean;
@@ -44,6 +44,29 @@ export interface EventDetails {
   }; // Only included if at least one modifier is true
   coordinates?: { x: number; y: number }; // Click coordinates
   eventSequence?: ('mousedown' | 'focus' | 'mouseup' | 'click')[];
+}
+
+/** Details for drag and drop operations */
+export interface DragDropDetails {
+  /** Source element being dragged */
+  sourceSelector: string;
+  sourceCoordinates: { x: number; y: number };
+  /** Target element to drop onto */
+  targetSelector: string;
+  targetCoordinates: { x: number; y: number };
+  /** Data being transferred (if available) */
+  dataTransfer?: {
+    types: string[];
+    data?: Record<string, string>;
+  };
+}
+
+/** Details for hover interactions */
+export interface HoverDetails {
+  /** Duration of hover in ms */
+  duration?: number;
+  /** Whether hover triggered a tooltip/popup */
+  triggeredPopup?: boolean;
 }
 
 export interface ViewportInfo {
@@ -216,6 +239,10 @@ export interface WorkflowStepPayload {
   // Phase 1: Critical fixes
   eventDetails?: EventDetails; // Event sequence and details
   viewport?: ViewportInfo; // Viewport dimensions and scroll position
+  // Drag and drop details (for DRAG_DROP steps)
+  dragDropDetails?: DragDropDetails;
+  // Hover details (for HOVER steps)
+  hoverDetails?: HoverDetails;
   // Phase 2: Important fixes
   inputDetails?: InputDetails; // Input type and validation (for INPUT steps)
   elementBounds?: ElementBounds; // Element bounding box
