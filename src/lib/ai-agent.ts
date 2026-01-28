@@ -434,6 +434,36 @@ export interface AgentResult {
   error?: string;
 }
 
+/**
+ * Execution context passed to LLM when fast-path falls through
+ * This gives the LLM information about what was already tried
+ */
+export interface ExecutionContext {
+  // Fast-path attempt details
+  fastPathAttempted: boolean;
+  fastPathConfidence?: number;  // 0-100
+  fastPathReason?: 'NO_SELECTORS' | 'LOW_CONFIDENCE' | 'AMBIGUOUS' | 'NOT_FOUND' | 'ELEMENT_NOT_INTERACTABLE' | 'DROPDOWN_OPEN';
+
+  // What strategies were tried
+  strategiesTried: string[];  // ['recorded_selector', 'scope_filter', 'text_match', 'xpath', 'shadow_piercing']
+
+  // Scroll attempts
+  scrollAttempted: boolean;
+  scrollDirection?: 'up' | 'down';
+  scrollAttempts?: number;
+
+  // Why LLM is being called
+  callReason: 'DISAMBIGUATION' | 'NOT_FOUND' | 'RECOVERY' | 'LOW_CONFIDENCE' | 'INITIAL';
+
+  // Current step context
+  currentStepFailures: number;  // How many times this step has failed
+  previousStepAction?: string;  // What the last successful action was
+
+  // Candidate details (what was found)
+  candidatesFound: number;
+  topCandidateScore?: number;
+}
+
 /** Progress callback */
 export type AgentProgressCallback = (
   stepNumber: number,
@@ -455,7 +485,17 @@ export class AIAgent {
   private onProgress?: AgentProgressCallback;
   private onThinkingEvent?: ThinkingEventCallback;
   private aborted: boolean = false;
-  
+
+  // Execution context for LLM - tracks what was tried before calling LLM
+  private executionContext: ExecutionContext = {
+    fastPathAttempted: false,
+    strategiesTried: [],
+    scrollAttempted: false,
+    callReason: 'INITIAL',
+    currentStepFailures: 0,
+    candidatesFound: 0,
+  };
+
   // Extracted modules
   private readonly candidateFinder: CandidateFinder;
   private readonly hintExtractor: HintExtractor;
@@ -2240,9 +2280,24 @@ export class AIAgent {
    *          { executed: false } if should fall back to AI
    */
   private async tryFastPathExecute(hint: AgentHint): Promise<{ executed: boolean; success?: boolean; error?: string; confidence?: number }> {
+    // Reset execution context at start of each fast-path attempt
+    this.executionContext = {
+      fastPathAttempted: true,
+      strategiesTried: [],
+      scrollAttempted: false,
+      callReason: 'INITIAL',
+      currentStepFailures: hint.failureCount || 0,
+      candidatesFound: 0,
+      previousStepAction: this.state.history.length > 0
+        ? this.state.history[this.state.history.length - 1].action.type
+        : undefined,
+    };
+
     try {
       // Only attempt fast-path for click and type actions
       if (hint.actionType !== 'click' && hint.actionType !== 'type') {
+        this.executionContext.fastPathAttempted = false;
+        this.executionContext.callReason = 'INITIAL';
         return { executed: false };
       }
 
@@ -2292,19 +2347,22 @@ export class AIAgent {
       if (dropdownIsOpen && hint.targetText && hint.actionType === 'click') {
         const hintTextLower = hint.targetText.toLowerCase().trim();
         const dropdownOptions = domMap.activeDropdown?.options || [];
-        
+
         // EXACT match only - the hint text must EQUAL an option text (normalized)
         const matchesDropdownOption = dropdownOptions.some(opt => {
           const optText = (opt.text || opt.name || '').toLowerCase().trim();
           // Only match if texts are equal or very close (within 3 char difference for typos)
-          return optText === hintTextLower || 
-                 (optText.length > 5 && hintTextLower.length > 5 && 
+          return optText === hintTextLower ||
+                 (optText.length > 5 && hintTextLower.length > 5 &&
                   Math.abs(optText.length - hintTextLower.length) <= 3 &&
                   (optText.startsWith(hintTextLower) || hintTextLower.startsWith(optText)));
         });
-        
+
         if (matchesDropdownOption) {
           console.log(`[Hybrid] ⚡ Confidence-based skip: Dropdown option EXACTLY matches "${hint.targetText}" (let LLM select)`);
+          this.executionContext.fastPathReason = 'DROPDOWN_OPEN';
+          this.executionContext.callReason = 'DISAMBIGUATION';
+          this.executionContext.candidatesFound = dropdownOptions.length;
           return { executed: false, confidence: 50 };
         } else {
           console.log(`[Hybrid] 📋 Dropdown is open but "${hint.targetText}" doesn't exactly match any option - continuing hybrid path`);
@@ -2321,6 +2379,8 @@ export class AIAgent {
       
       if (selectors.length === 0) {
         console.log('[Hybrid] ⚡ Confidence-based skip: No recorded selectors');
+        this.executionContext.fastPathReason = 'NO_SELECTORS';
+        this.executionContext.callReason = 'RECOVERY';
         return { executed: false, confidence: 0 };
       }
 
@@ -2363,15 +2423,21 @@ export class AIAgent {
       // DEBUG: Log selectors being tried (only in debug mode)
       debugLog('Hybrid', `🔍 Trying ${selectors.length} selectors`, selectors.map(s => s.substring(0, 80)));
 
+      // Track that we're trying recorded selectors
+      this.executionContext.strategiesTried.push('recorded_selector');
+
       // Find ALL matching candidates
       const candidates: HTMLElement[] = [];
-      
+
       for (const selector of selectors) {
         try {
           let found: NodeListOf<Element> | Element[] = [];
-          
+
           // Handle XPath selectors using document.evaluate
           if (selector.startsWith('/')) {
+            if (!this.executionContext.strategiesTried.includes('xpath')) {
+              this.executionContext.strategiesTried.push('xpath');
+            }
             debugLog('Hybrid', `🔍 Trying XPath selector: ${selector.substring(0, 80)}`);
             try {
               const xpathResult = document.evaluate(
@@ -2397,6 +2463,9 @@ export class AIAgent {
             }
           } else if (selector.includes(' >> ')) {
             // Handle shadow-piercing selectors (e.g., "gs-report-widget-element >> [aria-label='More Options']")
+            if (!this.executionContext.strategiesTried.includes('shadow_piercing')) {
+              this.executionContext.strategiesTried.push('shadow_piercing');
+            }
             debugLog('Hybrid', `🔍 Trying shadow-piercing selector: ${selector.substring(0, 80)}`);
             const parts = selector.split(' >> ');
             if (parts.length === 2) {
@@ -2444,6 +2513,9 @@ export class AIAgent {
             }
           } else {
             // CSS selector
+            if (!this.executionContext.strategiesTried.includes('css_selector')) {
+              this.executionContext.strategiesTried.push('css_selector');
+            }
             found = document.querySelectorAll(selector);
             debugLog('Hybrid', `🔍 CSS selector "${selector.substring(0, 80)}" found ${found.length} elements`);
           }
@@ -2489,7 +2561,8 @@ export class AIAgent {
       // CRITICAL: If there's a scope hint and multiple candidates, filter by scope FIRST
       if (hint.recordedScopeHint && candidates.length > 1) {
         console.log(`[Hybrid] 🔍 Filtering ${candidates.length} candidates by scope: "${hint.recordedScopeHint}"`);
-        
+        this.executionContext.strategiesTried.push('scope_filter');
+
         // Import scope utilities
         const { resolveScopeContainer } = await import('../types/scope');
         const widgetElement = resolveScopeContainer({
@@ -2630,39 +2703,50 @@ export class AIAgent {
       
       // Calculate confidence score
       const confidenceAnalysis = this.calculateExecutionConfidence(hint, candidates);
-      
+
+      // Update execution context with confidence analysis results
+      this.executionContext.candidatesFound = candidates.length;
+      this.executionContext.fastPathConfidence = confidenceAnalysis.confidence;
+      this.executionContext.topCandidateScore = confidenceAnalysis.bestCandidate ? confidenceAnalysis.confidence : undefined;
+
       console.log(`[Hybrid] Confidence: ${confidenceAnalysis.confidence}% - ${confidenceAnalysis.reason}`);
-      
+
       // ============================================================================
       // CONFIDENCE-BASED ROUTING
       // ============================================================================
-      
+
       // HIGH CONFIDENCE (95-100%): Execute immediately
       if (confidenceAnalysis.confidence >= 95 && confidenceAnalysis.bestCandidate) {
         console.log('[Hybrid] ⚡ HIGH CONFIDENCE (95%+) - Instant execution');
         return await this.instantExecute(hint, confidenceAnalysis.bestCandidate, confidenceAnalysis.confidence);
       }
-      
+
       // MEDIUM-HIGH CONFIDENCE (70-94%): Execute with caution (OPTIMIZED from 80%)
       // Lowered threshold to skip more LLM calls - saves ~500-1500ms per step
       if (confidenceAnalysis.confidence >= 70 && confidenceAnalysis.bestCandidate) {
         console.log('[Hybrid] ⚡ MEDIUM-HIGH CONFIDENCE (70-94%) - Fast execution');
         return await this.instantExecute(hint, confidenceAnalysis.bestCandidate, confidenceAnalysis.confidence);
       }
-      
+
       // MEDIUM CONFIDENCE (50-69%): Let LLM disambiguate (OPTIMIZED from 60%)
       // DOM found candidates, but LLM should pick the right one
       if (confidenceAnalysis.confidence >= 50) {
         console.log('[Hybrid] 🧠 MEDIUM CONFIDENCE (50-69%) - Let LLM pick from candidates');
+        this.executionContext.fastPathReason = candidates.length > 1 ? 'AMBIGUOUS' : 'LOW_CONFIDENCE';
+        this.executionContext.callReason = 'DISAMBIGUATION';
         return { executed: false, confidence: confidenceAnalysis.confidence };
       }
-      
+
       // LOW CONFIDENCE (<50%): Full LLM recovery (OPTIMIZED from 60%)
       console.log('[Hybrid] 🔧 LOW CONFIDENCE (<50%) - Full LLM recovery needed');
+      this.executionContext.fastPathReason = candidates.length === 0 ? 'NOT_FOUND' : 'LOW_CONFIDENCE';
+      this.executionContext.callReason = candidates.length === 0 ? 'NOT_FOUND' : 'LOW_CONFIDENCE';
       return { executed: false, confidence: confidenceAnalysis.confidence };
-      
+
     } catch (error) {
       console.log('[Hybrid] ⚡ Error in confidence-based routing, falling back to LLM:', error);
+      this.executionContext.fastPathReason = 'NOT_FOUND';
+      this.executionContext.callReason = 'RECOVERY';
       return { executed: false, confidence: 0 };
     }
   }
@@ -2747,7 +2831,12 @@ export class AIAgent {
     }
 
     const maxScrollAttempts = 3;
+    // Track scroll attempts in execution context
+    this.executionContext.scrollAttempted = true;
+    this.executionContext.scrollAttempts = 0;
+
     for (let attempt = 0; attempt < maxScrollAttempts; attempt++) {
+      this.executionContext.scrollAttempts = attempt + 1;
       const captureResult = await VisualSnapshotService.captureFullPage(0.7, true);
       if (!captureResult?.screenshot) {
         // If screenshot fails but modal exists, try fallback scroll
@@ -2827,7 +2916,10 @@ export class AIAgent {
       if (result.action === 'scroll') {
         const direction = result.params?.direction || 'down';
         const amount = result.params?.amount || 300;
-        
+
+        // Track scroll direction in execution context
+        this.executionContext.scrollDirection = direction as 'up' | 'down';
+
         // MODAL-AWARE SCROLLING: Always prefer modal container if one exists
         const scrollTarget = modalContainer || this.findModalScrollContainer();
         if (scrollTarget) {
@@ -3700,9 +3792,24 @@ export class AIAgent {
       
       // NEW: Spreadsheet context (extracted fresh during replay)
       spreadsheetContext,
-      
+
       // Only include screenshot if VisionClicker is enabled
       screenshot: observation.screenshot,
+
+      // NEW: Execution context from fast-path attempt (Phase 1 of Intelligent Agent Upgrade)
+      // This tells the LLM what was already tried before calling it
+      // Only include if feature flag is enabled
+      executionContext: (isFeatureEnabled('INTELLIGENT_AGENT_CONTEXT') && this.executionContext.fastPathAttempted) ? {
+        fastPathAttempted: this.executionContext.fastPathAttempted,
+        fastPathConfidence: this.executionContext.fastPathConfidence,
+        fastPathReason: this.executionContext.fastPathReason,
+        strategiesTried: this.executionContext.strategiesTried,
+        scrollAttempted: this.executionContext.scrollAttempted,
+        callReason: this.executionContext.callReason,
+        currentStepFailures: this.executionContext.currentStepFailures,
+        candidatesFound: this.executionContext.candidatesFound,
+        topCandidateScore: this.executionContext.topCandidateScore,
+      } : undefined,
     };
 
     try {
@@ -3719,6 +3826,17 @@ export class AIAgent {
         });
       } else {
         console.log('[AIAgent] 📤 No analyzedIntent in payload');
+      }
+
+      // Log execution context (Phase 1 Intelligent Agent)
+      if ((payload as any).executionContext) {
+        console.log('[AIAgent] 📤 Including executionContext:', {
+          fastPathConfidence: (payload as any).executionContext.fastPathConfidence,
+          fastPathReason: (payload as any).executionContext.fastPathReason,
+          strategiesTried: (payload as any).executionContext.strategiesTried,
+          callReason: (payload as any).executionContext.callReason,
+          candidatesFound: (payload as any).executionContext.candidatesFound,
+        });
       }
       
       // DEBUG: Show current hint details

@@ -107,6 +107,42 @@ export const FeatureFlags = {
    * Risk: None - isolated, wrapped in try-catch
    */
   POST_ACTION_OBSERVER: true,
+
+  // ============================================================================
+  // INTELLIGENT AGENT UPGRADES (Phased rollout)
+  // ============================================================================
+
+  /**
+   * Phase 1: Fast-path context passed to LLM
+   * When enabled: LLM receives information about what fast-path tried
+   * Cost: None (additive context, no extra API calls)
+   * Risk: Low - additive change, doesn't break existing flow
+   */
+  INTELLIGENT_AGENT_CONTEXT: true,
+
+  /**
+   * Phase 2A: Flexible LLM responses (scroll, skip, alternatives)
+   * When enabled: LLM can suggest scroll/wait/skip instead of just picking candidates
+   * Cost: None (same API call, different response parsing)
+   * Risk: Medium - changes response parsing, needs testing
+   */
+  INTELLIGENT_AGENT_FLEXIBLE: false,
+
+  /**
+   * Phase 2B: Goal-oriented prompting
+   * When enabled: LLM reasons about goals instead of rigidly following hints
+   * Cost: None (prompt change only)
+   * Risk: Medium - prompt changes can affect behavior
+   */
+  INTELLIGENT_AGENT_GOAL: false,
+
+  /**
+   * Phase 2C: Goal verification and early completion
+   * When enabled: Agent can finish early when goal is achieved
+   * Cost: Low (verification checks after actions)
+   * Risk: Medium-High - new verification logic
+   */
+  INTELLIGENT_AGENT_VERIFY: false,
 } as const;
 
 /**

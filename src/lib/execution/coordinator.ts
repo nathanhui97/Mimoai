@@ -529,7 +529,6 @@ export class ExecutionCoordinator {
     try {
       // Dynamic import to avoid circular dependencies
       const { UnifiedRecoveryEngine } = await import('./recovery');
-      const { Tier1Executor } = await import('../tier1-executor');
 
       // Create recovery engine with appropriate options
       const recoveryEngine = new UnifiedRecoveryEngine({

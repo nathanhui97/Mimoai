@@ -13,8 +13,6 @@ import { describe, test, expect, beforeEach, vi, type Mock } from 'vitest';
 import {
   ExecutionCoordinator,
   analyzeWorkflowComplexity,
-  type ExecutionOptions,
-  type ExecutionResult,
 } from './coordinator';
 import type { SavedWorkflow, WorkflowStep } from '../../types/workflow';
 
@@ -55,9 +53,31 @@ vi.mock('../ai-agent', () => ({
   })),
 }));
 
+// Helper to create mock LocatorFeatures
+function createMockFeatures(overrides: Partial<{
+  uniqueMatchAtRecordTime: boolean;
+  matchCountAtRecordTime: number;
+  hasStableAttributes: boolean;
+  textStabilityHint: 'stable' | 'likely_dynamic' | 'unknown';
+  isWithinShadowDOM: boolean;
+  recordedTagName: string;
+  hasDynamicParts: boolean;
+}> = {}) {
+  return {
+    uniqueMatchAtRecordTime: true,
+    matchCountAtRecordTime: 1,
+    hasStableAttributes: true,
+    textStabilityHint: 'stable' as const,
+    isWithinShadowDOM: false,
+    recordedTagName: 'button',
+    hasDynamicParts: false,
+    ...overrides,
+  };
+}
+
 // Helper to create mock workflow
 function createMockWorkflow(steps: Partial<WorkflowStep>[] = []): SavedWorkflow {
-  const defaultSteps: WorkflowStep[] = steps.map((s, i) => ({
+  const defaultSteps = steps.map((s, i) => ({
     type: s.type || 'CLICK',
     description: s.description || `Step ${i + 1}`,
     payload: {
@@ -65,8 +85,9 @@ function createMockWorkflow(steps: Partial<WorkflowStep>[] = []): SavedWorkflow 
       timestamp: Date.now(),
       url: 'https://example.com',
       locatorBundle: {
-        strategies: [{ type: 'css', value: '.test-button', priority: 1 }],
+        strategies: [{ type: 'css' as const, value: '.test-button', features: createMockFeatures() }],
         disambiguators: [],
+        tagName: 'button',
       },
       ...s.payload,
     },
@@ -75,7 +96,6 @@ function createMockWorkflow(steps: Partial<WorkflowStep>[] = []): SavedWorkflow 
   return {
     id: 'test-workflow-1',
     name: 'Test Workflow',
-    url: 'https://example.com',
     steps: defaultSteps.length > 0 ? defaultSteps : [
       {
         type: 'CLICK',
@@ -85,15 +105,16 @@ function createMockWorkflow(steps: Partial<WorkflowStep>[] = []): SavedWorkflow 
           timestamp: Date.now(),
           url: 'https://example.com',
           locatorBundle: {
-            strategies: [{ type: 'testid', value: 'submit-btn', priority: 1 }],
+            strategies: [{ type: 'testid' as const, value: 'submit-btn', features: createMockFeatures({ hasStableAttributes: true }) }],
             disambiguators: [],
+            tagName: 'button',
           },
         },
       },
     ],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  } as SavedWorkflow;
 }
 
 describe('ExecutionCoordinator', () => {
@@ -126,8 +147,9 @@ describe('ExecutionCoordinator', () => {
             timestamp: Date.now(),
             url: 'https://example.com',
             locatorBundle: {
-              strategies: [{ type: 'testid', value: 'submit', priority: 1 }],
+              strategies: [{ type: 'testid' as const, value: 'submit', features: createMockFeatures({ hasStableAttributes: true }) }],
               disambiguators: [],
+              tagName: 'button',
             },
           },
         },
@@ -149,11 +171,16 @@ describe('ExecutionCoordinator', () => {
             timestamp: Date.now(),
             url: 'https://example.com',
             locatorQuality: {
+              hasStableAttributes: false,
+              hasUniqueMatch: false,
               hasDynamicParts: true,
+              strategiesAvailable: 1,
               confidenceScore: 0.4,
             },
             elementAnalysis: {
-              executionStrategy: 'AI_REQUIRED',
+              executionStrategy: 'AI_REQUIRED' as const,
+              confidence: 0.4,
+              reasons: ['Dynamic selector detected'],
             },
           },
         },
@@ -187,19 +214,19 @@ describe('ExecutionCoordinator', () => {
       const workflow: SavedWorkflow = {
         id: 'test',
         name: 'Test',
-        url: 'https://example.com',
         steps: [
           {
             type: 'TAB_SWITCH',
             description: 'Switch to tab',
             payload: {
-              targetTabIndex: 1,
-              tabUrl: 'https://other.com',
-            } as any,
+              fromUrl: 'https://example.com',
+              toUrl: 'https://other.com',
+              timestamp: Date.now(),
+            },
           },
-        ],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        ] as WorkflowStep[],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
       };
 
       const complexity = analyzeWorkflowComplexity(workflow);
@@ -286,8 +313,18 @@ describe('ExecutionCoordinator', () => {
             selector: '.dynamic-12345',
             timestamp: Date.now(),
             url: 'https://example.com',
-            locatorQuality: { hasDynamicParts: true, confidenceScore: 0.3 },
-            elementAnalysis: { executionStrategy: 'AI_REQUIRED' },
+            locatorQuality: {
+              hasStableAttributes: false,
+              hasUniqueMatch: false,
+              hasDynamicParts: true,
+              strategiesAvailable: 1,
+              confidenceScore: 0.3
+            },
+            elementAnalysis: {
+              executionStrategy: 'AI_REQUIRED' as const,
+              confidence: 0.3,
+              reasons: ['Dynamic selector detected'],
+            },
           },
         },
       ]);

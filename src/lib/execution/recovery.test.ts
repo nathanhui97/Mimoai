@@ -59,6 +59,19 @@ vi.mock('../../content/dom-map', () => ({
   domMapToText: vi.fn(() => ''),
 }));
 
+// Helper to create mock LocatorFeatures
+function createMockFeatures() {
+  return {
+    uniqueMatchAtRecordTime: true,
+    matchCountAtRecordTime: 1,
+    hasStableAttributes: true,
+    textStabilityHint: 'stable' as const,
+    isWithinShadowDOM: false,
+    recordedTagName: 'button',
+    hasDynamicParts: false,
+  };
+}
+
 // Helper to create mock context
 function createMockContext(
   overrides: Partial<RecoveryAttemptContext> = {}
@@ -71,8 +84,9 @@ function createMockContext(
       timestamp: Date.now(),
       url: 'https://example.com',
       locatorBundle: {
-        strategies: [{ type: 'css', value: '.test-button', priority: 1 }],
+        strategies: [{ type: 'css', value: '.test-button', features: createMockFeatures() }],
         disambiguators: [],
+        tagName: 'button',
       },
     },
   };
@@ -83,6 +97,8 @@ function createMockContext(
       target: { name: 'Test Button' },
       description: 'Click test button',
     },
+    reasoning: 'Clicking the test button as instructed',
+    confidence: 0.9,
   };
 
   return {
@@ -225,10 +241,11 @@ describe('UnifiedRecoveryEngine', () => {
             fallbackSelectors: ['.fallback-1', '.fallback-2'],
             locatorBundle: {
               strategies: [
-                { type: 'css', value: '.primary-selector', priority: 1 },
-                { type: 'css', value: '.fallback-1', priority: 2 },
+                { type: 'css', value: '.primary-selector', features: createMockFeatures() },
+                { type: 'css', value: '.fallback-1', features: createMockFeatures() },
               ],
               disambiguators: [],
+              tagName: 'button',
             },
           },
         },

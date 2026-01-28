@@ -243,6 +243,22 @@ interface DOMAgentRequest {
     distinguishers: string[];
     textPatterns: string[];
   };
+
+  // Phase 1 Intelligent Agent: Execution context from fast-path attempt
+  // This tells the LLM what was already tried before calling it
+  executionContext?: {
+    fastPathAttempted: boolean;
+    fastPathConfidence?: number;  // 0-100
+    fastPathReason?: 'NO_SELECTORS' | 'LOW_CONFIDENCE' | 'AMBIGUOUS' | 'NOT_FOUND' | 'ELEMENT_NOT_INTERACTABLE' | 'DROPDOWN_OPEN';
+    strategiesTried: string[];  // ['recorded_selector', 'scope_filter', 'text_match', 'xpath', 'shadow_piercing']
+    scrollAttempted: boolean;
+    scrollDirection?: 'up' | 'down';
+    scrollAttempts?: number;
+    callReason: 'DISAMBIGUATION' | 'NOT_FOUND' | 'RECOVERY' | 'LOW_CONFIDENCE' | 'INITIAL';
+    currentStepFailures: number;
+    candidatesFound: number;
+    topCandidateScore?: number;
+  };
 }
 
 interface SemanticTarget {
@@ -362,9 +378,19 @@ serve(async (req) => {
       console.log('Has modal:', payload.pageContext?.hasModal);
       console.log('Candidates received:', payload.currentCandidates?.length || 0);
       if (payload.currentCandidates && payload.currentCandidates.length > 0) {
-        console.log('Top 3 candidates:', payload.currentCandidates.slice(0, 3).map(c => 
+        console.log('Top 3 candidates:', payload.currentCandidates.slice(0, 3).map(c =>
           `[${c.role}] "${c.name}" id="${c.id || 'none'}"`
         ));
+      }
+
+      // Log execution context (Phase 1 Intelligent Agent)
+      if (payload.executionContext?.fastPathAttempted) {
+        console.log('🔧 Execution Context:');
+        console.log('  Fast-path confidence:', payload.executionContext.fastPathConfidence);
+        console.log('  Fast-path reason:', payload.executionContext.fastPathReason);
+        console.log('  Call reason:', payload.executionContext.callReason);
+        console.log('  Strategies tried:', payload.executionContext.strategiesTried?.join(', '));
+        console.log('  Candidates found:', payload.executionContext.candidatesFound);
       }
     }
 
@@ -535,6 +561,39 @@ The hints show RECORDED values, but variable overrides are what the user WANTS N
 `;
   }
 
+  // Build execution context section (Phase 1 Intelligent Agent Upgrade)
+  // This tells the LLM what was already tried before calling it
+  let executionContextSection = '';
+  if (payload.executionContext?.fastPathAttempted) {
+    const ctx = payload.executionContext;
+    const strategiesStr = ctx.strategiesTried.length > 0
+      ? ctx.strategiesTried.join(', ')
+      : 'none';
+
+    executionContextSection = `
+## 🔧 EXECUTION CONTEXT (What was already tried)
+
+**Fast-path was attempted:** YES
+**Fast-path confidence:** ${ctx.fastPathConfidence ?? 'N/A'}%
+**Fast-path result:** ${ctx.fastPathReason || 'Unknown'}
+**Why LLM is being called:** ${ctx.callReason}
+
+**Strategies already tried:**
+${ctx.strategiesTried.map(s => `  • ${s}`).join('\n') || '  • (none)'}
+
+**Candidates found:** ${ctx.candidatesFound}
+${ctx.topCandidateScore ? `**Top candidate score:** ${ctx.topCandidateScore}%` : ''}
+${ctx.scrollAttempted ? `**Scroll attempted:** YES (${ctx.scrollDirection || 'down'})` : ''}
+${ctx.currentStepFailures > 0 ? `**Previous failures on this step:** ${ctx.currentStepFailures}` : ''}
+
+⚠️ IMPORTANT - Use this context to make better decisions:
+- If strategies were already tried, DON'T suggest the same approach
+- If candidates were found but confidence was low, help disambiguate
+- If NOT_FOUND, the element may need scrolling or may not exist
+- If AMBIGUOUS, use scope/widget hints to pick the right one
+`;
+  }
+
   let userContextSection = '';
   if (userContext?.identity || userContext?.focus) {
     const contextLines = [
@@ -667,6 +726,7 @@ ${intent.failurePatterns.map(fp => `- ${fp.description}${fp.visualIndicator ? ` 
 You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
 
 IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.
+${executionContextSection}
 ${userContextSection}
 ${workflowLearningsSection}
 ${taskSummarySection}

@@ -4374,15 +4374,16 @@ export class RecordingManager {
     const target = event.target as HTMLElement;
     if (!target) return;
 
-    // Find the actual clickable element
-    const clickableElement = this.elementFinder.findActualClickableElementSync(target);
+    // Find the actual clickable element - for double-click, capture elements at click point
+    const elementsAtClickPoint = document.elementsFromPoint(event.clientX, event.clientY);
+    const clickableElement = this.elementFinder.findActualClickableElementSync(target, event, elementsAtClickPoint);
     if (!clickableElement) return;
 
     console.log('🖱️ GhostWriter: Double-click detected on:', clickableElement.tagName);
 
     try {
       const selectors = SelectorEngine.generateSelectors(clickableElement);
-      const labelResult = LabelFinder.findLabelWithConfidence(clickableElement);
+      const labelResult = LabelFinder.findLabelWithConfidence(clickableElement as HTMLElement);
       const label = labelResult.label !== 'Unknown Field' ? labelResult.label : null;
 
       const stepPayload: WorkflowStepPayload = {
@@ -4404,10 +4405,10 @@ export class RecordingManager {
       };
 
       // Capture visual snapshot
-      await this.captureVisualSnapshotForStep(clickableElement, stepPayload);
+      await this.captureVisualSnapshotForStep(clickableElement as HTMLElement, stepPayload);
 
       // Enrich with reliable replayer data
-      const reliableData = this.enrichStepWithReliableData(clickableElement, 'DOUBLE_CLICK');
+      const reliableData = this.enrichStepWithReliableData(clickableElement as HTMLElement, 'DOUBLE_CLICK');
       if (reliableData) {
         stepPayload.locatorBundle = reliableData.locatorBundle;
         stepPayload.intent = reliableData.intent;
@@ -4443,15 +4444,16 @@ export class RecordingManager {
     const target = event.target as HTMLElement;
     if (!target) return;
 
-    // Find the actual element
-    const clickableElement = this.elementFinder.findActualClickableElementSync(target);
+    // Find the actual element - for right-click, capture elements at click point
+    const elementsAtClickPoint = document.elementsFromPoint(event.clientX, event.clientY);
+    const clickableElement = this.elementFinder.findActualClickableElementSync(target, event, elementsAtClickPoint);
     if (!clickableElement) return;
 
     console.log('🖱️ GhostWriter: Right-click detected on:', clickableElement.tagName);
 
     try {
       const selectors = SelectorEngine.generateSelectors(clickableElement);
-      const labelResult = LabelFinder.findLabelWithConfidence(clickableElement);
+      const labelResult = LabelFinder.findLabelWithConfidence(clickableElement as HTMLElement);
       const label = labelResult.label !== 'Unknown Field' ? labelResult.label : null;
 
       const stepPayload: WorkflowStepPayload = {
@@ -4474,10 +4476,10 @@ export class RecordingManager {
       };
 
       // Capture visual snapshot
-      await this.captureVisualSnapshotForStep(clickableElement, stepPayload);
+      await this.captureVisualSnapshotForStep(clickableElement as HTMLElement, stepPayload);
 
       // Enrich with reliable replayer data
-      const reliableData = this.enrichStepWithReliableData(clickableElement, 'RIGHT_CLICK');
+      const reliableData = this.enrichStepWithReliableData(clickableElement as HTMLElement, 'RIGHT_CLICK');
       if (reliableData) {
         stepPayload.locatorBundle = reliableData.locatorBundle;
         stepPayload.intent = reliableData.intent;
