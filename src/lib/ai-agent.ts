@@ -501,16 +501,22 @@ export class AIAgent {
   private readonly hintExtractor: HintExtractor;
   private readonly stuckDetector: StuckDetector;
 
+  // Flag to prevent infinite loop when called from ExecutionCoordinator
+  private skipUnifiedExecution: boolean;
+
   constructor(options: {
     maxSteps?: number;
     stepTimeout?: number;
     onProgress?: AgentProgressCallback;
     onThinkingEvent?: ThinkingEventCallback;
+    /** Set to true when called from ExecutionCoordinator to prevent infinite loop */
+    skipUnifiedExecution?: boolean;
   } = {}) {
     this.maxSteps = options.maxSteps ?? 50;
     this.stepTimeout = options.stepTimeout ?? 30000; // Used for API timeout
     this.onProgress = options.onProgress;
     this.onThinkingEvent = options.onThinkingEvent;
+    this.skipUnifiedExecution = options.skipUnifiedExecution ?? false;
     
     // Initialize extracted modules
     this.candidateFinder = new CandidateFinder();
@@ -545,9 +551,9 @@ export class AIAgent {
     console.log(`[AIAgent] 📅 Created: ${workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : 'Unknown'}`);
     console.log(`[AIAgent] 📊 Total steps: ${workflow.steps.length}`);
 
-    // Check if unified execution is enabled
+    // Check if unified execution is enabled (but not if we're already called from coordinator)
     const config = aiConfig.getConfig();
-    if (config.useUnifiedExecution) {
+    if (config.useUnifiedExecution && !this.skipUnifiedExecution) {
       console.log('[AIAgent] 🚀 Using Unified Execution Architecture');
       return this.runWithUnifiedExecution(workflow, variableValues, userContext);
     }
@@ -1572,7 +1578,8 @@ export class AIAgent {
           await this.applyProactiveStrategies(currentHint);
         }
 
-        if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type')) {
+        // Include 'select' for native SELECT elements (fast-path can handle them efficiently)
+        if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type' || currentHint.actionType === 'select')) {
           const hybridResult = await this.tryFastPathExecute(currentHint);
           
           if (hybridResult.executed && hybridResult.success) {
@@ -3408,23 +3415,109 @@ export class AIAgent {
             return { executed: false, success: false, error: 'Navigation click had no effect', confidence };
           }
         }
-      } else if (hint.actionType === 'type' && hint.value) {
-        // For type actions, use Tier1Executor for robust typing
-        const { Tier1Executor } = await import('./tier1-executor');
-        const typeAction: AgentAction = {
-          type: 'type',
-          params: {
-            text: hint.value,
-            clearFirst: true,
-          },
-          reasoning: `Confidence-based execution (${confidence}%)`,
-          confidence: confidence / 100,
-        };
-        
-        const result = await Tier1Executor.execute(typeAction);
-        if (result.status !== 'success') {
-          console.log('[Hybrid] ⚡ Type execution failed, falling back to LLM');
+      } else if ((hint.actionType === 'type' || hint.actionType === 'select') && hint.value) {
+        // Check if element is a SELECT dropdown - needs special handling
+        if (htmlElement.tagName === 'SELECT') {
+          console.log('[Hybrid] ⚡ Element is SELECT dropdown, setting value directly');
+          const selectEl = htmlElement as HTMLSelectElement;
+          const targetValue = hint.value.trim();
+          const targetLower = targetValue.toLowerCase();
+
+          // Find matching option with priority: exact match > starts with > contains
+          let matchedOption: HTMLOptionElement | null = null;
+          let matchType = '';
+
+          const options = Array.from(selectEl.options);
+
+          // Priority 1: Exact match (case-insensitive) on text or value
+          for (const option of options) {
+            const optText = option.textContent?.trim() || '';
+            const optValue = option.value;
+            if (optText.toLowerCase() === targetLower || optValue.toLowerCase() === targetLower) {
+              matchedOption = option;
+              matchType = 'exact';
+              break;
+            }
+          }
+
+          // Priority 2: Starts with match (for partial input like "Opt" matching "Option 2")
+          if (!matchedOption) {
+            for (const option of options) {
+              const optText = option.textContent?.trim().toLowerCase() || '';
+              if (optText.startsWith(targetLower) || targetLower.startsWith(optText)) {
+                matchedOption = option;
+                matchType = 'startsWith';
+                break;
+              }
+            }
+          }
+
+          // Priority 3: Contains match (last resort)
+          if (!matchedOption) {
+            for (const option of options) {
+              const optText = option.textContent?.trim().toLowerCase() || '';
+              // Only match if target is a significant substring (at least 3 chars and >50% of option text)
+              if (targetLower.length >= 3 && optText.includes(targetLower) &&
+                  targetLower.length > optText.length * 0.5) {
+                matchedOption = option;
+                matchType = 'contains';
+                break;
+              }
+            }
+          }
+
+          if (matchedOption) {
+            selectEl.value = matchedOption.value;
+            // Dispatch change event to trigger any listeners
+            selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+            console.log(`[Hybrid] ⚡ Selected option: "${matchedOption.textContent?.trim()}" (${matchType} match)`);
+          } else {
+            console.log(`[Hybrid] ⚡ No matching option found for "${targetValue}" in ${options.length} options, falling back to LLM`);
+            console.log(`[Hybrid] Available options:`, options.map(o => o.textContent?.trim()).join(', '));
+            return { executed: false, success: false, confidence };
+          }
+        } else if (hint.actionType === 'select') {
+          // actionType is 'select' but element is not a SELECT - fall back to LLM
+          console.log('[Hybrid] ⚡ Hint says select but element is not SELECT, falling back to LLM');
           return { executed: false, success: false, confidence };
+        } else {
+          // For text inputs, type directly into the element
+          console.log('[Hybrid] ⚡ Typing directly into element');
+
+          // Clear first if needed
+          if ('value' in htmlElement) {
+            (htmlElement as HTMLInputElement).value = '';
+          }
+
+          // Focus and type
+          htmlElement.focus();
+
+          // Use execCommand for better compatibility, fallback to direct value set
+          const inputEl = htmlElement as HTMLInputElement | HTMLTextAreaElement;
+          if ('value' in inputEl) {
+            inputEl.value = hint.value;
+            // Dispatch input event to trigger validation/listeners
+            inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+            inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            // Fallback to Tier1Executor
+            const { Tier1Executor } = await import('./tier1-executor');
+            const typeAction: AgentAction = {
+              type: 'type',
+              params: {
+                text: hint.value,
+                clearFirst: true,
+              },
+              reasoning: `Confidence-based execution (${confidence}%)`,
+              confidence: confidence / 100,
+            };
+
+            const result = await Tier1Executor.execute(typeAction);
+            if (result.status !== 'success') {
+              console.log('[Hybrid] ⚡ Type execution failed, falling back to LLM');
+              return { executed: false, success: false, confidence };
+            }
+          }
         }
       }
       

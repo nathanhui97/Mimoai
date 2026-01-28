@@ -485,6 +485,9 @@ export class ExecutionCoordinator {
     const agent = new AIAgent({
       maxSteps: options.maxSteps,
       stepTimeout: options.stepTimeout,
+      // CRITICAL: Skip unified execution to prevent infinite loop
+      // (Coordinator calls AIAgent, which should NOT call Coordinator again)
+      skipUnifiedExecution: true,
       onProgress: (stepNumber, _action, status) => {
         options.onProgress?.(stepNumber, workflow.steps.length,
           status === 'completed' ? 'completed' :

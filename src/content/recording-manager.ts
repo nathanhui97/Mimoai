@@ -807,7 +807,15 @@ export class RecordingManager {
     }
     
     console.log('GhostWriter: Processing click on element:', actualElement.tagName, 'Classes:', actualElement.className?.toString()?.substring(0, 50));
-    
+
+    // CRITICAL: Skip native <option> elements inside native <select>
+    // Native SELECTs fire a 'change' event when selecting options, which is recorded as INPUT with decisionSpace
+    // Recording the CLICK would create duplicate steps without the dropdown options
+    if (actualElement.tagName === 'OPTION' && actualElement.closest('select')) {
+      console.log('🔍 GhostWriter: Skipping CLICK on native <option> inside <select> - will be recorded via change event with dropdown options');
+      return;
+    }
+
     // Pre-check if this is a list item/option (before async processing)
     let isListItemOrOption = this.isListItemOrOption(actualElement);
     
@@ -2177,6 +2185,12 @@ export class RecordingManager {
 
       const target = actualElement as HTMLSelectElement | HTMLInputElement;
       if (!target) return;
+
+      // Debug logging for SELECT elements
+      console.log(`[GhostWriter] 🔄 Change event on ${target.tagName}, type: ${(target as HTMLSelectElement).type}, value: ${target.value?.substring(0, 30)}`);
+      if (target.tagName === 'SELECT') {
+        console.log(`[GhostWriter] 📋 SELECT change detected - will record as INPUT with type: ${(target as HTMLSelectElement).type}`);
+      }
 
       // OUTCOME DIFFING: Capture "before" state (select/checkbox changes can trigger page updates)
       const beforeSignals = FeatureFlags.OUTCOME_VERIFICATION ? 
@@ -3609,15 +3623,149 @@ export class RecordingManager {
       // Capture input details (Phase 2: Important)
       // Only HTMLInputElement has min, max, pattern, step properties
       // For contenteditable, we don't have these properties
-      const inputDetails: import('../types/workflow').InputDetails | undefined = 
+      const elementType = (element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).type || 'text';
+      const inputDetails: import('../types/workflow').InputDetails | undefined =
         isContentEditable ? undefined : {
-          type: (element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).type || 'text',
+          type: elementType,
           required: (element as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement).required || false,
           min: element instanceof HTMLInputElement ? (element.min || undefined) : undefined,
           max: element instanceof HTMLInputElement ? (element.max || undefined) : undefined,
           pattern: element instanceof HTMLInputElement ? (element.pattern || undefined) : undefined,
           step: element instanceof HTMLInputElement ? (element.step ? parseFloat(element.step) : undefined) : undefined,
         };
+
+      // Debug: Log for SELECT elements
+      if (elementType === 'select-one' || elementType === 'select-multiple') {
+        console.log(`[GhostWriter] 📋 Recording SELECT element with inputDetails.type: "${elementType}"`);
+      }
+
+      // Capture SELECT options for dropdown variables
+      let selectOptions: string[] | undefined;
+      let groupLabel: string | undefined;
+
+      if (element.tagName === 'SELECT') {
+        const selectEl = element as HTMLSelectElement;
+        selectOptions = Array.from(selectEl.options).map(opt => opt.textContent?.trim() || opt.value).filter(Boolean);
+        console.log(`[GhostWriter] 📋 Captured ${selectOptions.length} SELECT options:`, selectOptions);
+      }
+      // Capture RADIO button group options
+      else if (element.tagName === 'INPUT' && (element as HTMLInputElement).type === 'radio') {
+        const radioEl = element as HTMLInputElement;
+        const radioName = radioEl.name;
+        if (radioName) {
+          // Find all radio buttons with the same name in the document
+          const radioGroup = document.querySelectorAll(`input[type="radio"][name="${CSS.escape(radioName)}"]`);
+          selectOptions = [];
+          radioGroup.forEach((radio) => {
+            // Get label for this radio button
+            const radioInput = radio as HTMLInputElement;
+            let optionLabel = '';
+
+            // Try to find associated label
+            const labelElement = radioInput.labels?.[0] || document.querySelector(`label[for="${CSS.escape(radioInput.id)}"]`);
+            if (labelElement) {
+              optionLabel = labelElement.textContent?.trim() || '';
+            }
+            // Fallback to value
+            if (!optionLabel) {
+              optionLabel = radioInput.value || '';
+            }
+            if (optionLabel) {
+              selectOptions!.push(optionLabel);
+            }
+          });
+
+          // Find group label (fieldset legend or parent group label)
+          const fieldset = element.closest('fieldset');
+          if (fieldset) {
+            const legend = fieldset.querySelector('legend');
+            if (legend) {
+              groupLabel = legend.textContent?.trim();
+            }
+          }
+          // Also check for a parent element with a label-like text (common pattern)
+          if (!groupLabel) {
+            const parent = element.closest('.form-group, .radio-group, [role="radiogroup"]');
+            if (parent) {
+              const labelEl = parent.querySelector('label:not([for]), .label, .group-label, [class*="label"]');
+              if (labelEl && !labelEl.querySelector('input')) {
+                groupLabel = labelEl.textContent?.trim();
+              }
+            }
+          }
+
+          console.log(`[GhostWriter] 📋 Captured ${selectOptions.length} RADIO options for group "${radioName}":`, selectOptions, 'groupLabel:', groupLabel);
+        }
+      }
+      // Capture CHECKBOX group options
+      else if (element.tagName === 'INPUT' && (element as HTMLInputElement).type === 'checkbox') {
+        const checkboxEl = element as HTMLInputElement;
+        const checkboxName = checkboxEl.name;
+
+        // Try to find all checkboxes in the same group
+        let checkboxGroup: NodeListOf<Element> | Element[];
+
+        if (checkboxName) {
+          // If there's a name, find all checkboxes with the same name
+          checkboxGroup = document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(checkboxName)}"]`);
+        } else {
+          // If no name, look for checkboxes in the same fieldset or parent container
+          const fieldset = element.closest('fieldset');
+          if (fieldset) {
+            checkboxGroup = fieldset.querySelectorAll('input[type="checkbox"]');
+          } else {
+            // Fall back to immediate container
+            const container = element.closest('.checkbox-group, .form-group, [role="group"]');
+            if (container) {
+              checkboxGroup = container.querySelectorAll('input[type="checkbox"]');
+            } else {
+              checkboxGroup = [element]; // Only this checkbox
+            }
+          }
+        }
+
+        if (checkboxGroup.length > 1) {
+          selectOptions = [];
+          checkboxGroup.forEach((checkbox) => {
+            const checkboxInput = checkbox as HTMLInputElement;
+            let optionLabel = '';
+
+            // Try to find associated label
+            const labelElement = checkboxInput.labels?.[0] || document.querySelector(`label[for="${CSS.escape(checkboxInput.id)}"]`);
+            if (labelElement) {
+              optionLabel = labelElement.textContent?.trim() || '';
+            }
+            // Fallback to value
+            if (!optionLabel) {
+              optionLabel = checkboxInput.value || '';
+            }
+            if (optionLabel) {
+              selectOptions!.push(optionLabel);
+            }
+          });
+
+          // Find group label (fieldset legend or parent group label)
+          const fieldset = element.closest('fieldset');
+          if (fieldset) {
+            const legend = fieldset.querySelector('legend');
+            if (legend) {
+              groupLabel = legend.textContent?.trim();
+            }
+          }
+          // Also check for a parent element with a label-like text
+          if (!groupLabel) {
+            const parent = element.closest('.form-group, .checkbox-group, [role="group"]');
+            if (parent) {
+              const labelEl = parent.querySelector('label:not([for]), .label, .group-label, [class*="label"]');
+              if (labelEl && !labelEl.querySelector('input')) {
+                groupLabel = labelEl.textContent?.trim();
+              }
+            }
+          }
+
+          console.log(`[GhostWriter] 📋 Captured ${selectOptions.length} CHECKBOX options for group "${checkboxName || '(unnamed)'}":`, selectOptions, 'groupLabel:', groupLabel);
+        }
+      }
 
       // Capture viewport and scroll information (Phase 1: Critical) - only if needed
       let viewport: import('../types/workflow').ViewportInfo | undefined = undefined;
@@ -3905,10 +4053,30 @@ export class RecordingManager {
             console.log(`📊 GhostWriter: Overriding cell reference "${scanned.gridCoordinates.cellReference}" → "${effectiveCellRef}" (explicit: ${!!explicitCellRef}, cached: ${!!this.pendingCellReference})`);
             scanned.gridCoordinates.cellReference = effectiveCellRef;
           }
+          // ADD SELECT/RADIO/CHECKBOX OPTIONS TO DECISION SPACE
+          if (selectOptions && selectOptions.length > 0) {
+            // Determine the type based on input type
+            const inputType = inputDetails?.type;
+            let decisionType: 'LIST_SELECTION' | 'RADIO_GROUP' | 'CHECKBOX_GROUP' = 'LIST_SELECTION';
+            if (inputType === 'radio') {
+              decisionType = 'RADIO_GROUP';
+            } else if (inputType === 'checkbox') {
+              decisionType = 'CHECKBOX_GROUP';
+            }
+
+            scanned.decisionSpace = {
+              type: decisionType,
+              selectedText: value || '',
+              selectedIndex: selectOptions.indexOf(value || ''),
+              options: selectOptions,
+              ...(groupLabel ? { groupLabel } : {}),
+            };
+            console.log(`[RecordingManager] 📋 Added ${decisionType} options to decisionSpace:`, selectOptions.length, 'options, groupLabel:', groupLabel);
+          }
           // NOTE: Previously looked up column headers here, but removed for simplicity
           // Users will rename variables in the UI instead
           // Cell reference (e.g., "A5", "B10") will be used as the default variable name
-          console.log(`[RecordingManager] ContextScanner.scan result for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference, usedExplicitRef: !!explicitCellRef });
+          console.log(`[RecordingManager] ContextScanner.scan result for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference, usedExplicitRef: !!explicitCellRef, hasSelectOptions: !!selectOptions });
           return scanned;
           })()),
         } : ((() => {
@@ -3920,10 +4088,30 @@ export class RecordingManager {
             console.log(`📊 GhostWriter: Overriding cell reference "${scanned.gridCoordinates.cellReference}" → "${effectiveCellRef}" (explicit: ${!!explicitCellRef}, cached: ${!!this.pendingCellReference})`);
             scanned.gridCoordinates.cellReference = effectiveCellRef;
           }
+          // ADD SELECT/RADIO/CHECKBOX OPTIONS TO DECISION SPACE
+          if (selectOptions && selectOptions.length > 0) {
+            // Determine the type based on input type
+            const inputType = inputDetails?.type;
+            let decisionType: 'LIST_SELECTION' | 'RADIO_GROUP' | 'CHECKBOX_GROUP' = 'LIST_SELECTION';
+            if (inputType === 'radio') {
+              decisionType = 'RADIO_GROUP';
+            } else if (inputType === 'checkbox') {
+              decisionType = 'CHECKBOX_GROUP';
+            }
+
+            scanned.decisionSpace = {
+              type: decisionType,
+              selectedText: value || '',
+              selectedIndex: selectOptions.indexOf(value || ''),
+              options: selectOptions,
+              ...(groupLabel ? { groupLabel } : {}),
+            };
+            console.log(`[RecordingManager] 📋 Added ${decisionType} options to decisionSpace (no context):`, selectOptions.length, 'options, groupLabel:', groupLabel);
+          }
           // NOTE: Previously looked up column headers here, but removed for simplicity
           // Users will rename variables in the UI instead
           // Cell reference (e.g., "A5", "B10") will be used as the default variable name
-          console.log(`[RecordingManager] ContextScanner.scan result (no context) for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference, usedExplicitRef: !!explicitCellRef });
+          console.log(`[RecordingManager] ContextScanner.scan result (no context) for INPUT step:`, { hasGridCoordinates: !!scanned.gridCoordinates, cellReference: scanned.gridCoordinates?.cellReference, columnHeader: scanned.gridCoordinates?.columnHeader, label, labelMatchesCellRef: label === scanned.gridCoordinates?.cellReference, usedCachedRef: !!this.pendingCellReference, usedExplicitRef: !!explicitCellRef, hasSelectOptions: !!selectOptions });
           return scanned;
         })()),
         similarity: similarElements.length > 0 ? {

@@ -351,7 +351,15 @@ export class HintExtractor {
       }
       return 'click';
     }
-    if (stepType === 'INPUT') return 'type';
+    if (stepType === 'INPUT') {
+      // Check if this is a SELECT element (dropdown)
+      const inputType = payload?.inputDetails?.type;
+      if (inputType === 'select-one' || inputType === 'select-multiple') {
+        console.log('[HintExtractor] 📋 Converting SELECT INPUT to SELECT action');
+        return 'select';
+      }
+      return 'type';
+    }
     if (stepType === 'NAVIGATION') return 'click'; // Always convert to click
     if (stepType === 'SCROLL') return 'scroll';
     return 'other';
@@ -448,10 +456,26 @@ export class HintExtractor {
       }
     } else if (step.type === 'INPUT' && originalValue && originalValue !== value) {
       const fieldName = placeholder || payload.elementText || 'field';
-      description = `Enter "${value}" in ${fieldName} (originally: "${originalValue}")`;
+      // Check if this is a SELECT element
+      const inputType = payload.inputDetails?.type;
+      const isSelect = inputType === 'select-one' || inputType === 'select-multiple';
+      if (isSelect) {
+        description = `Select "${value}" from ${fieldName} (originally: "${originalValue}")`;
+        console.log(`[HintExtractor] 📋 SELECT description with variable: "${description}"`);
+      } else {
+        description = `Enter "${value}" in ${fieldName} (originally: "${originalValue}")`;
+      }
     } else if (step.type === 'INPUT' && value) {
       const fieldName = placeholder || payload.elementText || 'field';
-      description = `Enter "${value}" in ${fieldName}`;
+      // Check if this is a SELECT element
+      const inputType = payload.inputDetails?.type;
+      const isSelect = inputType === 'select-one' || inputType === 'select-multiple';
+      if (isSelect) {
+        description = `Select "${value}" from ${fieldName}`;
+        console.log(`[HintExtractor] 📋 SELECT description: "${description}"`);
+      } else {
+        description = `Enter "${value}" in ${fieldName}`;
+      }
     } else if (step.type === 'CLICK' && payload.context?.decisionSpace?.options && payload.context.decisionSpace.options.length > 0 && value) {
       // DROPDOWN SELECTION: Use substituted value in description
       const fieldName = stepVariable?.fieldName || payload.label || 'dropdown';

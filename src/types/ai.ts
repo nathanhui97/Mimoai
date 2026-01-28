@@ -37,13 +37,15 @@ export interface SemanticContext {
     headerColumn?: number;
   };
   
-  // Decision space (dropdowns, lists)
+  // Decision space (dropdowns, lists, radio buttons, checkboxes)
   decisionSpace?: {
-    type: 'LIST_SELECTION';
+    type: 'LIST_SELECTION' | 'RADIO_GROUP' | 'CHECKBOX_GROUP';
     options: string[]; // All available options
-    selectedIndex: number;
-    selectedText: string;
+    selectedIndex: number; // For LIST_SELECTION and RADIO_GROUP
+    selectedText: string; // The selected/checked option text
+    selectedIndices?: number[]; // For CHECKBOX_GROUP (multiple selections)
     containerSelector?: string;
+    groupLabel?: string; // Label for the group (e.g., "Gender:", "Choose applicable options:")
   };
   
   // Button context (Interactive Section Anchoring - for generic div buttons in Salesforce/React)

@@ -2386,7 +2386,12 @@ function App() {
       case 'INPUT':
         const value = step.payload.value?.substring(0, 20);
         const label = step.payload.label || 'field';
-        return `Type "${value}${value && value.length >= 20 ? '...' : ''}" in ${label}`;
+        // Check if this is a SELECT element (dropdown)
+        const inputType = step.payload.inputDetails?.type;
+        const isSelect = inputType === 'select-one' || inputType === 'select-multiple';
+        const verb = isSelect ? 'Select' : 'Type';
+        const preposition = isSelect ? 'from' : 'in';
+        return `${verb} "${value}${value && value.length >= 20 ? '...' : ''}" ${preposition} ${label}`;
       case 'NAVIGATION':
         try {
           return `Go to ${new URL(step.payload.url).hostname}`;

@@ -23,7 +23,22 @@ export class ElementFinder {
     }
 
     const tagName = element.tagName.toLowerCase();
-    if (tagName === 'li' || tagName === 'option') {
+
+    // CRITICAL: Skip native <option> elements inside native <select>
+    // Native SELECTs fire a 'change' event when selecting options, which is recorded as INPUT
+    // Recording the CLICK on OPTION would create duplicate steps without decisionSpace
+    if (tagName === 'option') {
+      const parentSelect = element.closest('select');
+      if (parentSelect) {
+        console.log('🔍 GhostWriter: Skipping native <option> inside <select> - will be recorded via change event');
+        return false;
+      }
+      // Non-native option (ARIA-based custom dropdown)
+      console.log('🔍 GhostWriter: Element is list item/option (by tag):', tagName);
+      return true;
+    }
+
+    if (tagName === 'li') {
       console.log('🔍 GhostWriter: Element is list item/option (by tag):', tagName);
       return true;
     }
@@ -43,7 +58,8 @@ export class ElementFinder {
     // Many React dropdowns don't set role="option" on the option elements themselves
     // They just use div elements inside a [role="listbox"] or [role="menu"] container
     // Use traditional selector for synchronous operation during recording
-    const container = element.closest('[role="listbox"], [role="menu"], [role="list"], select, ul, ol');
+    // NOTE: Exclude native <select> from this check - those are handled by change events
+    const container = element.closest('[role="listbox"], [role="menu"], [role="list"], ul, ol');
     if (container && element !== container) {
       // ENHANCED LOGGING: Show container details
       const containerInfo = {
@@ -54,7 +70,7 @@ export class ElementFinder {
         elementTag: element.tagName,
         elementText: (element as HTMLElement).textContent?.trim().substring(0, 50),
       };
-      
+
       // If we're inside a dropdown container, this is very likely a dropdown option
       // Be permissive: any clickable element inside a listbox/menu is probably an option
       // This catches cases where the option is a div inside a listbox without explicit roles
@@ -62,7 +78,7 @@ export class ElementFinder {
         console.log('🔍 GhostWriter: Detected dropdown option inside container:', containerInfo);
         return true;
       }
-      
+
       // Also check if this is a direct child of the container (even if not explicitly interactive)
       // Some dropdowns use non-interactive divs that become clickable via event handlers
       const isDirectChild = element.parentElement === container;
@@ -70,6 +86,14 @@ export class ElementFinder {
         console.log('🔍 GhostWriter: Detected direct child of dropdown container as option:', containerInfo);
         return true;
       }
+    }
+
+    // CRITICAL: Skip elements inside native <select> - they are handled by change events
+    // This is a separate check to ensure we don't record CLICK on options inside native selects
+    const nativeSelectParent = element.closest('select');
+    if (nativeSelectParent) {
+      console.log('🔍 GhostWriter: Element is inside native <select> - skipping (will be recorded via change event)');
+      return false;
     }
 
     // Check if parent has list-related role

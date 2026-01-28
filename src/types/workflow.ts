@@ -329,13 +329,15 @@ export interface WorkflowStepPayload {
       headerRow?: number;
       headerColumn?: number;
     };
-    // Decision space for list items/options (AI context)
+    // Decision space for list items/options/radio buttons/checkboxes (AI context)
     decisionSpace?: {
-      type: 'LIST_SELECTION';
-      options: string[]; // All available options in the container
-      selectedIndex: number; // 0-indexed position of selected option
-      selectedText: string; // Text of the selected option
+      type: 'LIST_SELECTION' | 'RADIO_GROUP' | 'CHECKBOX_GROUP';
+      options: string[]; // All available options in the container/group
+      selectedIndex: number; // 0-indexed position of selected option (for LIST_SELECTION and RADIO_GROUP)
+      selectedText: string; // Text of the selected/checked option
+      selectedIndices?: number[]; // For CHECKBOX_GROUP (multiple selections)
       containerSelector?: string; // Selector for the container (dropdown, list, etc.)
+      groupLabel?: string; // Label for the group (e.g., "Gender:", "Choose applicable options:")
     };
     // Button context (Interactive Section Anchoring - for generic div buttons in Salesforce/React)
     buttonContext?: {

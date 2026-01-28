@@ -472,21 +472,32 @@ export class VariableDetector {
       };
     }
 
-    // Regular input field
-    const fieldName = payload.label || 'Input Field';
-
     // Check if this INPUT came from an external paste (demo value - should be variable)
     const isExternalPaste = payload.clipboardDetails?.isExternalPaste === true;
 
-    // Check if this INPUT is actually a dropdown (has decisionSpace with options)
-    const hasDropdownOptions = payload.context?.decisionSpace?.options &&
-                               payload.context.decisionSpace.options.length > 0;
+    // Check if this INPUT is actually a dropdown/radio/checkbox (has decisionSpace with options)
+    const decisionSpace = payload.context?.decisionSpace;
+    const hasDropdownOptions = decisionSpace?.options && decisionSpace.options.length > 0;
+    const decisionType = decisionSpace?.type;
+
+    // Regular input field - use groupLabel for radio/checkbox groups, fallback to label
+    // For radio/checkbox groups, the individual option label (e.g., "Other") is less useful than the group label (e.g., "Gender")
+    let fieldName: string;
+    if (decisionSpace?.groupLabel) {
+      // Use group label for radio/checkbox groups (e.g., "Gender" instead of "Other")
+      fieldName = decisionSpace.groupLabel;
+      console.log('[VariableDetector] 📋 Using group label for field name:', fieldName);
+    } else {
+      fieldName = payload.label || 'Input Field';
+    }
 
     if (hasDropdownOptions) {
-      console.log('[VariableDetector] 📋 INPUT step has dropdown options:', {
+      console.log('[VariableDetector] 📋 INPUT step has dropdown/radio/checkbox options:', {
         fieldName,
-        optionsCount: payload.context!.decisionSpace!.options!.length,
-        options: payload.context!.decisionSpace!.options!.slice(0, 5),
+        decisionType,
+        groupLabel: decisionSpace?.groupLabel,
+        optionsCount: decisionSpace!.options!.length,
+        options: decisionSpace!.options!.slice(0, 5),
       });
     }
 
@@ -515,7 +526,7 @@ export class VariableDetector {
       stepIndex,
       stepId: `${payload.timestamp}`,
       fieldName,
-      fieldLabel: payload.label,
+      fieldLabel: decisionSpace?.groupLabel || payload.label,
       variableName: this.generateVariableName(fieldName),
       defaultValue: payload.value,
       inputType: payload.inputDetails?.type,
@@ -523,9 +534,9 @@ export class VariableDetector {
       confidence,
       reasoning,
       sourceHint,
-      // Include dropdown data if available
+      // Include dropdown/radio/checkbox data if available
       isDropdown: hasDropdownOptions,
-      options: hasDropdownOptions ? payload.context!.decisionSpace!.options : undefined,
+      options: hasDropdownOptions ? decisionSpace!.options : undefined,
     };
   }
 
@@ -564,12 +575,15 @@ export class VariableDetector {
     
     if (!selectedText) return null;
 
-    // FIX: Use semantic anchors for field name (they contain the actual dropdown label like "Account Status")
+    // FIX: Use groupLabel or semantic anchors for field name (they contain the actual dropdown label like "Account Status")
     // This prevents multiple dropdowns from having the same variableName "selection"
-    const fieldName = payload.label || 
+    // For radio/checkbox groups, groupLabel contains the group heading (e.g., "Gender")
+    const groupLabel = payload.context?.decisionSpace?.groupLabel;
+    const fieldName = groupLabel ||
+                     payload.label ||
                      payload.aiEvidence?.semanticAnchors?.textLabel ||
                      payload.aiEvidence?.semanticAnchors?.ariaLabel ||
-                     payload.context?.container?.text || 
+                     payload.context?.container?.text ||
                      'Selection';
     
     console.log('[VariableDetector] Creating choice variable:', {

@@ -27,11 +27,13 @@ export interface TableCoordinates {
 }
 
 export interface DecisionSpace {
-  type: 'LIST_SELECTION';
-  options: string[]; // All available options in the container
-  selectedIndex: number; // 0-indexed position of selected option
-  selectedText: string; // Text of the selected option
+  type: 'LIST_SELECTION' | 'RADIO_GROUP' | 'CHECKBOX_GROUP';
+  options: string[]; // All available options in the container/group
+  selectedIndex: number; // 0-indexed position of selected option (for LIST_SELECTION and RADIO_GROUP)
+  selectedText: string; // Text of the selected/checked option
+  selectedIndices?: number[]; // For CHECKBOX_GROUP (multiple selections)
   containerSelector?: string; // Selector for the container (dropdown, list, etc.)
+  groupLabel?: string; // Label for the group (e.g., "Gender:", "Choose applicable options:")
 }
 
 export interface ButtonContext {
