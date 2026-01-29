@@ -1625,15 +1625,15 @@ export class AIAgent {
           // Triggers when:
           // 1. SMART_HYBRID_MODE is enabled
           // 2. Action is click, type, or select (not just click)
-          // 3. Confidence is low (<50) OR executed failed (element not found)
-          const shouldTryScroll = isFeatureEnabled('SMART_HYBRID_MODE') && 
+          // 3. Element not found AND confidence is low/absent (not medium+ where candidates exist)
+          const shouldTryScroll = isFeatureEnabled('SMART_HYBRID_MODE') &&
             (currentHint.actionType === 'click' || currentHint.actionType === 'type' || currentHint.actionType === 'select') &&
-            ((!hybridResult.executed) || (hybridResult.confidence !== undefined && hybridResult.confidence < 50));
+            (!hybridResult.executed && (hybridResult.confidence === undefined || hybridResult.confidence < 50));
           
           if (shouldTryScroll) {
             console.log(`[AIAgent] 🔄 Element not found or low confidence - trying modal-aware scroll to find it`);
             const scrollResult = await this.smartScrollToFind(currentHint);
-            if (scrollResult.found || scrollResult.attempts > 0) {
+            if (scrollResult.found) {
               continue;
             }
           }
@@ -1702,6 +1702,13 @@ export class AIAgent {
         }
 
         if (action.type === 'fail') {
+          // Retry once on LLM parse failures before giving up
+          if (action.reasoning?.includes('Could not extract JSON') && (currentHint.failureCount || 0) < 2) {
+            currentHint.failureCount = (currentHint.failureCount || 0) + 1;
+            console.warn(`[AIAgent] ⚠️ LLM parse failure (attempt ${currentHint.failureCount}/2), retrying...`);
+            await this.sleep(500);
+            continue;
+          }
           console.error('[AIAgent] Agent decided to fail:', action.params.reason);
           this.state.status = 'failed';
           break;
@@ -2302,7 +2309,7 @@ export class AIAgent {
 
     try {
       // Only attempt fast-path for click and type actions
-      if (hint.actionType !== 'click' && hint.actionType !== 'type') {
+      if (hint.actionType !== 'click' && hint.actionType !== 'type' && hint.actionType !== 'select') {
         this.executionContext.fastPathAttempted = false;
         this.executionContext.callReason = 'INITIAL';
         return { executed: false };
@@ -3645,11 +3652,36 @@ export class AIAgent {
       }
     }
     
+    // Factor 5: Text match quality (15 points)
+    // When multiple candidates exist, boost confidence if the top candidate's text matches the hint target
+    if (bestCandidate && hint.targetText && candidates.length > 1) {
+      const hintText = hint.targetText.trim().toLowerCase();
+
+      // Get text from element (handles buttons, links, labels, spans, etc.)
+      let elementText = (bestCandidate.textContent || '').trim().toLowerCase();
+
+      // For input elements (checkboxes, radios), check the associated label
+      if (bestCandidate instanceof HTMLInputElement && bestCandidate.id) {
+        const label = bestCandidate.ownerDocument?.querySelector(`label[for="${CSS.escape(bestCandidate.id)}"]`);
+        if (label) {
+          elementText = (label.textContent || '').trim().toLowerCase();
+        }
+      }
+
+      // Also check aria-label
+      const ariaLabel = (bestCandidate.getAttribute('aria-label') || '').trim().toLowerCase();
+
+      if (elementText === hintText || ariaLabel === hintText) {
+        score += 15;
+        reasons.push('text match (+15)');
+      }
+    }
+
     const finalScore = Math.min(score, 100);
     const reason = reasons.join(', ');
-    
+
     console.log(`[Hybrid] Confidence: ${finalScore}% - ${reason}`);
-    
+
     return {
       confidence: finalScore,
       reason,
