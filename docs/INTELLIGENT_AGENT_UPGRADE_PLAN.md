@@ -278,8 +278,8 @@ Add flags to enable/disable new behaviors:
 
 ```typescript
 // feature-flags.ts
-INTELLIGENT_AGENT_CONTEXT: true,    // Phase 1 - fast-path context
-INTELLIGENT_AGENT_FLEXIBLE: false,  // Phase 2A - flexible responses
+INTELLIGENT_AGENT_CONTEXT: true,    // Phase 1 - fast-path context ✅ SHIPPED
+INTELLIGENT_AGENT_FLEXIBLE: true,   // Phase 2A - flexible responses ✅ SHIPPED
 INTELLIGENT_AGENT_GOAL: false,      // Phase 2B - goal-oriented prompting
 INTELLIGENT_AGENT_VERIFY: false,    // Phase 2C - goal verification
 ```
@@ -358,13 +358,35 @@ INTELLIGENT_AGENT_VERIFY: false,    // Phase 2C - goal verification
 
 ## Next Steps
 
-1. **Review this plan** with team
-2. **Prioritize phases** based on current pain points
-3. **Start Phase 1** (low risk, high value)
-4. **Measure impact** before proceeding to Phase 2
+1. ~~**Start Phase 1** (low risk, high value)~~ ✅ DONE
+2. ~~**Phase 2A: Flexible Responses**~~ ✅ DONE
+3. **Phase 2B: Goal-Oriented Prompting** — next priority
+4. **Phase 2C: Goal Verification** — after 2B
+5. **Deploy edge function** (`supabase functions deploy dom_agent`) for Phase 2A
+6. **Test Phase 2A** on https://play2.automationcamp.ir/ with flag ON
+
+---
+
+## Implementation Log
+
+### 2026-01-26: Phase 1 Complete
+- Added `ExecutionContext` to `ai-agent.ts` and `dom_agent/index.ts`
+- LLM now receives fast-path attempt details (confidence, strategies tried, scroll attempts)
+- Feature flag: `INTELLIGENT_AGENT_CONTEXT: true`
+- 28 unit tests passing
+
+### 2026-01-29: Phase 2A Complete
+- **Relaxed candidate enforcement** in `parseGeminiResponse` — LLM can now return `scroll`, `wait`, `skip`, `done` even when candidates exist (when `allowFlexibleResponses=true`)
+- **Flexible prompt** replaces rigid `⛔ MUST USE chooseCandidateIndex` with 5 options (A-E) when flag enabled
+- **Intermediate action detection** — scroll/wait treated as intermediate so hint stays active and DOM is re-observed
+- **Backward compatible** — flag off = zero behavior change
+- Feature flag: `INTELLIGENT_AGENT_FLEXIBLE: true`
+- 46 new Phase 2A unit tests passing (74 total intelligent agent tests)
+- Files changed: `dom_agent/index.ts`, `ai-agent.ts`, `feature-flags.ts`
+- **TODO**: Deploy edge function, then test with real workflows
 
 ---
 
 *Document created: 2026-01-26*
 *Author: AI Analysis of Execution Engine*
-*Status: PLAN - Not yet implemented*
+*Status: Phase 1 ✅ | Phase 2A ✅ | Phase 2B-2C pending*

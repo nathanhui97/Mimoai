@@ -126,7 +126,7 @@ export const FeatureFlags = {
    * Cost: None (same API call, different response parsing)
    * Risk: Medium - changes response parsing, needs testing
    */
-  INTELLIGENT_AGENT_FLEXIBLE: false,
+  INTELLIGENT_AGENT_FLEXIBLE: true,
 
   /**
    * Phase 2B: Goal-oriented prompting

@@ -244,6 +244,9 @@ interface DOMAgentRequest {
     textPatterns: string[];
   };
 
+  // Phase 2A: Allow LLM flexible responses (scroll, wait, skip) even when candidates exist
+  allowFlexibleResponses?: boolean;
+
   // Phase 1 Intelligent Agent: Execution context from fast-path attempt
   // This tells the LLM what was already tried before calling it
   executionContext?: {
@@ -501,7 +504,7 @@ serve(async (req) => {
 // ============================================================================
 
 function buildAgentPrompt(payload: DOMAgentRequest): string {
-  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint, userContext } = payload;
+  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint, userContext, allowFlexibleResponses } = payload;
   
   // Find the current hint to focus on
   const currentHint = hints.find((h, i) => i >= currentHintIndex && !h.completed);
@@ -1003,7 +1006,60 @@ NOTE: For spreadsheets, prefer these specialized actions over generic click+type
 They handle navigation, verification, and retries automatically.
 
 Respond with a JSON object:
-${currentCandidates.length > 0 ? `
+${currentCandidates.length > 0 ? (allowFlexibleResponses ? `
+🎯 ${currentCandidates.length} CANDIDATES EXIST — Choose the BEST option:
+
+**Option A (PREFERRED): Pick a candidate**
+{
+  "chooseCandidateIndex": 2,
+  "action": "click",
+  "reasoning": "Candidate 2 is in the correct widget",
+  "confidence": 1.0,
+  "hintStepIndex": ${currentHintIndex}
+}
+Use "chooseCandidateIndex": INTEGER from 0 to ${currentCandidates.length - 1}.
+THE "target" FIELD IS FORBIDDEN WHEN USING chooseCandidateIndex.
+"text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
+
+**Option B: Scroll** (if the correct element might be off-screen)
+{
+  "action": "scroll",
+  "direction": "down",
+  "amount": 300,
+  "reasoning": "Target element not visible among candidates, scrolling to reveal it",
+  "confidence": 0.7,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Option C: Skip** (if the hint is already satisfied — e.g. value already filled)
+{
+  "action": "skip",
+  "reason": "The input already contains the required value",
+  "reasoning": "Hint goal already achieved",
+  "confidence": 0.9,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Option D: Done** (if the entire workflow goal is already achieved)
+{
+  "action": "done",
+  "reason": "Workflow goal achieved — success page visible",
+  "reasoning": "Goal complete",
+  "confidence": 0.95,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Option E: Wait** (if page is still loading)
+{
+  "action": "wait",
+  "duration": 1000,
+  "reasoning": "Page content is loading",
+  "confidence": 0.7,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+IMPORTANT: Option A (picking a candidate) is STRONGLY PREFERRED. Only use B-E when you are confident the candidates do NOT contain the correct element or the goal is already met.
+` : `
 ⛔⛔⛔ CRITICAL: ${currentCandidates.length} CANDIDATES EXIST - YOU MUST USE chooseCandidateIndex ⛔⛔⛔
 
 YOUR RESPONSE MUST LOOK EXACTLY LIKE THIS:
@@ -1029,7 +1085,7 @@ REQUIRED FIELDS:
 - "hintStepIndex": ${currentHintIndex}
 
 THE "target" FIELD IS FORBIDDEN WHEN CANDIDATES EXIST. DO NOT INCLUDE IT.
-` : `
+`) : `
 WHEN NO CANDIDATES (free-form target):
 {
   "action": "click" | "type" | "select" | "scroll" | "read" | "keyboard" | "hover" | "open_tab" | "wait" | "done" | "fail" | "skip",
@@ -1318,50 +1374,59 @@ function parseGeminiResponse(geminiResult: any, payload: DOMAgentRequest): DOMAg
     console.log('[parseGeminiResponse] Parsed response has chooseCandidateIndex:', typeof parsed.chooseCandidateIndex);
     
     if (currentCandidates.length > 0) {
-      // Candidates were provided, LLM MUST return chooseCandidateIndex
+      const allowFlexible = payload.allowFlexibleResponses === true;
+      const flexibleActions = ['scroll', 'wait', 'skip', 'done'];
+
       if (typeof parsed.chooseCandidateIndex !== 'number') {
-        console.error('LLM did not return chooseCandidateIndex when candidates were provided');
-        console.error('Parsed response:', JSON.stringify(parsed, null, 2));
-        throw new Error('LLM must return chooseCandidateIndex when candidates are provided');
-      }
-      
-      // Validate index is in range
-      if (parsed.chooseCandidateIndex < -1 || parsed.chooseCandidateIndex >= currentCandidates.length) {
-        console.error(`Invalid chooseCandidateIndex: ${parsed.chooseCandidateIndex}, valid range: -1 to ${currentCandidates.length - 1}`);
-        throw new Error(`Invalid chooseCandidateIndex: ${parsed.chooseCandidateIndex}`);
-      }
-      
-      // If LLM chose -1, it means no candidate matches
-      if (parsed.chooseCandidateIndex === -1) {
-        console.log('LLM rejected all candidates (chooseCandidateIndex: -1)');
-        // Return fail action with reason
-        return {
-          action: 'fail',
-          reason: parsed.reasoning || 'No suitable candidate found',
-          reasoning: parsed.reasoning || 'No suitable candidate found',
-          confidence: 0,
-          hintStepIndex: parsed.hintStepIndex ?? payload.currentHintIndex,
+        // Phase 2A: Allow flexible responses (scroll/wait/skip/done) without candidate index
+        if (allowFlexible && flexibleActions.includes(parsed.action)) {
+          console.log(`[Phase 2A] Flexible response: ${parsed.action} (no candidate selected)`);
+          // Fall through to regular action parsing below — skip candidate mapping
+        } else {
+          // Candidates were provided, LLM MUST return chooseCandidateIndex
+          console.error('LLM did not return chooseCandidateIndex when candidates were provided');
+          console.error('Parsed response:', JSON.stringify(parsed, null, 2));
+          throw new Error('LLM must return chooseCandidateIndex when candidates are provided');
+        }
+      } else {
+        // Validate index is in range
+        if (parsed.chooseCandidateIndex < -1 || parsed.chooseCandidateIndex >= currentCandidates.length) {
+          console.error(`Invalid chooseCandidateIndex: ${parsed.chooseCandidateIndex}, valid range: -1 to ${currentCandidates.length - 1}`);
+          throw new Error(`Invalid chooseCandidateIndex: ${parsed.chooseCandidateIndex}`);
+        }
+
+        // If LLM chose -1, it means no candidate matches
+        if (parsed.chooseCandidateIndex === -1) {
+          console.log('LLM rejected all candidates (chooseCandidateIndex: -1)');
+          // Return fail action with reason
+          return {
+            action: 'fail',
+            reason: parsed.reasoning || 'No suitable candidate found',
+            reasoning: parsed.reasoning || 'No suitable candidate found',
+            confidence: 0,
+            hintStepIndex: parsed.hintStepIndex ?? payload.currentHintIndex,
+          };
+        }
+
+        // Map chosen candidate to target
+        const chosen = currentCandidates[parsed.chooseCandidateIndex];
+        console.log(`LLM chose candidate ${parsed.chooseCandidateIndex}: [${chosen.role}] "${chosen.name}"`);
+
+        // Override target with the chosen candidate (include ALL identifiers)
+        parsed.target = {
+          role: chosen.role,
+          name: chosen.name,
+          text: chosen.text,
+          testId: chosen.testId,
+          id: chosen.id,  // Include ID attribute!
+          placeholder: chosen.placeholder,
+          scopePath: chosen.scopePath,
+          rowKey: chosen.rowKey,
+          widgetTitle: chosen.widgetTitle,
+          frameId: chosen.frameId,
+          _candidateIndex: parsed.chooseCandidateIndex,
         };
       }
-      
-      // Map chosen candidate to target
-      const chosen = currentCandidates[parsed.chooseCandidateIndex];
-      console.log(`LLM chose candidate ${parsed.chooseCandidateIndex}: [${chosen.role}] "${chosen.name}"`);
-      
-      // Override target with the chosen candidate (include ALL identifiers)
-      parsed.target = {
-        role: chosen.role,
-        name: chosen.name,
-        text: chosen.text,
-        testId: chosen.testId,
-        id: chosen.id,  // Include ID attribute!
-        placeholder: chosen.placeholder,
-        scopePath: chosen.scopePath,
-        rowKey: chosen.rowKey,
-        widgetTitle: chosen.widgetTitle,
-        frameId: chosen.frameId,
-        _candidateIndex: parsed.chooseCandidateIndex,
-      };
     }
     
     // Regular action response

@@ -3924,6 +3924,9 @@ export class AIAgent {
       // NEW: Execution context from fast-path attempt (Phase 1 of Intelligent Agent Upgrade)
       // This tells the LLM what was already tried before calling it
       // Only include if feature flag is enabled
+      // Phase 2A: Allow LLM to return scroll/wait/skip instead of just picking candidates
+      allowFlexibleResponses: isFeatureEnabled('INTELLIGENT_AGENT_FLEXIBLE'),
+
       executionContext: (isFeatureEnabled('INTELLIGENT_AGENT_CONTEXT') && this.executionContext.fastPathAttempted) ? {
         fastPathAttempted: this.executionContext.fastPathAttempted,
         fastPathConfidence: this.executionContext.fastPathConfidence,
@@ -4015,7 +4018,14 @@ export class AIAgent {
         result = JSON.parse(responseText);
         console.log('[AIAgent] Parsed result:', result);
         console.log('[AIAgent] 📥 AI returned hintStepIndex:', result.hintStepIndex, '(expected:', payload.currentHintIndex, ')');
-        
+
+        // Phase 2A: Log when LLM chooses a flexible action instead of picking a candidate
+        if (isFeatureEnabled('INTELLIGENT_AGENT_FLEXIBLE') &&
+            ['scroll', 'wait', 'skip'].includes(result.action) &&
+            currentCandidates.length > 0) {
+          console.log(`[AIAgent] 🔄 Phase 2A: LLM chose "${result.action}" instead of picking from ${currentCandidates.length} candidates`);
+        }
+
         // CRITICAL: Ensure SELECT actions have the option parameter set from hint
         const currentHint = this.state.hints[payload.currentHintIndex];
         
@@ -5086,6 +5096,15 @@ export class AIAgent {
     action: AgentAction,
     observation: AgentObservation
   ): boolean {
+    // Phase 2A: LLM-suggested scroll/wait are intermediate — the hint goal is NOT scroll
+    // After scrolling, the loop re-observes DOM and retries finding the element
+    if (isFeatureEnabled('INTELLIGENT_AGENT_FLEXIBLE') &&
+        (action.type === 'scroll' || action.type === 'wait') &&
+        hint.actionType !== 'scroll') {
+      console.log(`[AIAgent] 🔄 Phase 2A: "${action.type}" is intermediate — hint goal is "${hint.actionType}", will retry after ${action.type}`);
+      return true;
+    }
+
     // Strategy 1: Dropdown selection detection
     // If hint mentions a specific option text (like "BOGO", "UberEats Growth")
     // AND the action was a click on combobox/listbox (NOT the option itself)

@@ -325,10 +325,10 @@ describe('Feature Flag Control', () => {
     expect(isFeatureEnabled('INTELLIGENT_AGENT_CONTEXT')).toBe(true);
   });
 
-  it('should verify Phase 2 flags are disabled by default', async () => {
+  it('should verify Phase 2 flags have expected states', async () => {
     const { FeatureFlags } = await import('./feature-flags');
 
-    expect(FeatureFlags.INTELLIGENT_AGENT_FLEXIBLE).toBe(false);
+    expect(FeatureFlags.INTELLIGENT_AGENT_FLEXIBLE).toBe(true);  // Enabled in Phase 2A
     expect(FeatureFlags.INTELLIGENT_AGENT_GOAL).toBe(false);
     expect(FeatureFlags.INTELLIGENT_AGENT_VERIFY).toBe(false);
   });

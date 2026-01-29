@@ -142,8 +142,8 @@ describe('Intelligent Agent - Phase 1: Fast-Path Context', () => {
       expect(FeatureFlags.INTELLIGENT_AGENT_CONTEXT).toBe(true);
     });
 
-    it('should have Phase 2 flags defined but disabled', () => {
-      expect(FeatureFlags.INTELLIGENT_AGENT_FLEXIBLE).toBe(false);
+    it('should have Phase 2 flags defined with expected states', () => {
+      expect(FeatureFlags.INTELLIGENT_AGENT_FLEXIBLE).toBe(true);  // Enabled in Phase 2A
       expect(FeatureFlags.INTELLIGENT_AGENT_GOAL).toBe(false);
       expect(FeatureFlags.INTELLIGENT_AGENT_VERIFY).toBe(false);
     });

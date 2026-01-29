@@ -631,7 +631,22 @@ console.log('Batch result:', result);
 
 - **To Test**: Record a new workflow and run `MimoDebug.checkPhase2()` to verify phases are populated
 
+### 2026-01-29: Intelligent Agent Phase 2A — Flexible LLM Responses
+- **Implemented Phase 2A** of the Intelligent Agent Upgrade Plan
+- **What changed:**
+  - `supabase/functions/dom_agent/index.ts`: Added `allowFlexibleResponses` to request interface, conditional flexible prompt (Options A-E instead of rigid `⛔ MUST USE chooseCandidateIndex`), relaxed candidate enforcement in `parseGeminiResponse`
+  - `src/lib/ai-agent.ts`: Pass `allowFlexibleResponses` flag in `think()` payload, log flexible actions, treat scroll/wait as intermediate in `detectIntermediateAction()`
+  - `src/lib/feature-flags.ts`: Flipped `INTELLIGENT_AGENT_FLEXIBLE` to `true`
+- **Tests:** 46 new tests in `src/lib/intelligent-agent-phase2a.test.ts` — ALL PASSING
+  - Candidate enforcement (flag on/off), intermediate action detection, prompt construction, payload serialization, end-to-end scenarios
+- **Backward compatible:** Flag off = zero behavior change (rigid prompt, throws on missing index)
+- **Total intelligent agent tests: 74 passing** (21 Phase 1 + 7 integration + 46 Phase 2A)
+
 ### Next Session
-- **Verify fix**: Record a workflow and confirm phases are no longer empty
-- **Check Supabase logs**: Review console output to see what AI is generating
-- If validation passes, start Phase 3: Goal-Oriented Execution
+- **Deploy edge function**: `supabase functions deploy dom_agent`
+- **Test Phase 2A**: Run workflow on https://play2.automationcamp.ir/ with flag ON
+  - Verify: off-screen element → LLM returns `scroll` → agent scrolls → retries → finds element
+  - Verify: already-satisfied hint → LLM returns `skip` → agent advances
+  - Verify: normal case → LLM still picks candidates (preferred)
+- **Start Phase 2B**: Goal-oriented prompting (next upgrade phase)
+- **Verify Phase 2 fix**: Record a workflow and confirm phases are no longer empty
