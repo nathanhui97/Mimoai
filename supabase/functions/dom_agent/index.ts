@@ -247,6 +247,9 @@ interface DOMAgentRequest {
   // Phase 2A: Allow LLM flexible responses (scroll, wait, skip) even when candidates exist
   allowFlexibleResponses?: boolean;
 
+  // Phase 2B: Goal-oriented prompting (hints as guidance, not strict orders)
+  goalOriented?: boolean;
+
   // Phase 1 Intelligent Agent: Execution context from fast-path attempt
   // This tells the LLM what was already tried before calling it
   executionContext?: {
@@ -503,8 +506,173 @@ serve(async (req) => {
 // Prompt Builder
 // ============================================================================
 
+/**
+ * Phase 2B: Build the candidates instruction section.
+ * Extracted to avoid deeply nested ternaries in the main prompt template.
+ */
+function buildCandidatesInstruction(
+  candidateCount: number,
+  currentHintIndex: number,
+  allowFlexibleResponses: boolean,
+  goalOriented: boolean
+): string {
+  if (candidateCount === 0) {
+    // No candidates — free-form target response
+    return '';
+  }
+
+  // Goal-oriented + flexible: reason about goals, no bias toward picking candidates
+  if (goalOriented && allowFlexibleResponses) {
+    return `
+🎯 ${candidateCount} CANDIDATES EXIST — THINK STEP BY STEP:
+
+1. What is the current SUB-GOAL for this step?
+2. Is the sub-goal already achieved on the page? → return "done" or "skip"
+3. Does a candidate match what's needed to advance the sub-goal? → pick it
+4. Is the target element possibly off-screen? → return "scroll"
+5. Is the page still loading? → return "wait"
+
+**Pick a candidate** (when a candidate advances the goal):
+{
+  "chooseCandidateIndex": 2,
+  "action": "click",
+  "reasoning": "Goal: <sub-goal>. Candidate 2 advances it because...",
+  "confidence": 1.0,
+  "hintStepIndex": ${currentHintIndex}
+}
+Use "chooseCandidateIndex": INTEGER from 0 to ${candidateCount - 1}.
+THE "target" FIELD IS FORBIDDEN WHEN USING chooseCandidateIndex.
+"text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
+
+**Scroll** (if the correct element might be off-screen):
+{
+  "action": "scroll",
+  "direction": "down",
+  "amount": 300,
+  "reasoning": "Goal: <sub-goal>. Target element not visible, scrolling to reveal it",
+  "confidence": 0.7,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Skip** (if the step's outcome is already achieved):
+{
+  "action": "skip",
+  "reason": "The input already contains the required value",
+  "reasoning": "Goal: <sub-goal>. Already achieved because...",
+  "confidence": 0.9,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Done** (if the overall goal is achieved — even if hints remain):
+{
+  "action": "done",
+  "reason": "Workflow goal achieved — success page visible",
+  "reasoning": "Goal: <overall-goal>. Achieved because...",
+  "confidence": 0.95,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Wait** (if page is still loading):
+{
+  "action": "wait",
+  "duration": 1000,
+  "reasoning": "Goal: <sub-goal>. Page content is loading",
+  "confidence": 0.7,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+REQUIRED: Always prefix your "reasoning" with "Goal: <sub-goal>." to explain what you're trying to achieve.
+Choose the action that BEST advances the goal — there is no preferred option.`;
+  }
+
+  // Phase 2A flexible (not goal-oriented): existing A-E options with bias toward A
+  if (allowFlexibleResponses) {
+    return `
+🎯 ${candidateCount} CANDIDATES EXIST — Choose the BEST option:
+
+**Option A (PREFERRED): Pick a candidate**
+{
+  "chooseCandidateIndex": 2,
+  "action": "click",
+  "reasoning": "Candidate 2 is in the correct widget",
+  "confidence": 1.0,
+  "hintStepIndex": ${currentHintIndex}
+}
+Use "chooseCandidateIndex": INTEGER from 0 to ${candidateCount - 1}.
+THE "target" FIELD IS FORBIDDEN WHEN USING chooseCandidateIndex.
+"text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
+
+**Option B: Scroll** (if the correct element might be off-screen)
+{
+  "action": "scroll",
+  "direction": "down",
+  "amount": 300,
+  "reasoning": "Target element not visible among candidates, scrolling to reveal it",
+  "confidence": 0.7,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Option C: Skip** (if the hint is already satisfied — e.g. value already filled)
+{
+  "action": "skip",
+  "reason": "The input already contains the required value",
+  "reasoning": "Hint goal already achieved",
+  "confidence": 0.9,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Option D: Done** (if the entire workflow goal is already achieved)
+{
+  "action": "done",
+  "reason": "Workflow goal achieved — success page visible",
+  "reasoning": "Goal complete",
+  "confidence": 0.95,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+**Option E: Wait** (if page is still loading)
+{
+  "action": "wait",
+  "duration": 1000,
+  "reasoning": "Page content is loading",
+  "confidence": 0.7,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+IMPORTANT: Option A (picking a candidate) is STRONGLY PREFERRED. Only use B-E when you are confident the candidates do NOT contain the correct element or the goal is already met.`;
+  }
+
+  // Rigid mode: must pick a candidate
+  return `
+⛔⛔⛔ CRITICAL: ${candidateCount} CANDIDATES EXIST - YOU MUST USE chooseCandidateIndex ⛔⛔⛔
+
+YOUR RESPONSE MUST LOOK EXACTLY LIKE THIS:
+{
+  "chooseCandidateIndex": 2,
+  "action": "click",
+  "reasoning": "Candidate 2 is in the correct widget",
+  "confidence": 1.0,
+  "hintStepIndex": ${currentHintIndex}
+}
+
+⚠️⚠️⚠️ FORBIDDEN - DO NOT DO THIS: ⚠️⚠️⚠️
+{
+  "target": {"role": "button", "name": "..."} ← WRONG! NEVER USE "target" WHEN CANDIDATES EXIST!
+}
+
+REQUIRED FIELDS:
+- "chooseCandidateIndex": INTEGER from 0 to ${candidateCount - 1} (REQUIRED!)
+- "action": "click" | "type" | "select" | etc.
+- "text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
+- "reasoning": "why you chose this candidate"
+- "confidence": 0.0-1.0
+- "hintStepIndex": ${currentHintIndex}
+
+THE "target" FIELD IS FORBIDDEN WHEN CANDIDATES EXIST. DO NOT INCLUDE IT.`;
+}
+
 function buildAgentPrompt(payload: DOMAgentRequest): string {
-  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint, userContext, allowFlexibleResponses } = payload;
+  const { goal, hints = [], currentHintIndex = 0, history = [], domMap = '', pageContext, variableValues, currentCandidates = [], referenceScreenshot, availableWidgets = [], inheritedScopeHint, userContext, allowFlexibleResponses, goalOriented } = payload;
   
   // Find the current hint to focus on
   const currentHint = hints.find((h, i) => i >= currentHintIndex && !h.completed);
@@ -726,9 +894,20 @@ ${intent.failurePatterns.map(fp => `- ${fp.description}${fp.visualIndicator ? ` 
 
   const prompt = `${SYSTEM_PROMPT_SHORT}
 
-You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
+${goalOriented ? `You are a GOAL-ORIENTED AI agent that automates web tasks. Your primary objective is to ACHIEVE THE GOAL, not to follow hints literally.
 
-IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.
+Hints are GUIDANCE from a previous recording run — they suggest a path, but the current page state may differ.
+
+DECISION FRAMEWORK:
+1. **Goal First**: What is the overall goal? What sub-goal does this step serve?
+2. **Page State**: What does the current page actually show? What's already done?
+3. **Hints as Guidance**: Do the hints suggest a useful next action? Or is there a better path?
+4. **Adapt**: If the page has changed, skip irrelevant hints and find the best action to advance the goal.
+
+IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.`
+: `You are an AI agent that automates web tasks. You analyze the current page state and decide what action to take next.
+
+IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coordinates. The executor will use DOM-based element resolution.`}
 ${executionContextSection}
 ${userContextSection}
 ${workflowLearningsSection}
@@ -785,7 +964,8 @@ ${pageContext?.formFields && pageContext.formFields.length > 0
 - If a field shows "value: 1000", it's ALREADY filled - don't type into it again
 - Only type into fields that are "(empty)" or need a different value
 
-## Steps to Complete
+${goalOriented ? `## Recorded Steps (GUIDANCE — not strict orders)
+Use these as a roadmap, but ADAPT based on current page state. Skip steps whose outcomes are already achieved.` : `## Steps to Complete`}
 ${hints.map((h, i) => {
   let status = '⬜';
   if (h.completed) status = '✅';
@@ -801,48 +981,62 @@ ${hints.map((h, i) => {
 }).join('\n')}
 
 ## Current Focus
-${currentHint 
-  ? `⭐ WORK ON THIS NEXT: Step ${currentHint.stepNumber}
+${currentHint
+  ? `${goalOriented ? '🎯 SUGGESTED NEXT STEP' : '⭐ WORK ON THIS NEXT'}: Step ${currentHint.stepNumber}
      Description: ${currentHint.description}
      Action type: ${currentHint.actionType}
      ${currentHint.targetText ? `Target text: "${currentHint.targetText}"` : ''}
      ${currentHint.targetRole ? `Target role: ${currentHint.targetRole}` : ''}
      ${currentHint.targetPlaceholder ? `Placeholder: "${currentHint.targetPlaceholder}"` : ''}
      ${currentHint.value ? `Value to enter: "${currentHint.value}"` : ''}
-     ${inheritedScopeHint 
+     ${inheritedScopeHint
        ? `📍 LOOK IN WIDGET/SECTION: "${inheritedScopeHint}" ⚠️ CRITICAL - Using inherited scope from previous step (recorded scope "${currentHint.recordedScopeHint}" doesn't match any widget)`
-       : currentHint.recordedScopeHint 
+       : currentHint.recordedScopeHint
          ? `📍 LOOK IN WIDGET/SECTION: "${currentHint.recordedScopeHint}" ⚠️ CRITICAL - Element is in this container!`
          : ''}
      ${currentHint.recordedAriaLabel ? `🏷️ aria-label: "${currentHint.recordedAriaLabel}"` : ''}
      ${currentHint.nearbyText?.length > 0 ? `🔍 Nearby text: [${currentHint.nearbyText.join(', ')}]` : ''}
      ${currentHint.failureCount ? `⚠️ This hint has failed ${currentHint.failureCount} times already!` : ''}
-     
+
      ${currentHint.naturalLanguage ? `
      🧠 NATURAL LANGUAGE CONTEXT:
      - Intent: "${currentHint.naturalLanguage.intent}"
      - Precondition: "${currentHint.naturalLanguage.precondition}"
      - Expected Outcome: "${currentHint.naturalLanguage.expectedOutcome}"
-     ${currentHint.naturalLanguage.dependencies?.length > 0 
-       ? `- Depends on steps: [${currentHint.naturalLanguage.dependencies.join(', ')}]` 
+     ${currentHint.naturalLanguage.dependencies?.length > 0
+       ? `- Depends on steps: [${currentHint.naturalLanguage.dependencies.join(', ')}]`
        : ''}
      ` : ''}
-     
+
      ${dropdownIsOpen ? '⚠️ BUT A DROPDOWN IS OPEN - select an option first!' : ''}
-     
-     BEFORE ACTING - CHECK IF OUTCOME ALREADY ACHIEVED:
+
+     ${goalOriented ? `GOAL-ORIENTED REASONING (REQUIRED):
+     1. GOAL CHECK: Does this step advance the overall goal "${goal}"?
+     2. OUTCOME CHECK: Is the expected outcome "${currentHint.naturalLanguage?.expectedOutcome || 'action complete'}" already visible on the page?
+     3. BETTER PATH: Is there a more direct way to achieve the goal from the current page state?
+
+     → If outcome is already achieved → return "skip" with goal-based reasoning
+     → If overall goal is achieved (even with hints remaining) → return "done"
+     → If this step advances the goal → execute it
+     → For TYPE actions: Compare CURRENT field value with TARGET value
+        - Hint says "Enter 1000", DOM shows value="1000" → SKIP (already correct)
+        - Hint says "Enter 1000", DOM shows value="" or value="500" → MUST TYPE
+        - Hint says "Enter 1000", field not found in DOM → SKIP
+
+     ⚠️ FOR TYPE ACTIONS: Never assume a field is filled just because you see its name - CHECK THE ACTUAL VALUE!`
+     : `BEFORE ACTING - CHECK IF OUTCOME ALREADY ACHIEVED:
      1. Check if the expected outcome "${currentHint.naturalLanguage?.expectedOutcome || 'action complete'}" is already true
      2. If modal is expected to be open and it IS open → SKIP this step
-     3. If dropdown is expected to be open and it IS open → SKIP this step  
+     3. If dropdown is expected to be open and it IS open → SKIP this step
      4. For TYPE actions: Compare the CURRENT field value with the TARGET value
         - Hint says "Enter 1000", DOM shows value="1000" → SKIP (already correct)
         - Hint says "Enter 1000", DOM shows value="" or value="500" → MUST TYPE
         - Hint says "Enter 1000", field not found in DOM → SKIP
      5. If the element doesn't exist at all → SKIP this step
-     
+
      ⚠️ IMPORTANT: If the expected outcome is ALREADY satisfied, skip to the NEXT step!
-     ⚠️ FOR TYPE ACTIONS: Never assume a field is filled just because you see its name - CHECK THE ACTUAL VALUE!
-     
+     ⚠️ FOR TYPE ACTIONS: Never assume a field is filled just because you see its name - CHECK THE ACTUAL VALUE!`}
+
      YOU MUST: Return "hintStepIndex": ${hints.indexOf(currentHint)} in your response`
   : 'All steps completed - check if goal is achieved'}
 
@@ -892,7 +1086,14 @@ ${history.length > 0
   : '(no actions yet)'}
 
 ## Your Task
-Analyze the page and decide the next action. Look at the DOM map to find the element you need to interact with.
+${goalOriented ? `Analyze the page and decide the next action to ADVANCE THE GOAL. Use the DOM map and recorded steps as guidance.
+
+🧠 REASONING PROTOCOL (REQUIRED):
+Before choosing an action, state your reasoning:
+1. CURRENT SUB-GOAL: What am I trying to achieve in this step?
+2. ACHIEVEMENT CHECK: Is this sub-goal already achieved on the page?
+3. BEST ACTION: What action best advances the goal from the current state?
+4. WHY: Why is this the right action? (reference page state, not just hints)` : `Analyze the page and decide the next action. Look at the DOM map to find the element you need to interact with.`}
 
 🧠 SEMANTIC MATCHING (CRITICAL):
 - Hints describe INTENT, not exact element text. Match by MEANING, not literal text.
@@ -920,10 +1121,10 @@ PRIORITY ORDER (follow strictly):
    - Check the DOM Map for "DROPDOWN IS OPEN" section
    - Return: {"action": "click", "target": {"role": "option", "text": "<option>"}}
    - NEVER type while dropdown is open (it closes the dropdown!)
-   
+
 2. 📋 MODAL OPEN? → MUST interact with modal elements
    - Look at "Modal Actions" section in DOM map
-   
+
 3. 📝 FORM FIELDS → Check which fields need values
    - Look at Form Fields section - some may already have values!
    - CRITICAL: Compare CURRENT value with TARGET value from hint
@@ -932,10 +1133,14 @@ PRIORITY ORDER (follow strictly):
    - NEVER skip a TYPE hint unless the field value EXACTLY matches what needs to be entered
    - Match field by NAME/PLACEHOLDER, not just hint order
 
-4. ADAPTIVE: The hints are a GUIDE, not strict commands
-   - Skip hints that reference elements that don't exist  
+4. ${goalOriented ? `GOAL-ORIENTED: Every action must advance the goal "${goal}"
+   - Return "done" if the overall goal is visibly achieved, even if recorded steps remain
+   - Skip hints whose outcomes are already satisfied
+   - Adapt to current page state — hints are guidance, not strict orders
+   - If a more direct path to the goal exists, take it` : `ADAPTIVE: The hints are a GUIDE, not strict commands
+   - Skip hints that reference elements that don't exist
    - Skip TYPE hints ONLY if field value exactly matches the target value
-   - Adapt to current page state, don't blindly follow hint order
+   - Adapt to current page state, don't blindly follow hint order`}
 
 ⚠️ FAIL ACTION: Use ONLY as last resort when:
    - The page shows an error or is completely empty
@@ -1006,86 +1211,7 @@ NOTE: For spreadsheets, prefer these specialized actions over generic click+type
 They handle navigation, verification, and retries automatically.
 
 Respond with a JSON object:
-${currentCandidates.length > 0 ? (allowFlexibleResponses ? `
-🎯 ${currentCandidates.length} CANDIDATES EXIST — Choose the BEST option:
-
-**Option A (PREFERRED): Pick a candidate**
-{
-  "chooseCandidateIndex": 2,
-  "action": "click",
-  "reasoning": "Candidate 2 is in the correct widget",
-  "confidence": 1.0,
-  "hintStepIndex": ${currentHintIndex}
-}
-Use "chooseCandidateIndex": INTEGER from 0 to ${currentCandidates.length - 1}.
-THE "target" FIELD IS FORBIDDEN WHEN USING chooseCandidateIndex.
-"text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
-
-**Option B: Scroll** (if the correct element might be off-screen)
-{
-  "action": "scroll",
-  "direction": "down",
-  "amount": 300,
-  "reasoning": "Target element not visible among candidates, scrolling to reveal it",
-  "confidence": 0.7,
-  "hintStepIndex": ${currentHintIndex}
-}
-
-**Option C: Skip** (if the hint is already satisfied — e.g. value already filled)
-{
-  "action": "skip",
-  "reason": "The input already contains the required value",
-  "reasoning": "Hint goal already achieved",
-  "confidence": 0.9,
-  "hintStepIndex": ${currentHintIndex}
-}
-
-**Option D: Done** (if the entire workflow goal is already achieved)
-{
-  "action": "done",
-  "reason": "Workflow goal achieved — success page visible",
-  "reasoning": "Goal complete",
-  "confidence": 0.95,
-  "hintStepIndex": ${currentHintIndex}
-}
-
-**Option E: Wait** (if page is still loading)
-{
-  "action": "wait",
-  "duration": 1000,
-  "reasoning": "Page content is loading",
-  "confidence": 0.7,
-  "hintStepIndex": ${currentHintIndex}
-}
-
-IMPORTANT: Option A (picking a candidate) is STRONGLY PREFERRED. Only use B-E when you are confident the candidates do NOT contain the correct element or the goal is already met.
-` : `
-⛔⛔⛔ CRITICAL: ${currentCandidates.length} CANDIDATES EXIST - YOU MUST USE chooseCandidateIndex ⛔⛔⛔
-
-YOUR RESPONSE MUST LOOK EXACTLY LIKE THIS:
-{
-  "chooseCandidateIndex": 2,
-  "action": "click",
-  "reasoning": "Candidate 2 is in the correct widget",
-  "confidence": 1.0,
-  "hintStepIndex": ${currentHintIndex}
-}
-
-⚠️⚠️⚠️ FORBIDDEN - DO NOT DO THIS: ⚠️⚠️⚠️
-{
-  "target": {"role": "button", "name": "..."} ← WRONG! NEVER USE "target" WHEN CANDIDATES EXIST!
-}
-
-REQUIRED FIELDS:
-- "chooseCandidateIndex": INTEGER from 0 to ${currentCandidates.length - 1} (REQUIRED!)
-- "action": "click" | "type" | "select" | etc.
-- "text": "EXACT value from 'Value to enter' field" (REQUIRED if action is type - use the exact value shown in the hint!)
-- "reasoning": "why you chose this candidate"
-- "confidence": 0.0-1.0
-- "hintStepIndex": ${currentHintIndex}
-
-THE "target" FIELD IS FORBIDDEN WHEN CANDIDATES EXIST. DO NOT INCLUDE IT.
-`) : `
+${currentCandidates.length > 0 ? buildCandidatesInstruction(currentCandidates.length, currentHintIndex, allowFlexibleResponses === true, goalOriented === true) : `
 WHEN NO CANDIDATES (free-form target):
 {
   "action": "click" | "type" | "select" | "scroll" | "read" | "keyboard" | "hover" | "open_tab" | "wait" | "done" | "fail" | "skip",

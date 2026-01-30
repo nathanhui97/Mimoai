@@ -3926,6 +3926,7 @@ export class AIAgent {
       // Only include if feature flag is enabled
       // Phase 2A: Allow LLM to return scroll/wait/skip instead of just picking candidates
       allowFlexibleResponses: isFeatureEnabled('INTELLIGENT_AGENT_FLEXIBLE'),
+      goalOriented: isFeatureEnabled('INTELLIGENT_AGENT_GOAL'),
 
       executionContext: (isFeatureEnabled('INTELLIGENT_AGENT_CONTEXT') && this.executionContext.fastPathAttempted) ? {
         fastPathAttempted: this.executionContext.fastPathAttempted,

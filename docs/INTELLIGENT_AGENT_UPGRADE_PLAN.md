@@ -385,8 +385,20 @@ INTELLIGENT_AGENT_VERIFY: false,    // Phase 2C - goal verification
 - Files changed: `dom_agent/index.ts`, `ai-agent.ts`, `feature-flags.ts`
 - **TODO**: Deploy edge function, then test with real workflows
 
+### 2026-01-29: Phase 2B Complete
+- **Goal-oriented system framing** — LLM is told it's a "GOAL-ORIENTED AI agent" with a 4-step decision framework (Goal First → Page State → Hints as Guidance → Adapt)
+- **Steps header** changes from "Steps to Complete" → "Recorded Steps (GUIDANCE — not strict orders)"
+- **Current focus** changes from "⭐ WORK ON THIS NEXT" → "🎯 SUGGESTED NEXT STEP" with GOAL-ORIENTED REASONING block (Goal Check, Outcome Check, Better Path)
+- **Candidates section** — extracted `buildCandidatesInstruction()` helper; goal-oriented mode uses "THINK STEP BY STEP" framework without bias toward picking candidates, requires goal-framed reasoning
+- **Your Task section** — adds reasoning protocol (Sub-goal → Achievement Check → Best Action → Why); priority item 4 changes from "ADAPTIVE" to "GOAL-ORIENTED" with early done support
+- **Backward compatible** — flag off = zero behavior change; goal-oriented candidates require BOTH `goalOriented=true` AND `allowFlexibleResponses=true`
+- Feature flag: `INTELLIGENT_AGENT_GOAL: false` (disabled by default)
+- 40+ new Phase 2B unit tests passing
+- Files changed: `dom_agent/index.ts`, `ai-agent.ts`
+- **TODO**: Enable flag, deploy edge function, test with real workflows
+
 ---
 
 *Document created: 2026-01-26*
 *Author: AI Analysis of Execution Engine*
-*Status: Phase 1 ✅ | Phase 2A ✅ | Phase 2B-2C pending*
+*Status: Phase 1 ✅ | Phase 2A ✅ | Phase 2B ✅ | Phase 2C pending*
