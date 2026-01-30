@@ -19,8 +19,8 @@ import { VisualSnapshotService } from '../content/visual-snapshot';
 import { generateDOMMap, domMapToText, invalidateDOMMapCache, type DOMMap, type DOMMapElement } from '../content/dom-map';
 import { FeatureFlags, isFeatureEnabled } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
-import { PostActionObserver, type PageChanges } from './post-action-observer';
-import { capturePageState, verifyStepSuccess } from './success-verifier';
+import { PostActionObserver, type PageChanges, type ChangeType } from './post-action-observer';
+import { capturePageState, verifyStepSuccess, type PageState as VerifierPageState } from './success-verifier';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
 import { SheetStateExtractor } from '../content/sheet-state-extractor';
 import { SpreadsheetHelpers } from './spreadsheet-helpers';
@@ -462,6 +462,20 @@ export interface ExecutionContext {
   // Candidate details (what was found)
   candidatesFound: number;
   topCandidateScore?: number;
+}
+
+// ============================================================================
+// Phase 3: Step Outcome Verification Types
+// ============================================================================
+
+export type StepVerificationOutcome = 'verified' | 'unverified' | 'inconclusive';
+
+export interface StepVerificationResult {
+  outcome: StepVerificationOutcome;
+  confidence: number;       // 0-1
+  details: string;
+  criteriaType?: string;    // e.g. 'modal_appears', 'text_match'
+  elapsedMs: number;
 }
 
 /** Progress callback */
@@ -1580,36 +1594,58 @@ export class AIAgent {
 
         // Include 'select' for native SELECT elements (fast-path can handle them efficiently)
         if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type' || currentHint.actionType === 'select')) {
+          // Phase 3: Capture pre-state for step verification
+          const stepVerifyPreState = isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY') ? capturePageState() : null;
+
           const hybridResult = await this.tryFastPathExecute(currentHint);
-          
+
           if (hybridResult.executed && hybridResult.success) {
             const confidence = hybridResult.confidence || 95;
             const confidenceLabel = confidence >= 95 ? 'HIGH' : 'MEDIUM-HIGH';
             console.log(`[Hybrid] ⚡ ${confidenceLabel} CONFIDENCE (${confidence}%) - ${currentHint.actionType.toUpperCase()} executed instantly, skipping LLM`);
             console.log(`[Hybrid] ✅ MARKING STEP ${this.state.currentHintIndex} (${currentHint.description?.slice(0, 40)}) AS COMPLETE`);
-            
+
             // Mark as completed and advance
             this.state.hints[this.state.currentHintIndex].completed = true;
             this.state.currentHintIndex++;
             this.notifyProgress();
-            
+
+            // Phase 3: Verify step outcome
+            if (isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY') && stepVerifyPreState) {
+              const stepVerifyPostState = capturePageState();
+              const stepResult = this.verifyStepOutcome(currentHint, stepVerifyPreState, stepVerifyPostState);
+              const { shouldRetry } = this.handleStepVerificationResult(currentHint, stepResult);
+              if (shouldRetry) {
+                // Undo completion and re-try this step
+                this.state.hints[this.state.currentHintIndex - 1].completed = false;
+                this.state.currentHintIndex--;
+                console.log(`[Phase3] Undoing completion of step ${this.state.currentHintIndex} for retry`);
+                continue;
+              }
+            }
+
+            // Phase 2C: Check if overall goal is achieved after fast-path completion
+            if (this.checkAndHandleEarlyCompletion()) {
+              break;
+            }
+
             // Log to history
             this.state.history.push({
               stepNumber: currentHint.stepNumber,
-              action: { 
-                type: currentHint.actionType, 
-                params: { 
+              action: {
+                type: currentHint.actionType,
+                params: {
                   description: currentHint.description,
                   ...(currentHint.actionType === 'type' && { text: currentHint.value })
-                }, 
-                reasoning: `Confidence-based execution: ${hybridResult.confidence}% confidence`, 
+                },
+                reasoning: `Confidence-based execution: ${hybridResult.confidence}% confidence`,
                 confidence: (hybridResult.confidence || 95) / 100
               },
               observation,
               result: 'success',
               timestamp: Date.now(),
             });
-            
+
             // Brief pause then continue (OPTIMIZED from 150ms)
             await this.sleep(50);
             continue;
@@ -1640,11 +1676,27 @@ export class AIAgent {
         }
 
         if (currentHint && currentHint.actionType === 'select' && isFeatureEnabled('SMART_HYBRID_MODE')) {
+          // Phase 3: Capture pre-state for dropdown step verification
+          const dropdownVerifyPreState = isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY') ? capturePageState() : null;
+
           const dropdownResult = await this.executeDropdownWithVision(currentHint);
           if (dropdownResult.success) {
             this.state.hints[this.state.currentHintIndex].completed = true;
             this.state.currentHintIndex++;
             this.notifyProgress();
+
+            // Phase 3: Verify dropdown step outcome (log only — don't retry, dropdown has its own retry logic)
+            if (isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY') && dropdownVerifyPreState) {
+              const dropdownVerifyPostState = capturePageState();
+              const dropdownStepResult = this.verifyStepOutcome(currentHint, dropdownVerifyPreState, dropdownVerifyPostState);
+              this.handleStepVerificationResult(currentHint, dropdownStepResult);
+              // No retry for dropdown — it has its own retry logic
+            }
+
+            // Phase 2C: Check if overall goal is achieved after dropdown completion
+            if (this.checkAndHandleEarlyCompletion()) {
+              break;
+            }
 
             this.state.history.push({
               stepNumber: currentHint.stepNumber,
@@ -1765,7 +1817,8 @@ export class AIAgent {
           (this.state.workflowMemory?.success?.indicators?.length ||
             this.state.workflowMemory?.success?.failureIndicators?.length)
         );
-        const preVerificationState = shouldVerifyWithMemory ? capturePageState() : null;
+        const shouldCapturePreState = shouldVerifyWithMemory || isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY');
+        const preVerificationState = shouldCapturePreState ? capturePageState() : null;
         const result = await this.act(action);
         let finalResult = result;
         
@@ -1920,8 +1973,32 @@ export class AIAgent {
               
               // Notify UI of progress
               this.notifyProgress();
+
+              // Phase 3: Verify step outcome after LLM-driven completion
+              if (isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY') && preVerificationState) {
+                const postStepState = capturePageState();
+                const stepResult = this.verifyStepOutcome(
+                  this.state.hints[completedIndex],
+                  preVerificationState,
+                  postStepState,
+                  pageChanges,
+                );
+                const { shouldRetry } = this.handleStepVerificationResult(this.state.hints[completedIndex], stepResult);
+                if (shouldRetry) {
+                  // Undo completion and re-try this step
+                  this.state.hints[completedIndex].completed = false;
+                  this.state.currentHintIndex = completedIndex;
+                  console.log(`[Phase3] Undoing LLM completion of step ${completedIndex} for retry`);
+                  continue;
+                }
+              }
+
+              // Phase 2C: Check if overall goal is achieved after LLM-driven completion
+              if (this.checkAndHandleEarlyCompletion()) {
+                break;
+              }
             }
-            
+
             // 🎯 CRITICAL: If we just clicked something that likely navigated/changed the page,
             // wait for the new content to load before continuing
             const completedHint = this.state.hints[completedIndex];
@@ -5257,6 +5334,376 @@ export class AIAgent {
     } catch (error) {
       console.warn('[AIAgent] ⚠️ Error during UI cleanup:', error);
       // Don't throw - cleanup failures shouldn't block execution
+    }
+  }
+
+  // ===========================================================================
+  // Phase 2C: Goal Verification & Early Completion
+  // ===========================================================================
+
+  /**
+   * Check if the overall workflow goal is already achieved mid-execution.
+   * Reuses verifyWorkflowOutcome() logic but adds:
+   *  - A minimum-progress threshold (30%) to avoid false positives early on
+   *  - A confidence score so callers can gate on certainty
+   *
+   * Pure DOM / URL check — no extra LLM calls or screenshots.
+   */
+  private checkGoalProgress(): { goalAchieved: boolean; reason: string; confidence: number } {
+    // Guard: need analyzedIntent with expectedOutcome
+    if (!this.state.analyzedIntent?.expectedOutcome) {
+      return { goalAchieved: false, reason: 'No expectedOutcome defined', confidence: 0 };
+    }
+
+    // Guard: too early — skip check if less than 30 % of steps done
+    const completedCount = this.state.hints.filter(h => h.completed || h.skipped).length;
+    const totalCount = this.state.hints.length;
+    if (totalCount === 0 || completedCount / totalCount < 0.3) {
+      return { goalAchieved: false, reason: 'Too early to check goal', confidence: 0 };
+    }
+
+    const expectedOutcome = this.state.analyzedIntent.expectedOutcome.toLowerCase();
+    const currentUrl = window.location.href.toLowerCase();
+    const bodyText = document.body.innerText.toLowerCase();
+
+    // --- URL-based checks ---
+    if (expectedOutcome.includes('confirmation') && currentUrl.includes('confirm')) {
+      return { goalAchieved: true, reason: 'URL indicates confirmation page', confidence: 0.9 };
+    }
+    if (expectedOutcome.includes('success') && currentUrl.includes('success')) {
+      return { goalAchieved: true, reason: 'URL indicates success page', confidence: 0.9 };
+    }
+    if (expectedOutcome.includes('thank you') && (currentUrl.includes('thankyou') || currentUrl.includes('thank-you'))) {
+      return { goalAchieved: true, reason: 'URL indicates thank you page', confidence: 0.9 };
+    }
+
+    // --- Body-text keyword checks ---
+    const successIndicators = ['success', 'confirmed', 'complete', 'saved', 'submitted', 'thank you'];
+    for (const indicator of successIndicators) {
+      if (expectedOutcome.includes(indicator) && bodyText.includes(indicator)) {
+        return { goalAchieved: true, reason: `Found "${indicator}" on page`, confidence: 0.85 };
+      }
+    }
+
+    // --- Visual confirmation checks ---
+    if (this.state.analyzedIntent.visualConfirmation) {
+      const visualConfirmation = this.state.analyzedIntent.visualConfirmation.toLowerCase();
+      const visualIndicators = visualConfirmation.split(/,|\sand\s/).map(s => s.trim());
+      for (const indicator of visualIndicators) {
+        if (indicator && bodyText.includes(indicator)) {
+          return { goalAchieved: true, reason: `Found visual confirmation: "${indicator}"`, confidence: 0.85 };
+        }
+      }
+    }
+
+    return { goalAchieved: false, reason: 'Goal not yet achieved', confidence: 0 };
+  }
+
+  /**
+   * Mark all remaining incomplete hints as skipped with a given reason.
+   */
+  private skipRemainingHints(reason: string): void {
+    for (const hint of this.state.hints) {
+      if (!hint.completed && !hint.skipped) {
+        hint.skipped = true;
+        // Store reason in history rather than on hint (matches existing pattern)
+      }
+    }
+    // Log skipped count
+    const skippedCount = this.state.hints.filter(h => h.skipped).length;
+    console.log(`[AIAgent] Skipped ${skippedCount} remaining hints: ${reason}`);
+  }
+
+  /**
+   * Shared helper used at multiple points in the execution loop.
+   * Returns `true` when the caller should `break` out of the main loop.
+   */
+  private checkAndHandleEarlyCompletion(): boolean {
+    if (!isFeatureEnabled('INTELLIGENT_AGENT_VERIFY')) {
+      return false;
+    }
+
+    const goalCheck = this.checkGoalProgress();
+    const completedCount = this.state.hints.filter(h => h.completed || h.skipped).length;
+    const totalCount = this.state.hints.length;
+    console.log(`[AIAgent] 🔍 Phase2C goal check (${completedCount}/${totalCount}): ${goalCheck.reason} (achieved=${goalCheck.goalAchieved}, confidence=${goalCheck.confidence})`);
+
+    if (goalCheck.goalAchieved && goalCheck.confidence >= 0.8) {
+      console.log(`[AIAgent] 🎉 GOAL ACHIEVED EARLY: ${goalCheck.reason} (confidence: ${goalCheck.confidence})`);
+      this.skipRemainingHints(`Goal achieved early: ${goalCheck.reason}`);
+      this.state.status = 'completed';
+      return true;
+    }
+
+    return false;
+  }
+
+  // ===========================================================================
+  // Phase 3: Smart Step Outcome Verification
+  // ===========================================================================
+
+  /**
+   * Verify that an individual step achieved its intended outcome.
+   * Uses structured successCriteria (preferred) or expectedOutcome text (fallback).
+   * Synchronous single-pass — no polling, no LLM calls.
+   */
+  private verifyStepOutcome(
+    hint: AgentHint,
+    preState: VerifierPageState | null,
+    postState: VerifierPageState | null,
+    pageChanges?: PageChanges | null,
+  ): StepVerificationResult {
+    const start = performance.now();
+
+    // Guard: no page states
+    if (!preState || !postState) {
+      return { outcome: 'inconclusive', confidence: 0, details: 'Missing pre/post page state', elapsedMs: performance.now() - start };
+    }
+
+    // Guard: no criteria and no expectedOutcome
+    const hasCriteria = !!hint.aiAnalysisContext?.successCriteria;
+    const hasExpectedOutcome = !!hint.naturalLanguage?.expectedOutcome;
+    if (!hasCriteria && !hasExpectedOutcome) {
+      return { outcome: 'inconclusive', confidence: 0, details: 'No success criteria or expectedOutcome on hint', elapsedMs: performance.now() - start };
+    }
+
+    // Prefer structured criteria
+    if (hasCriteria) {
+      return this.checkStructuredCriteria(hint.aiAnalysisContext!.successCriteria!, preState, postState, start);
+    }
+
+    // Fallback to text-based keyword matching
+    if (hasExpectedOutcome && pageChanges) {
+      return this.checkExpectedOutcomeText(hint.naturalLanguage!.expectedOutcome, pageChanges, start);
+    }
+
+    return { outcome: 'inconclusive', confidence: 0.3, details: 'Expected outcome present but no pageChanges to match against', elapsedMs: performance.now() - start };
+  }
+
+  /**
+   * Check structured success criteria synchronously.
+   * Single-pass comparison of pre/post page state.
+   */
+  private checkStructuredCriteria(
+    criteria: NonNullable<AgentHint['aiAnalysisContext']>['successCriteria'] & {},
+    before: VerifierPageState,
+    after: VerifierPageState,
+    startTime: number,
+  ): StepVerificationResult {
+    const elapsed = () => performance.now() - startTime;
+
+    switch (criteria.type) {
+      case 'modal_appears': {
+        if (!before.hasModal && after.hasModal) {
+          return { outcome: 'verified', confidence: 0.95, details: 'Modal appeared', criteriaType: 'modal_appears', elapsedMs: elapsed() };
+        }
+        return { outcome: 'unverified', confidence: 0.8, details: 'Modal did not appear', criteriaType: 'modal_appears', elapsedMs: elapsed() };
+      }
+
+      case 'text_appears': {
+        const pattern = criteria.params?.textPattern;
+        if (!pattern) {
+          return { outcome: 'inconclusive', confidence: 0.3, details: 'No textPattern specified', criteriaType: 'text_appears', elapsedMs: elapsed() };
+        }
+        const found = after.visibleText.toLowerCase().includes(pattern.toLowerCase());
+        return found
+          ? { outcome: 'verified', confidence: 0.9, details: `Found "${pattern}"`, criteriaType: 'text_appears', elapsedMs: elapsed() }
+          : { outcome: 'unverified', confidence: 0.7, details: `"${pattern}" not found`, criteriaType: 'text_appears', elapsedMs: elapsed() };
+      }
+
+      case 'text_disappears': {
+        const pattern = criteria.params?.textPattern;
+        if (!pattern) {
+          return { outcome: 'inconclusive', confidence: 0.3, details: 'No textPattern specified', criteriaType: 'text_disappears', elapsedMs: elapsed() };
+        }
+        const wasThere = before.visibleText.toLowerCase().includes(pattern.toLowerCase());
+        const isGone = !after.visibleText.toLowerCase().includes(pattern.toLowerCase());
+        if (wasThere && isGone) {
+          return { outcome: 'verified', confidence: 0.9, details: `"${pattern}" disappeared`, criteriaType: 'text_disappears', elapsedMs: elapsed() };
+        }
+        return { outcome: 'unverified', confidence: 0.7, details: `"${pattern}" still present`, criteriaType: 'text_disappears', elapsedMs: elapsed() };
+      }
+
+      case 'url_changes': {
+        if (before.url !== after.url) {
+          const urlPattern = criteria.params?.urlPattern;
+          if (urlPattern) {
+            const matches = after.url.includes(urlPattern) || new RegExp(urlPattern).test(after.url);
+            return matches
+              ? { outcome: 'verified', confidence: 0.95, details: `URL changed and matches pattern`, criteriaType: 'url_changes', elapsedMs: elapsed() }
+              : { outcome: 'verified', confidence: 0.7, details: `URL changed but doesn't match pattern`, criteriaType: 'url_changes', elapsedMs: elapsed() };
+          }
+          return { outcome: 'verified', confidence: 0.9, details: 'URL changed', criteriaType: 'url_changes', elapsedMs: elapsed() };
+        }
+        return { outcome: 'unverified', confidence: 0.8, details: 'URL did not change', criteriaType: 'url_changes', elapsedMs: elapsed() };
+      }
+
+      case 'element_appears': {
+        // Check dropdown/modal appeared
+        if (!before.hasDropdown && after.hasDropdown) {
+          return { outcome: 'verified', confidence: 0.85, details: 'Dropdown opened', criteriaType: 'element_appears', elapsedMs: elapsed() };
+        }
+        if (!before.hasModal && after.hasModal) {
+          return { outcome: 'verified', confidence: 0.85, details: 'Modal appeared', criteriaType: 'element_appears', elapsedMs: elapsed() };
+        }
+        // Fallback: element count increased
+        if (after.elementCount > before.elementCount) {
+          return { outcome: 'verified', confidence: 0.6, details: 'Element count increased', criteriaType: 'element_appears', elapsedMs: elapsed() };
+        }
+        return { outcome: 'unverified', confidence: 0.5, details: 'Element did not appear', criteriaType: 'element_appears', elapsedMs: elapsed() };
+      }
+
+      case 'element_disappears': {
+        if (before.hasModal && !after.hasModal) {
+          return { outcome: 'verified', confidence: 0.9, details: 'Modal closed', criteriaType: 'element_disappears', elapsedMs: elapsed() };
+        }
+        if (before.hasDropdown && !after.hasDropdown) {
+          return { outcome: 'verified', confidence: 0.85, details: 'Dropdown closed', criteriaType: 'element_disappears', elapsedMs: elapsed() };
+        }
+        if (after.elementCount < before.elementCount) {
+          return { outcome: 'verified', confidence: 0.6, details: 'Element count decreased', criteriaType: 'element_disappears', elapsedMs: elapsed() };
+        }
+        return { outcome: 'unverified', confidence: 0.5, details: 'Element did not disappear', criteriaType: 'element_disappears', elapsedMs: elapsed() };
+      }
+
+      case 'input_cleared': {
+        if (after.visibleText.length < before.visibleText.length) {
+          return { outcome: 'verified', confidence: 0.6, details: 'Visible text decreased (input cleared)', criteriaType: 'input_cleared', elapsedMs: elapsed() };
+        }
+        return { outcome: 'inconclusive', confidence: 0.4, details: 'Cannot confirm input cleared', criteriaType: 'input_cleared', elapsedMs: elapsed() };
+      }
+
+      case 'toast_appears': {
+        if (after.toastMessages.length > before.toastMessages.length) {
+          const pattern = criteria.params?.toastPattern;
+          if (pattern) {
+            const matched = after.toastMessages.some(msg => msg.toLowerCase().includes(pattern.toLowerCase()));
+            return matched
+              ? { outcome: 'verified', confidence: 0.95, details: `Toast matched: "${pattern}"`, criteriaType: 'toast_appears', elapsedMs: elapsed() }
+              : { outcome: 'verified', confidence: 0.7, details: 'Toast appeared but pattern not matched', criteriaType: 'toast_appears', elapsedMs: elapsed() };
+          }
+          return { outcome: 'verified', confidence: 0.7, details: 'Toast appeared', criteriaType: 'toast_appears', elapsedMs: elapsed() };
+        }
+        return { outcome: 'unverified', confidence: 0.5, details: 'No toast appeared', criteriaType: 'toast_appears', elapsedMs: elapsed() };
+      }
+
+      case 'count_changes': {
+        const diff = after.elementCount - before.elementCount;
+        const expected = criteria.params?.expectedChange;
+        if (expected === 'increase' && diff > 0) {
+          return { outcome: 'verified', confidence: 0.7, details: `Count increased by ${diff}`, criteriaType: 'count_changes', elapsedMs: elapsed() };
+        }
+        if (expected === 'decrease' && diff < 0) {
+          return { outcome: 'verified', confidence: 0.7, details: `Count decreased by ${-diff}`, criteriaType: 'count_changes', elapsedMs: elapsed() };
+        }
+        if (!expected && diff !== 0) {
+          return { outcome: 'verified', confidence: 0.5, details: `Count changed by ${diff}`, criteriaType: 'count_changes', elapsedMs: elapsed() };
+        }
+        return { outcome: 'inconclusive', confidence: 0.4, details: 'Count did not change as expected', criteriaType: 'count_changes', elapsedMs: elapsed() };
+      }
+
+      case 'dom_stabilizes': {
+        // Synchronous single-pass: we can only check if *any* state field changed
+        const anyChange = before.url !== after.url ||
+          before.hasModal !== after.hasModal ||
+          before.hasDropdown !== after.hasDropdown ||
+          before.elementCount !== after.elementCount ||
+          before.toastMessages.length !== after.toastMessages.length;
+        return {
+          outcome: 'inconclusive',
+          confidence: anyChange ? 0.6 : 0.5,
+          details: anyChange ? 'DOM changed (stability unknown without async check)' : 'No observable changes',
+          criteriaType: 'dom_stabilizes',
+          elapsedMs: elapsed(),
+        };
+      }
+
+      default:
+        return { outcome: 'inconclusive', confidence: 0.3, details: `Unknown criteria type: ${(criteria as any).type}`, elapsedMs: elapsed() };
+    }
+  }
+
+  /**
+   * Text-based fallback verification using expectedOutcome keywords
+   * mapped to observed PageChanges.
+   */
+  private checkExpectedOutcomeText(
+    expectedOutcome: string,
+    pageChanges: PageChanges,
+    startTime: number,
+  ): StepVerificationResult {
+    const elapsed = () => performance.now() - startTime;
+    const outcome = expectedOutcome.toLowerCase();
+    const changeTypes: ChangeType[] = pageChanges.changes.map(c => c.type);
+
+    // Keyword → ChangeType mapping
+    const keywordMappings: Array<{ keywords: string[]; changeTypes: ChangeType[]; confidence: number }> = [
+      { keywords: ['dropdown opens', 'menu opens', 'options appear'], changeTypes: ['dropdown_opened'], confidence: 0.85 },
+      { keywords: ['modal', 'dialog', 'popup', 'opens'], changeTypes: ['modal_appeared'], confidence: 0.85 },
+      { keywords: ['closes', 'dismissed', 'disappears'], changeTypes: ['modal_closed', 'dropdown_closed'], confidence: 0.8 },
+      { keywords: ['navigat', 'redirect', 'page changes'], changeTypes: ['url_changed'], confidence: 0.9 },
+      { keywords: ['success', 'saved', 'created', 'confirmed'], changeTypes: ['success_appeared', 'toast_appeared'], confidence: 0.8 },
+      { keywords: ['error', 'fail', 'invalid'], changeTypes: ['error_appeared'], confidence: 0.8 },
+    ];
+
+    for (const mapping of keywordMappings) {
+      const keywordMatch = mapping.keywords.some(kw => outcome.includes(kw));
+      if (keywordMatch) {
+        const changeMatch = mapping.changeTypes.some(ct => changeTypes.includes(ct));
+        if (changeMatch) {
+          return {
+            outcome: 'verified',
+            confidence: mapping.confidence,
+            details: `Expected "${mapping.keywords.find(kw => outcome.includes(kw))}" matched observed change`,
+            criteriaType: 'text_match',
+            elapsedMs: elapsed(),
+          };
+        }
+      }
+    }
+
+    // No keyword match — check if there was any significant change
+    if (pageChanges.hasSignificantChange) {
+      return { outcome: 'inconclusive', confidence: 0.5, details: 'Significant change detected but no keyword match', criteriaType: 'text_match', elapsedMs: elapsed() };
+    }
+
+    return { outcome: 'inconclusive', confidence: 0.3, details: 'No changes detected to match expectedOutcome', criteriaType: 'text_match', elapsedMs: elapsed() };
+  }
+
+  /**
+   * Handle the result of step verification. Decides whether to retry.
+   * Uses a transient _stepVerifyFailureCount on the hint (not persisted).
+   */
+  private handleStepVerificationResult(
+    hint: AgentHint & { _stepVerifyFailureCount?: number },
+    result: StepVerificationResult,
+  ): { shouldRetry: boolean } {
+    const tag = `[Phase3] Step ${hint.stepNumber}`;
+
+    switch (result.outcome) {
+      case 'verified':
+        console.log(`${tag} VERIFIED: ${result.details} (confidence=${result.confidence.toFixed(2)}, ${result.elapsedMs.toFixed(1)}ms)`);
+        return { shouldRetry: false };
+
+      case 'unverified': {
+        const failCount = (hint._stepVerifyFailureCount ?? 0) + 1;
+        (hint as any)._stepVerifyFailureCount = failCount;
+
+        if (failCount === 1 && result.confidence < 0.5) {
+          console.warn(`${tag} UNVERIFIED (will retry): ${result.details} (confidence=${result.confidence.toFixed(2)}, attempt=${failCount})`);
+          return { shouldRetry: true };
+        }
+
+        console.warn(`${tag} UNVERIFIED (continuing): ${result.details} (confidence=${result.confidence.toFixed(2)}, attempt=${failCount})`);
+        return { shouldRetry: false };
+      }
+
+      case 'inconclusive':
+        console.log(`${tag} INCONCLUSIVE: ${result.details} (confidence=${result.confidence.toFixed(2)}, ${result.elapsedMs.toFixed(1)}ms)`);
+        return { shouldRetry: false };
+
+      default:
+        return { shouldRetry: false };
     }
   }
 

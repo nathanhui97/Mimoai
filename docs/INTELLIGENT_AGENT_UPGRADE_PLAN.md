@@ -280,8 +280,9 @@ Add flags to enable/disable new behaviors:
 // feature-flags.ts
 INTELLIGENT_AGENT_CONTEXT: true,    // Phase 1 - fast-path context ✅ SHIPPED
 INTELLIGENT_AGENT_FLEXIBLE: true,   // Phase 2A - flexible responses ✅ SHIPPED
-INTELLIGENT_AGENT_GOAL: false,      // Phase 2B - goal-oriented prompting
-INTELLIGENT_AGENT_VERIFY: false,    // Phase 2C - goal verification
+INTELLIGENT_AGENT_GOAL: true,       // Phase 2B - goal-oriented prompting ✅ SHIPPED
+INTELLIGENT_AGENT_VERIFY: true,     // Phase 2C - goal verification ✅ SHIPPED
+INTELLIGENT_AGENT_STEP_VERIFY: false, // Phase 3 - step outcome verification ✅ SHIPPED (off by default)
 ```
 
 ### Rollback Plan
@@ -360,8 +361,8 @@ INTELLIGENT_AGENT_VERIFY: false,    // Phase 2C - goal verification
 
 1. ~~**Start Phase 1** (low risk, high value)~~ ✅ DONE
 2. ~~**Phase 2A: Flexible Responses**~~ ✅ DONE
-3. **Phase 2B: Goal-Oriented Prompting** — next priority
-4. **Phase 2C: Goal Verification** — after 2B
+3. ~~**Phase 2B: Goal-Oriented Prompting**~~ ✅ DONE
+4. ~~**Phase 2C: Goal Verification**~~ ✅ DONE
 5. **Deploy edge function** (`supabase functions deploy dom_agent`) for Phase 2A
 6. **Test Phase 2A** on https://play2.automationcamp.ir/ with flag ON
 
@@ -392,13 +393,43 @@ INTELLIGENT_AGENT_VERIFY: false,    // Phase 2C - goal verification
 - **Candidates section** — extracted `buildCandidatesInstruction()` helper; goal-oriented mode uses "THINK STEP BY STEP" framework without bias toward picking candidates, requires goal-framed reasoning
 - **Your Task section** — adds reasoning protocol (Sub-goal → Achievement Check → Best Action → Why); priority item 4 changes from "ADAPTIVE" to "GOAL-ORIENTED" with early done support
 - **Backward compatible** — flag off = zero behavior change; goal-oriented candidates require BOTH `goalOriented=true` AND `allowFlexibleResponses=true`
-- Feature flag: `INTELLIGENT_AGENT_GOAL: false` (disabled by default)
+- Feature flag: `INTELLIGENT_AGENT_GOAL: true` (enabled)
 - 40+ new Phase 2B unit tests passing
 - Files changed: `dom_agent/index.ts`, `ai-agent.ts`
-- **TODO**: Enable flag, deploy edge function, test with real workflows
+
+### 2026-01-30: Phase 2B Deployed & Enabled
+- Edge function deployed (`supabase functions deploy dom_agent`)
+- Feature flag `INTELLIGENT_AGENT_GOAL` set to `true`
+- **Tested on** `https://play2.automationcamp.ir/` — 13-step form workflow ran successfully (steps 0-9 before pause)
+- **NOTE: LLM path not yet exercised.** All steps resolved via fast-path (80-95% confidence), so the goal-oriented prompting was never triggered during this test. The test only confirmed no regressions on the fast-path.
+- **DEBUGGING NOTE:** If a future workflow fails or behaves unexpectedly when the LLM is called (low-confidence steps, ambiguous candidates, skip/done decisions), Phase 2B goal-oriented prompting is a possible factor. To isolate, set `INTELLIGENT_AGENT_GOAL: false` in `feature-flags.ts` and re-test. The LLM reasoning should include `"Goal: <sub-goal>."` prefixes when 2B is active — check edge function logs for this.
+
+### 2026-01-29: Phase 2C Complete
+- **`checkGoalProgress()`** — synchronous DOM/URL check reusing `verifyWorkflowOutcome()` logic with a 30% minimum-progress threshold and confidence score (0.85–0.9)
+- **`skipRemainingHints()`** — marks all incomplete hints as `skipped` when goal is achieved early
+- **`checkAndHandleEarlyCompletion()`** — shared helper called at 3 execution-loop insertion points (fast-path, vision dropdown, LLM-driven completion); returns `true` when confidence ≥ 0.8
+- **No extra LLM calls** — pure `document.body.innerText` + `window.location.href` checks
+- **Backward compatible** — flag off = zero behavior change
+- Feature flag: `INTELLIGENT_AGENT_VERIFY: true` (enabled)
+- 30+ new Phase 2C unit tests
+- Files changed: `ai-agent.ts`, `feature-flags.ts`
+
+### 2026-01-29: Phase 3 Complete — Smart Step Outcome Verification
+- **`verifyStepOutcome()`** — synchronous single-pass verification of each step's outcome against `successCriteria` (structured) or `expectedOutcome` (text fallback)
+- **`checkStructuredCriteria()`** — handles all 10 criteria types (`modal_appears`, `text_appears`, `text_disappears`, `url_changes`, `element_appears`, `element_disappears`, `input_cleared`, `toast_appears`, `count_changes`, `dom_stabilizes`) with confidence scores 0.5–0.95
+- **`checkExpectedOutcomeText()`** — keyword-to-ChangeType fallback mapping (dropdown opens → `dropdown_opened`, modal → `modal_appeared`, navigat → `url_changed`, success/saved → `success_appeared`/`toast_appeared`, error → `error_appeared`)
+- **`handleStepVerificationResult()`** — retry logic: only retries on first `unverified` with confidence < 0.5; all other outcomes continue
+- **Hooked into 3 execution points**: fast-path completion (with retry support), vision dropdown completion (log only), LLM-driven completion (with retry support)
+- **Uses `capturePageState()` from `success-verifier.ts`** — provides `visibleText` and `toastMessages` needed for text/toast checks (~15ms per capture)
+- **No extra LLM calls** — pure DOM/URL checks
+- **Backward compatible** — flag off = zero behavior change
+- Feature flag: `INTELLIGENT_AGENT_STEP_VERIFY: false` (disabled by default)
+- 30 new Phase 3 unit tests passing
+- Files changed: `ai-agent.ts`, `feature-flags.ts`
+- New file: `intelligent-agent-phase3.test.ts`
 
 ---
 
 *Document created: 2026-01-26*
 *Author: AI Analysis of Execution Engine*
-*Status: Phase 1 ✅ | Phase 2A ✅ | Phase 2B ✅ | Phase 2C pending*
+*Status: Phase 1 ✅ | Phase 2A ✅ | Phase 2B ✅ (deployed, LLM path untested) | Phase 2C ✅ | Phase 3 ✅*

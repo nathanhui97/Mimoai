@@ -134,7 +134,7 @@ export const FeatureFlags = {
    * Cost: None (prompt change only)
    * Risk: Medium - prompt changes can affect behavior
    */
-  INTELLIGENT_AGENT_GOAL: false,
+  INTELLIGENT_AGENT_GOAL: true,
 
   /**
    * Phase 2C: Goal verification and early completion
@@ -142,7 +142,15 @@ export const FeatureFlags = {
    * Cost: Low (verification checks after actions)
    * Risk: Medium-High - new verification logic
    */
-  INTELLIGENT_AGENT_VERIFY: false,
+  INTELLIGENT_AGENT_VERIFY: true,
+
+  /**
+   * Phase 3: Smart step outcome verification
+   * When enabled: Each step's outcome is verified against successCriteria
+   * Cost: Very Low (~25-35ms per step, no LLM calls)
+   * Risk: Medium - could cause false negatives if criteria are wrong
+   */
+  INTELLIGENT_AGENT_STEP_VERIFY: false,
 } as const;
 
 /**
