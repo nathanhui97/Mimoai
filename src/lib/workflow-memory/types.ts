@@ -697,6 +697,29 @@ export interface ExecutionExperience {
    * Common user corrections
    */
   userCorrections?: UserCorrection[];
+
+  /**
+   * Per-step reliability data (built up over multiple executions).
+   * Used by fast-path router to optimize resolution strategy per step.
+   */
+  stepReliability?: StepReliabilityRecord[];
+}
+
+export interface StepReliabilityRecord {
+  /** Step index */
+  stepIndex: number;
+  /** How many times this step has been executed */
+  attempts: number;
+  /** How many times fast-path resolved this step successfully */
+  fastPathSuccesses: number;
+  /** How many times LLM was needed */
+  llmNeeded: number;
+  /** How many times recovery was needed */
+  recoveryNeeded: number;
+  /** Most reliable resolution method */
+  bestMethod: 'fast-path' | 'llm' | 'recovery' | 'vision';
+  /** Working selector if consistently found by selector */
+  reliableSelector?: string;
 }
 
 export interface TroubleSpot {

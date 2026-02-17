@@ -796,6 +796,23 @@ Use these to avoid known failures and apply proven strategies when appropriate.
 `;
   }
   
+  // Milestone context for phase-aware execution
+  let milestoneSection = '';
+  if (payload.milestoneContext) {
+    const mc = payload.milestoneContext;
+    milestoneSection = `
+## 📍 CURRENT MILESTONE
+${mc.currentPhaseLabel}
+Purpose: ${mc.phasePurpose}
+Progress: ${mc.phaseProgress}
+${mc.nextMilestone}
+Criticality: ${mc.criticality}
+Overall: ${mc.completedPhases}/${mc.totalPhases} phases complete
+
+Keep this milestone context in mind when making decisions. Each step contributes to the current phase's purpose.
+`;
+  }
+
   // SAFEGUARD: Only inject spreadsheet prompts if spreadsheetContext exists
   let spreadsheetSection = '';
   if (payload.spreadsheetContext?.isSpreadsheet) {
@@ -911,6 +928,7 @@ IMPORTANT: You must output semantic targets (role, name, text) - NOT pixel coord
 ${executionContextSection}
 ${userContextSection}
 ${workflowLearningsSection}
+${milestoneSection}
 ${taskSummarySection}
 ${intentSection}
 ${prioritySection}

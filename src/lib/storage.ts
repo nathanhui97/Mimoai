@@ -199,6 +199,7 @@ export class WorkflowStorage {
         troubleSpots: update.troubleSpots ?? existingExperience?.troubleSpots ?? [],
         provenStrategies: update.provenStrategies ?? existingExperience?.provenStrategies ?? [],
         userCorrections: update.userCorrections ?? existingExperience?.userCorrections,
+        stepReliability: update.stepReliability ?? existingExperience?.stepReliability,
       };
 
       // Only update experience if memory is properly formed

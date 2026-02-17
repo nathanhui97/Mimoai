@@ -502,5 +502,19 @@ export interface VerificationResult {
   criteriaType?: string;
 }
 
+// ============================================================================
+// Step Outcome Verification Types
+// ============================================================================
+
+export type StepVerificationOutcome = 'verified' | 'unverified' | 'inconclusive';
+
+export interface StepVerificationResult {
+  outcome: StepVerificationOutcome;
+  confidence: number;       // 0-1
+  details: string;
+  criteriaType?: string;    // e.g. 'modal_appears', 'text_match'
+  elapsedMs: number;
+}
+
 
 

@@ -38,6 +38,13 @@ import { CandidateFinder } from './agent/candidate-finder';
 import { HintExtractor } from './agent/hint-extractor';
 import { StuckDetector, type StuckContext } from './stuck-detector';
 import { StrategicReasoner, type ExecutionPlan } from './agent/strategic-reasoner';
+import { Observer } from './agent/observer';
+import { GoalChecker } from './agent/goal-checker';
+import { MilestoneTracker } from './agent/milestone-tracker';
+import { StepAnalyzer } from './agent/step-analyzer';
+import { PreFlightChecker } from './agent/pre-flight-checker';
+import { ConfidenceAssessor } from './agent/confidence-assessor';
+import { HelpRequestBuilder } from './agent/help-request-builder';
 
 // ============================================================================
 // Types
@@ -510,6 +517,13 @@ export class AIAgent {
     candidatesFound: 0,
   };
 
+  // Step resolution tracking for learning loop
+  private stepResolutionDetails: import('./execution-learning').StepResolutionDetail[] = [];
+
+  // Milestone tracking for phase-aware execution
+  private milestoneTracker: MilestoneTracker = new MilestoneTracker();
+  private stepAnalyzer: StepAnalyzer | null = null;
+
   // Extracted modules
   private readonly candidateFinder: CandidateFinder;
   private readonly hintExtractor: HintExtractor;
@@ -564,6 +578,12 @@ export class AIAgent {
     console.log(`[AIAgent] 📝 Workflow Name: ${workflow.name || 'Unnamed'}`);
     console.log(`[AIAgent] 📅 Created: ${workflow.createdAt ? new Date(workflow.createdAt).toLocaleString() : 'Unknown'}`);
     console.log(`[AIAgent] 📊 Total steps: ${workflow.steps.length}`);
+
+    // Reset step resolution tracking for learning loop
+    this.stepResolutionDetails = [];
+
+    // Initialize milestone tracker from workflow memory
+    this.milestoneTracker = new MilestoneTracker(workflow.memory as import('./workflow-memory/types').WorkflowMemory | undefined);
 
     // Check if unified execution is enabled (but not if we're already called from coordinator)
     const config = aiConfig.getConfig();
@@ -622,6 +642,22 @@ export class AIAgent {
 
     console.log(`[AIAgent] Goal: ${this.state.goal}`);
     console.log(`[AIAgent] Hints: ${this.state.hints.length} steps`);
+
+    // Phase 4: Enrich hints with learned corrections from past executions
+    const workflowMemory = workflow.memory as import('./workflow-memory/types').WorkflowMemory | undefined;
+    if (workflowMemory?.experience) {
+      ExecutionLearning.enrichHintsWithLearnings(this.state.hints, workflowMemory.experience);
+      const enrichedCount = this.state.hints.filter(h => h.learnedCorrections?.length).length;
+      if (enrichedCount > 0) {
+        console.log(`[AIAgent] 📚 Enriched ${enrichedCount} hints with learned corrections`);
+      }
+    }
+
+    // Initialize step analyzer for adaptive step execution
+    this.stepAnalyzer = new StepAnalyzer(
+      this.state.hints,
+      workflowMemory,
+    );
 
     // Log intent analysis if available
     if (this.state.analyzedIntent) {
@@ -880,45 +916,48 @@ export class AIAgent {
       attemptsMade: context.attemptsMade,
       lastError: context.lastError,
     });
-    
+
     const hint = this.state.hints[context.stepIndex];
     if (!hint) {
       console.error('[AIAgent] Cannot request help - hint not found');
       return;
     }
-    
-    // Build help context
+
+    // Phase 5: Build rich help request with full context
+    const helpRequest = HelpRequestBuilder.build({
+      hint,
+      stepIndex: context.stepIndex,
+      totalSteps: this.state.hints.length,
+      milestoneContext: this.milestoneTracker.getMilestoneContext(),
+      whatWasTried: context.whatAgentTried,
+      lastError: context.lastError,
+    });
+
     const helpContext: HumanHelpContext = {
-      stepDescription: context.stepDescription,
-      whatAgentTried: context.whatAgentTried.join('\n'),
-      whatHumanShouldDo: this.generateHelpGuidance(hint),
-      errorDetails: context.lastError,
+      stepDescription: helpRequest.milestonePosition
+        ? `[${helpRequest.milestonePosition}] ${context.stepDescription}`
+        : context.stepDescription,
+      whatAgentTried: helpRequest.description,
+      whatHumanShouldDo: helpRequest.userAction,
+      errorDetails: helpRequest.confidenceDetails || context.lastError,
     };
-    
+
     console.log('[AIAgent] Help context created:', helpContext);
     this.requestHumanHelp(helpContext);
   }
   
   /**
-   * Generate guidance for what the user should do manually
+   * Generate guidance for what the user should do manually.
+   * Phase 5: Delegates to HelpRequestBuilder for richer context.
    */
   private generateHelpGuidance(hint: AgentHint): string {
-    const actionType = hint.actionType || 'action';
-    const target = hint.targetText || hint.targetRole || 'the element';
-    
-    switch (actionType) {
-      case 'click':
-        return `Please click on "${target}" manually, then click Continue.`;
-      case 'type':
-        const value = hint.value || '[value]';
-        return `Please type "${value}" into the "${target}" field manually, then click Continue.`;
-      case 'select':
-        return `Please select an option from the "${target}" dropdown manually, then click Continue.`;
-      case 'scroll':
-        return `Please scroll the page to find "${target}", then click Continue.`;
-      default:
-        return `Please complete this step manually: ${hint.description}, then click Continue.`;
-    }
+    const helpRequest = HelpRequestBuilder.build({
+      hint,
+      stepIndex: this.state.currentHintIndex,
+      totalSteps: this.state.hints.length,
+      milestoneContext: this.milestoneTracker.getMilestoneContext(),
+    });
+    return helpRequest.userAction;
   }
   
   /**
@@ -1180,7 +1219,8 @@ export class AIAgent {
             if (this.state.hints[this.state.currentHintIndex].failureCount! >= 3) {
               console.warn(`[AIAgent] Scroll failed 3 times, skipping...`);
               this.state.hints[this.state.currentHintIndex].skipped = true;
-              this.state.currentHintIndex++;
+              const { nextStep } = this.handleStepFailure(this.state.currentHintIndex);
+              this.state.currentHintIndex = nextStep;
             }
           }
           
@@ -1412,17 +1452,22 @@ export class AIAgent {
           },
         });
         
-        // 2.5 Check if current hint's expected outcome is already satisfied
-        if (currentHint?.naturalLanguage?.expectedOutcome) {
-          const skipReason = this.checkIfOutcomeAlreadySatisfied(currentHint, observation);
-          if (skipReason) {
-            console.log(`[AIAgent] ⏭️ SKIPPING STEP: ${skipReason}`);
+        // 2.5 Pre-flight check: is the step's outcome already achieved?
+        // Uses PreFlightChecker (Phase 3) which checks field values, URL state,
+        // and natural language expected outcomes — more comprehensive than the
+        // old checkIfOutcomeAlreadySatisfied().
+        if (currentHint) {
+          const preFlightResult = PreFlightChecker.check(currentHint, observation);
+          if (preFlightResult.canSkip) {
+            console.log(`[AIAgent] ⏭️ PRE-FLIGHT SKIP (${preFlightResult.checkType}): ${preFlightResult.reason}`);
             this.state.hints[this.state.currentHintIndex].completed = true;
+            this.state.hints[this.state.currentHintIndex].skipped = true;
+            this.milestoneTracker.onStepCompleted(this.state.currentHintIndex, this.state.hints);
             this.state.currentHintIndex++;
             this.notifyProgress();
             this.state.history.push({
               stepNumber: currentHint.stepNumber,
-              action: { type: 'skip', params: { reason: skipReason }, reasoning: 'Outcome already satisfied', confidence: 1.0 },
+              action: { type: 'skip', params: { reason: preFlightResult.reason }, reasoning: `Pre-flight: ${preFlightResult.checkType} (confidence: ${preFlightResult.confidence})`, confidence: preFlightResult.confidence },
               observation,
               result: 'success',
               timestamp: Date.now(),
@@ -1589,11 +1634,65 @@ export class AIAgent {
         // This saves ~500-1500ms per step for high-confidence actions
         // ============================================================================
         if (currentHint) {
+          // Milestone tracking: notify which step is starting
+          this.milestoneTracker.onStepStarting(this.state.currentHintIndex);
           await this.applyProactiveStrategies(currentHint);
         }
 
+        // Phase 5: Confidence assessment — decide if we should pause for help
+        if (currentHint && observation) {
+          const assessment = ConfidenceAssessor.assess({
+            hint: currentHint,
+            observation,
+            hints: this.state.hints,
+            currentStepIndex: this.state.currentHintIndex,
+            experience: this.state.workflowMemory?.experience,
+            milestoneContext: this.milestoneTracker.getMilestoneContext(),
+          });
+
+          if (assessment.action === 'stop' || assessment.action === 'pause_ask') {
+            // Only pause if we don't have learned corrections for this step
+            // (learned corrections mean we've recovered from this before)
+            const hasLearnedFix = currentHint.learnedCorrections?.length;
+            if (!hasLearnedFix) {
+              console.log(`[Phase5] ${assessment.action === 'stop' ? '🛑' : '⏸️'} Confidence too low (${(assessment.overall * 100).toFixed(0)}%): ${assessment.summary}`);
+
+              const helpRequest = HelpRequestBuilder.build({
+                hint: currentHint,
+                stepIndex: this.state.currentHintIndex,
+                totalSteps: this.state.hints.length,
+                assessment,
+                milestoneContext: this.milestoneTracker.getMilestoneContext(),
+              });
+
+              this.requestHumanHelp({
+                stepDescription: helpRequest.milestonePosition
+                  ? `[${helpRequest.milestonePosition}] ${currentHint.description || 'Unknown step'}`
+                  : currentHint.description || 'Unknown step',
+                whatAgentTried: helpRequest.description,
+                whatHumanShouldDo: helpRequest.userAction,
+                errorDetails: helpRequest.confidenceDetails,
+              });
+
+              // Wait for user response
+              break;
+            } else {
+              console.log(`[Phase5] Low confidence (${(assessment.overall * 100).toFixed(0)}%) but has learned corrections — proceeding`);
+            }
+          }
+        }
+
         // Include 'select' for native SELECT elements (fast-path can handle them efficiently)
-        if (currentHint && (currentHint.actionType === 'click' || currentHint.actionType === 'type' || currentHint.actionType === 'select')) {
+        // Phase 4: Check historical reliability to optimize resolution strategy
+        const optimalStrategy = currentHint
+          ? ExecutionLearning.getOptimalStrategy(this.state.workflowMemory?.experience, this.state.currentHintIndex)
+          : 'default';
+        const skipFastPath = optimalStrategy === 'llm';
+        if (skipFastPath && currentHint) {
+          console.log(`[Phase4] 🧠 Step ${this.state.currentHintIndex} historically needs LLM — skipping fast-path`);
+        }
+
+        if (currentHint && !skipFastPath && (currentHint.actionType === 'click' || currentHint.actionType === 'type' || currentHint.actionType === 'select')) {
           // Phase 3: Capture pre-state for step verification
           const stepVerifyPreState = isFeatureEnabled('INTELLIGENT_AGENT_STEP_VERIFY') ? capturePageState() : null;
 
@@ -1605,8 +1704,12 @@ export class AIAgent {
             console.log(`[Hybrid] ⚡ ${confidenceLabel} CONFIDENCE (${confidence}%) - ${currentHint.actionType.toUpperCase()} executed instantly, skipping LLM`);
             console.log(`[Hybrid] ✅ MARKING STEP ${this.state.currentHintIndex} (${currentHint.description?.slice(0, 40)}) AS COMPLETE`);
 
+            // Record step resolution for learning
+            this.recordStepResolution(this.state.currentHintIndex, true, 'fast-path', true);
+
             // Mark as completed and advance
             this.state.hints[this.state.currentHintIndex].completed = true;
+            this.milestoneTracker.onStepCompleted(this.state.currentHintIndex, this.state.hints);
             this.state.currentHintIndex++;
             this.notifyProgress();
 
@@ -1761,6 +1864,15 @@ export class AIAgent {
             await this.sleep(500);
             continue;
           }
+          // Phase 3: Check if we can continue past this failure
+          const failureResult = this.handleStepFailure(this.state.currentHintIndex);
+          if (failureResult.canContinue) {
+            console.warn(`[AIAgent] ⚠️ Step ${this.state.currentHintIndex} failed but continuing: ${action.params.reason}`);
+            this.state.hints[this.state.currentHintIndex].skipped = true;
+            this.recordStepResolution(this.state.currentHintIndex, false, 'llm', false, 'failed-continued');
+            this.state.currentHintIndex = failureResult.nextStep;
+            continue;
+          }
           console.error('[AIAgent] Agent decided to fail:', action.params.reason);
           this.state.status = 'failed';
           break;
@@ -1770,11 +1882,8 @@ export class AIAgent {
           console.log(`[AIAgent] Skipping current hint: ${action.params.reason}`);
           if (action.hintStepIndex !== undefined && action.hintStepIndex < this.state.hints.length) {
             this.state.hints[action.hintStepIndex].skipped = true;
-            // Move to next incomplete hint
-            const nextHintIndex = this.state.hints.findIndex((h, i) => 
-              i > action.hintStepIndex! && !h.completed && !h.skipped
-            );
-            this.state.currentHintIndex = nextHintIndex !== -1 ? nextHintIndex : this.state.currentHintIndex + 1;
+            // Use StepAnalyzer (Phase 3) for intelligent next-step selection
+            this.state.currentHintIndex = this.findNextExecutableStep(action.hintStepIndex + 1);
             console.log(`[AIAgent] Advanced to hint ${this.state.currentHintIndex}`);
           }
           // Continue loop without executing (optimized from 200ms)
@@ -1955,9 +2064,11 @@ export class AIAgent {
               currentHint.failureCount = 0;
             } else {
               // ✅ Action achieved the hint's goal - mark complete and advance
+              this.recordStepResolution(completedIndex, true, 'llm', false);
               this.state.hints[completedIndex].completed = true;
               this.state.hints[completedIndex].failureCount = 0;  // Reset failure count
               this.stuckDetector.recordSuccess(completedIndex);  // Reset stuck detector
+              this.milestoneTracker.onStepCompleted(completedIndex, this.state.hints);
               
               // Find next incomplete hint (skip over already completed/skipped ones)
               let nextIndex = completedIndex + 1;
@@ -2148,9 +2259,18 @@ export class AIAgent {
       ExecutionTelemetry.recordExecution(executionEvent).catch(err => {
         console.warn('Failed to record execution telemetry:', err);
       });
-      
+
       ExecutionTelemetry.updateWorkflowStats(this.state.workflowId, executionEvent).catch(err => {
         console.warn('Failed to update workflow stats:', err);
+      });
+
+      // Close the learning loop: update WorkflowMemory.experience (the single source of truth)
+      ExecutionLearning.recordExecutionComplete(
+        this.state.workflowId,
+        executionEvent,
+        this.stepResolutionDetails
+      ).catch(err => {
+        console.warn('Failed to record execution learning:', err);
       });
     }
 
@@ -2189,175 +2309,10 @@ export class AIAgent {
 
   /**
    * Observe the current page state using DOM map (primary) + screenshot (optional)
-   * Enhanced with PageModel for unified page understanding
+   * Delegates to Observer module.
    */
   private async observe(): Promise<AgentObservation> {
-    console.log('[AIAgent] 🔍 Observing page state...');
-
-    // Try to get PageModel for enhanced observation (async, cached)
-    let pageModel: import('./page-model/types').PageModel | undefined;
-    try {
-      const { getCurrentModel } = await import('./page-model');
-      pageModel = await getCurrentModel();
-      console.log(`[AIAgent] 📊 PageModel: ${pageModel.pageType.type} page (${(pageModel.pageType.confidence * 100).toFixed(0)}% confidence), context: ${pageModel.activeContext}`);
-    } catch (error) {
-      // PageModel is optional enhancement
-      console.log('[AIAgent] PageModel unavailable, using standard observation');
-    }
-
-    // Generate DOM map with iframe content (fast, structured, cheap for LLM)
-    // This will scan iframes if we're in the main frame
-    const { getCurrentFrameId } = await import('../content/content-script');
-    const currentFrameId = getCurrentFrameId();
-    
-    let domMap;
-    if (currentFrameId === 0) {
-      // Main frame - scan with iframes
-      const { generateDOMMapWithIframes } = await import('../content/dom-map');
-      domMap = await generateDOMMapWithIframes();
-      console.log('[AIAgent] 🖼️ Generated DOM map with iframe content');
-    } else {
-      // We're in an iframe - just scan this frame
-      const { generateDOMMap } = await import('../content/dom-map');
-      domMap = generateDOMMap();
-      console.log(`[AIAgent] Generated DOM map for iframe (frameId: ${currentFrameId})`);
-    }
-    
-    let domMapText = domMapToText(domMap);
-    
-    // NEW: If on a spreadsheet, extract and append spreadsheet state
-    if (SheetStateExtractor.isSpreadsheetDomain()) {
-      try {
-        const sheetState = await SheetStateExtractor.extract();
-        if (sheetState) {
-          console.log(`[AIAgent] 📊 Extracted spreadsheet state: ${sheetState.columns.length} columns`);
-          
-          // Append spreadsheet context to DOM map
-          const sheetContext = this.formatSheetStateForLLM(sheetState);
-          domMapText += `\n\n${sheetContext}`;
-        }
-      } catch (error) {
-        console.warn('[AIAgent] Failed to extract sheet state:', error);
-      }
-    }
-    
-    console.log(`[AIAgent] DOM map: ${domMap.interactiveElements.length} interactive elements, ${domMap.formFields.length} form fields`);
-    
-    // CRITICAL: Log dropdown state prominently
-    if (domMap.activeDropdown) {
-      console.log(`[AIAgent] 🔽 DROPDOWN IS OPEN with ${domMap.activeDropdown.options.length} options:`, 
-        domMap.activeDropdown.options.map(o => o.name || o.text).slice(0, 5));
-    }
-    
-    // Only capture screenshot if VisionClicker is enabled as fallback
-    let screenshot: string | undefined;
-    if (FeatureFlags.VISION_CLICKER) {
-      // skipZoom=true to avoid zoom flashing during execution on spreadsheets
-      const capture = await VisualSnapshotService.captureFullPage(0.8, true);
-      screenshot = capture?.screenshot;
-    }
-    
-    // Build enhanced observation with PageModel context
-    const observation: AgentObservation = {
-      url: window.location.href,
-      title: document.title,
-
-      // DOM map (primary source)
-      domMapText,
-
-      // Modal context - use PageModel if available (more accurate)
-      hasModal: pageModel?.uiState.hasModal ?? !!domMap.activeModal,
-      modalTitle: pageModel?.uiState.modalInfo?.title ?? domMap.activeModal?.title,
-
-      // CRITICAL: Dropdown context - use PageModel if available
-      hasOpenDropdown: pageModel?.uiState.hasOpenDropdown ?? !!domMap.activeDropdown,
-      dropdownOptions: pageModel?.uiState.dropdownInfo?.optionTexts ??
-        domMap.activeDropdown?.options.map(o => o.name || o.text || '(unnamed)'),
-
-      // Form fields for context
-      formFields: domMap.formFields.map(f => ({
-        name: f.name,
-        value: f.attrs?.value,
-        type: f.attrs?.type || 'text',
-      })),
-
-      // Counts for quick reference
-      buttonCount: domMap.interactiveElements.filter(e => e.role === 'button').length,
-      linkCount: domMap.interactiveElements.filter(e => e.role === 'link').length,
-      inputCount: domMap.formFields.length,
-
-      // Headings for page structure
-      headings: domMap.headings.map(h => h.text),
-
-      // Optional screenshot (only if VisionClicker fallback enabled)
-      screenshot,
-
-      viewportSize: {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      },
-      timestamp: Date.now(),
-    };
-
-    // Store PageModel for use by candidateFinder (if available)
-    (observation as any)._pageModel = pageModel;
-    (observation as any)._domMap = domMap;
-
-    return observation;
-  }
-
-  /**
-   * Format spreadsheet state for LLM understanding
-   */
-  private formatSheetStateForLLM(sheetState: import('../content/sheet-state-extractor').SheetState): string {
-    const lines: string[] = [];
-    
-    lines.push('## 📊 SPREADSHEET DETECTED (Google Sheets / Excel Online)');
-    lines.push('');
-    lines.push(`Sheet: "${sheetState.sheetName}"`);
-    lines.push(`Active Cell: ${sheetState.activeCell.reference} (${sheetState.activeCell.isEmpty ? 'empty' : `value: "${sheetState.activeCell.value}"`})`);
-    lines.push('');
-    
-    if (sheetState.headers.length > 0) {
-      lines.push('**Column Headers**:');
-      lines.push(sheetState.headers.map(h => `  ${h.column}: "${h.text}"`).join('\n'));
-      lines.push('');
-    }
-    
-    if (sheetState.columns.length > 0) {
-      lines.push('**Column Data**:');
-      for (const col of sheetState.columns.slice(0, 10)) { // Limit to 10 columns
-        lines.push(`  Column ${col.letter} ("${col.header}"):`);
-        lines.push(`    - Data type: ${col.dataType}`);
-        lines.push(`    - Last data row: ${col.lastDataRow}`);
-        lines.push(`    - Next empty row: ${col.firstEmptyRow}`);
-        if (col.sampleValues.length > 0) {
-          lines.push(`    - Sample values: ${col.sampleValues.slice(0, 2).join(', ')}`);
-        }
-      }
-      lines.push('');
-    }
-    
-    lines.push('**📊 SPREADSHEET ACTIONS AVAILABLE**:');
-    lines.push('When you need to type in a spreadsheet cell, use these specialized actions instead of regular "type":');
-    lines.push('');
-    lines.push('1. **type_in_cell**: Type directly into a specific cell');
-    lines.push('   Example: {"action": "type_in_cell", "cellRef": "B5", "text": "Hello World"}');
-    lines.push('');
-    lines.push('2. **type_in_header_column**: Type in cell by finding column header');
-    lines.push('   Example: {"action": "type_in_header_column", "headerText": "Email", "rowOffset": 1, "text": "john@test.com"}');
-    lines.push('   Note: rowOffset 1 = first data row (row 2 if headers in row 1)');
-    lines.push('');
-    lines.push('3. **type_in_next_empty**: Type in next empty cell of a column');
-    lines.push('   Example: {"action": "type_in_next_empty", "column": "A", "text": "New entry"}');
-    lines.push('');
-    lines.push('4. **read_cell**: Read value from a cell');
-    lines.push('   Example: {"action": "read_cell", "cellRef": "C5"}');
-    lines.push('');
-    lines.push('⚠️ IMPORTANT: When working with spreadsheets, prefer these actions over regular click+type!');
-    lines.push('These actions handle cell navigation, verification, and retries automatically.');
-    
-    return lines.join('\n');
+    return Observer.observe();
   }
 
   /**
@@ -2845,12 +2800,14 @@ export class AIAgent {
   private async applyProactiveStrategies(hint: AgentHint): Promise<void> {
     if (!isFeatureEnabled('SMART_HYBRID_MODE')) return;
     const memory = this.state.workflowMemory;
-    const troubleSpots = memory?.experience?.troubleSpots || [];
-    if (!troubleSpots.length) return;
+    const experience = memory?.experience;
+    if (!experience) return;
 
     const stepIndex = hint.stepNumber ?? this.state.currentHintIndex;
+
+    // 1. Apply trouble spot mitigations (existing logic)
+    const troubleSpots = experience.troubleSpots || [];
     const relevantSpots = troubleSpots.filter(spot => spot.stepIndex === stepIndex && spot.frequency > 0.3);
-    if (!relevantSpots.length) return;
 
     for (const spot of relevantSpots) {
       console.log(`[AIAgent] Proactive: Applying known fix for "${spot.issue}"`);
@@ -2866,6 +2823,33 @@ export class AIAgent {
 
       if (issue.includes('modal') || issue.includes('overlay')) {
         await this.sleep(300);
+      }
+    }
+
+    // 2. Apply proven strategies for this step
+    const provenStrategies = experience.provenStrategies || [];
+    const stepStrategies = provenStrategies.filter(
+      s => s.situation.includes(`Step ${stepIndex}`) && s.effectiveness > 0.5
+    );
+
+    for (const strategy of stepStrategies) {
+      const strat = strategy.strategy.toLowerCase();
+
+      // Pre-scroll if strategy suggests element needs scrolling
+      if (strat.includes('scroll') || strat.includes('not visible')) {
+        console.log(`[AIAgent] Proactive strategy: pre-scrolling for step ${stepIndex}`);
+        await this.ensureElementVisible(hint);
+      }
+
+      // Pre-wait if strategy suggests timing issues
+      if (strat.includes('wait') || strat.includes('delay') || strat.includes('load')) {
+        console.log(`[AIAgent] Proactive strategy: pre-waiting for step ${stepIndex}`);
+        await this.sleep(500);
+      }
+
+      // Log for strategies we can't auto-apply (informational for LLM context)
+      if (strat.startsWith('fast-path:')) {
+        console.log(`[AIAgent] Proactive: step ${stepIndex} historically resolves via ${strategy.strategy} (${(strategy.effectiveness * 100).toFixed(0)}% effective)`);
       }
     }
   }
@@ -4004,6 +3988,9 @@ export class AIAgent {
       // Phase 2A: Allow LLM to return scroll/wait/skip instead of just picking candidates
       allowFlexibleResponses: isFeatureEnabled('INTELLIGENT_AGENT_FLEXIBLE'),
       goalOriented: isFeatureEnabled('INTELLIGENT_AGENT_GOAL'),
+
+      // Phase 2: Milestone context for phase-aware decisions
+      milestoneContext: this.milestoneTracker.getMilestoneContext(),
 
       executionContext: (isFeatureEnabled('INTELLIGENT_AGENT_CONTEXT') && this.executionContext.fastPathAttempted) ? {
         fastPathAttempted: this.executionContext.fastPathAttempted,
@@ -5350,68 +5337,14 @@ export class AIAgent {
    * Pure DOM / URL check — no extra LLM calls or screenshots.
    */
   private checkGoalProgress(): { goalAchieved: boolean; reason: string; confidence: number } {
-    // Guard: need analyzedIntent with expectedOutcome
-    if (!this.state.analyzedIntent?.expectedOutcome) {
-      return { goalAchieved: false, reason: 'No expectedOutcome defined', confidence: 0 };
-    }
-
-    // Guard: too early — skip check if less than 30 % of steps done
-    const completedCount = this.state.hints.filter(h => h.completed || h.skipped).length;
-    const totalCount = this.state.hints.length;
-    if (totalCount === 0 || completedCount / totalCount < 0.3) {
-      return { goalAchieved: false, reason: 'Too early to check goal', confidence: 0 };
-    }
-
-    const expectedOutcome = this.state.analyzedIntent.expectedOutcome.toLowerCase();
-    const currentUrl = window.location.href.toLowerCase();
-    const bodyText = document.body.innerText.toLowerCase();
-
-    // --- URL-based checks ---
-    if (expectedOutcome.includes('confirmation') && currentUrl.includes('confirm')) {
-      return { goalAchieved: true, reason: 'URL indicates confirmation page', confidence: 0.9 };
-    }
-    if (expectedOutcome.includes('success') && currentUrl.includes('success')) {
-      return { goalAchieved: true, reason: 'URL indicates success page', confidence: 0.9 };
-    }
-    if (expectedOutcome.includes('thank you') && (currentUrl.includes('thankyou') || currentUrl.includes('thank-you'))) {
-      return { goalAchieved: true, reason: 'URL indicates thank you page', confidence: 0.9 };
-    }
-
-    // --- Body-text keyword checks ---
-    const successIndicators = ['success', 'confirmed', 'complete', 'saved', 'submitted', 'thank you'];
-    for (const indicator of successIndicators) {
-      if (expectedOutcome.includes(indicator) && bodyText.includes(indicator)) {
-        return { goalAchieved: true, reason: `Found "${indicator}" on page`, confidence: 0.85 };
-      }
-    }
-
-    // --- Visual confirmation checks ---
-    if (this.state.analyzedIntent.visualConfirmation) {
-      const visualConfirmation = this.state.analyzedIntent.visualConfirmation.toLowerCase();
-      const visualIndicators = visualConfirmation.split(/,|\sand\s/).map(s => s.trim());
-      for (const indicator of visualIndicators) {
-        if (indicator && bodyText.includes(indicator)) {
-          return { goalAchieved: true, reason: `Found visual confirmation: "${indicator}"`, confidence: 0.85 };
-        }
-      }
-    }
-
-    return { goalAchieved: false, reason: 'Goal not yet achieved', confidence: 0 };
+    return GoalChecker.checkGoalProgress(this.state);
   }
 
   /**
    * Mark all remaining incomplete hints as skipped with a given reason.
    */
   private skipRemainingHints(reason: string): void {
-    for (const hint of this.state.hints) {
-      if (!hint.completed && !hint.skipped) {
-        hint.skipped = true;
-        // Store reason in history rather than on hint (matches existing pattern)
-      }
-    }
-    // Log skipped count
-    const skippedCount = this.state.hints.filter(h => h.skipped).length;
-    console.log(`[AIAgent] Skipped ${skippedCount} remaining hints: ${reason}`);
+    GoalChecker.skipRemainingHints(this.state, reason);
   }
 
   /**
@@ -5419,23 +5352,7 @@ export class AIAgent {
    * Returns `true` when the caller should `break` out of the main loop.
    */
   private checkAndHandleEarlyCompletion(): boolean {
-    if (!isFeatureEnabled('INTELLIGENT_AGENT_VERIFY')) {
-      return false;
-    }
-
-    const goalCheck = this.checkGoalProgress();
-    const completedCount = this.state.hints.filter(h => h.completed || h.skipped).length;
-    const totalCount = this.state.hints.length;
-    console.log(`[AIAgent] 🔍 Phase2C goal check (${completedCount}/${totalCount}): ${goalCheck.reason} (achieved=${goalCheck.goalAchieved}, confidence=${goalCheck.confidence})`);
-
-    if (goalCheck.goalAchieved && goalCheck.confidence >= 0.8) {
-      console.log(`[AIAgent] 🎉 GOAL ACHIEVED EARLY: ${goalCheck.reason} (confidence: ${goalCheck.confidence})`);
-      this.skipRemainingHints(`Goal achieved early: ${goalCheck.reason}`);
-      this.state.status = 'completed';
-      return true;
-    }
-
-    return false;
+    return GoalChecker.checkAndHandleEarlyCompletion(this.state);
   }
 
   // ===========================================================================
@@ -5453,330 +5370,92 @@ export class AIAgent {
     postState: VerifierPageState | null,
     pageChanges?: PageChanges | null,
   ): StepVerificationResult {
-    const start = performance.now();
-
-    // Guard: no page states
-    if (!preState || !postState) {
-      return { outcome: 'inconclusive', confidence: 0, details: 'Missing pre/post page state', elapsedMs: performance.now() - start };
-    }
-
-    // Guard: no criteria and no expectedOutcome
-    const hasCriteria = !!hint.aiAnalysisContext?.successCriteria;
-    const hasExpectedOutcome = !!hint.naturalLanguage?.expectedOutcome;
-    if (!hasCriteria && !hasExpectedOutcome) {
-      return { outcome: 'inconclusive', confidence: 0, details: 'No success criteria or expectedOutcome on hint', elapsedMs: performance.now() - start };
-    }
-
-    // Prefer structured criteria
-    if (hasCriteria) {
-      return this.checkStructuredCriteria(hint.aiAnalysisContext!.successCriteria!, preState, postState, start);
-    }
-
-    // Fallback to text-based keyword matching
-    if (hasExpectedOutcome && pageChanges) {
-      return this.checkExpectedOutcomeText(hint.naturalLanguage!.expectedOutcome, pageChanges, start);
-    }
-
-    return { outcome: 'inconclusive', confidence: 0.3, details: 'Expected outcome present but no pageChanges to match against', elapsedMs: performance.now() - start };
+    return GoalChecker.verifyStepOutcome(hint, preState, postState, pageChanges);
   }
 
   /**
    * Check structured success criteria synchronously.
    * Single-pass comparison of pre/post page state.
    */
-  private checkStructuredCriteria(
-    criteria: NonNullable<AgentHint['aiAnalysisContext']>['successCriteria'] & {},
-    before: VerifierPageState,
-    after: VerifierPageState,
-    startTime: number,
-  ): StepVerificationResult {
-    const elapsed = () => performance.now() - startTime;
-
-    switch (criteria.type) {
-      case 'modal_appears': {
-        if (!before.hasModal && after.hasModal) {
-          return { outcome: 'verified', confidence: 0.95, details: 'Modal appeared', criteriaType: 'modal_appears', elapsedMs: elapsed() };
-        }
-        return { outcome: 'unverified', confidence: 0.8, details: 'Modal did not appear', criteriaType: 'modal_appears', elapsedMs: elapsed() };
-      }
-
-      case 'text_appears': {
-        const pattern = criteria.params?.textPattern;
-        if (!pattern) {
-          return { outcome: 'inconclusive', confidence: 0.3, details: 'No textPattern specified', criteriaType: 'text_appears', elapsedMs: elapsed() };
-        }
-        const found = after.visibleText.toLowerCase().includes(pattern.toLowerCase());
-        return found
-          ? { outcome: 'verified', confidence: 0.9, details: `Found "${pattern}"`, criteriaType: 'text_appears', elapsedMs: elapsed() }
-          : { outcome: 'unverified', confidence: 0.7, details: `"${pattern}" not found`, criteriaType: 'text_appears', elapsedMs: elapsed() };
-      }
-
-      case 'text_disappears': {
-        const pattern = criteria.params?.textPattern;
-        if (!pattern) {
-          return { outcome: 'inconclusive', confidence: 0.3, details: 'No textPattern specified', criteriaType: 'text_disappears', elapsedMs: elapsed() };
-        }
-        const wasThere = before.visibleText.toLowerCase().includes(pattern.toLowerCase());
-        const isGone = !after.visibleText.toLowerCase().includes(pattern.toLowerCase());
-        if (wasThere && isGone) {
-          return { outcome: 'verified', confidence: 0.9, details: `"${pattern}" disappeared`, criteriaType: 'text_disappears', elapsedMs: elapsed() };
-        }
-        return { outcome: 'unverified', confidence: 0.7, details: `"${pattern}" still present`, criteriaType: 'text_disappears', elapsedMs: elapsed() };
-      }
-
-      case 'url_changes': {
-        if (before.url !== after.url) {
-          const urlPattern = criteria.params?.urlPattern;
-          if (urlPattern) {
-            const matches = after.url.includes(urlPattern) || new RegExp(urlPattern).test(after.url);
-            return matches
-              ? { outcome: 'verified', confidence: 0.95, details: `URL changed and matches pattern`, criteriaType: 'url_changes', elapsedMs: elapsed() }
-              : { outcome: 'verified', confidence: 0.7, details: `URL changed but doesn't match pattern`, criteriaType: 'url_changes', elapsedMs: elapsed() };
-          }
-          return { outcome: 'verified', confidence: 0.9, details: 'URL changed', criteriaType: 'url_changes', elapsedMs: elapsed() };
-        }
-        return { outcome: 'unverified', confidence: 0.8, details: 'URL did not change', criteriaType: 'url_changes', elapsedMs: elapsed() };
-      }
-
-      case 'element_appears': {
-        // Check dropdown/modal appeared
-        if (!before.hasDropdown && after.hasDropdown) {
-          return { outcome: 'verified', confidence: 0.85, details: 'Dropdown opened', criteriaType: 'element_appears', elapsedMs: elapsed() };
-        }
-        if (!before.hasModal && after.hasModal) {
-          return { outcome: 'verified', confidence: 0.85, details: 'Modal appeared', criteriaType: 'element_appears', elapsedMs: elapsed() };
-        }
-        // Fallback: element count increased
-        if (after.elementCount > before.elementCount) {
-          return { outcome: 'verified', confidence: 0.6, details: 'Element count increased', criteriaType: 'element_appears', elapsedMs: elapsed() };
-        }
-        return { outcome: 'unverified', confidence: 0.5, details: 'Element did not appear', criteriaType: 'element_appears', elapsedMs: elapsed() };
-      }
-
-      case 'element_disappears': {
-        if (before.hasModal && !after.hasModal) {
-          return { outcome: 'verified', confidence: 0.9, details: 'Modal closed', criteriaType: 'element_disappears', elapsedMs: elapsed() };
-        }
-        if (before.hasDropdown && !after.hasDropdown) {
-          return { outcome: 'verified', confidence: 0.85, details: 'Dropdown closed', criteriaType: 'element_disappears', elapsedMs: elapsed() };
-        }
-        if (after.elementCount < before.elementCount) {
-          return { outcome: 'verified', confidence: 0.6, details: 'Element count decreased', criteriaType: 'element_disappears', elapsedMs: elapsed() };
-        }
-        return { outcome: 'unverified', confidence: 0.5, details: 'Element did not disappear', criteriaType: 'element_disappears', elapsedMs: elapsed() };
-      }
-
-      case 'input_cleared': {
-        if (after.visibleText.length < before.visibleText.length) {
-          return { outcome: 'verified', confidence: 0.6, details: 'Visible text decreased (input cleared)', criteriaType: 'input_cleared', elapsedMs: elapsed() };
-        }
-        return { outcome: 'inconclusive', confidence: 0.4, details: 'Cannot confirm input cleared', criteriaType: 'input_cleared', elapsedMs: elapsed() };
-      }
-
-      case 'toast_appears': {
-        if (after.toastMessages.length > before.toastMessages.length) {
-          const pattern = criteria.params?.toastPattern;
-          if (pattern) {
-            const matched = after.toastMessages.some(msg => msg.toLowerCase().includes(pattern.toLowerCase()));
-            return matched
-              ? { outcome: 'verified', confidence: 0.95, details: `Toast matched: "${pattern}"`, criteriaType: 'toast_appears', elapsedMs: elapsed() }
-              : { outcome: 'verified', confidence: 0.7, details: 'Toast appeared but pattern not matched', criteriaType: 'toast_appears', elapsedMs: elapsed() };
-          }
-          return { outcome: 'verified', confidence: 0.7, details: 'Toast appeared', criteriaType: 'toast_appears', elapsedMs: elapsed() };
-        }
-        return { outcome: 'unverified', confidence: 0.5, details: 'No toast appeared', criteriaType: 'toast_appears', elapsedMs: elapsed() };
-      }
-
-      case 'count_changes': {
-        const diff = after.elementCount - before.elementCount;
-        const expected = criteria.params?.expectedChange;
-        if (expected === 'increase' && diff > 0) {
-          return { outcome: 'verified', confidence: 0.7, details: `Count increased by ${diff}`, criteriaType: 'count_changes', elapsedMs: elapsed() };
-        }
-        if (expected === 'decrease' && diff < 0) {
-          return { outcome: 'verified', confidence: 0.7, details: `Count decreased by ${-diff}`, criteriaType: 'count_changes', elapsedMs: elapsed() };
-        }
-        if (!expected && diff !== 0) {
-          return { outcome: 'verified', confidence: 0.5, details: `Count changed by ${diff}`, criteriaType: 'count_changes', elapsedMs: elapsed() };
-        }
-        return { outcome: 'inconclusive', confidence: 0.4, details: 'Count did not change as expected', criteriaType: 'count_changes', elapsedMs: elapsed() };
-      }
-
-      case 'dom_stabilizes': {
-        // Synchronous single-pass: we can only check if *any* state field changed
-        const anyChange = before.url !== after.url ||
-          before.hasModal !== after.hasModal ||
-          before.hasDropdown !== after.hasDropdown ||
-          before.elementCount !== after.elementCount ||
-          before.toastMessages.length !== after.toastMessages.length;
-        return {
-          outcome: 'inconclusive',
-          confidence: anyChange ? 0.6 : 0.5,
-          details: anyChange ? 'DOM changed (stability unknown without async check)' : 'No observable changes',
-          criteriaType: 'dom_stabilizes',
-          elapsedMs: elapsed(),
-        };
-      }
-
-      default:
-        return { outcome: 'inconclusive', confidence: 0.3, details: `Unknown criteria type: ${(criteria as any).type}`, elapsedMs: elapsed() };
-    }
-  }
-
-  /**
-   * Text-based fallback verification using expectedOutcome keywords
-   * mapped to observed PageChanges.
-   */
-  private checkExpectedOutcomeText(
-    expectedOutcome: string,
-    pageChanges: PageChanges,
-    startTime: number,
-  ): StepVerificationResult {
-    const elapsed = () => performance.now() - startTime;
-    const outcome = expectedOutcome.toLowerCase();
-    const changeTypes: ChangeType[] = pageChanges.changes.map(c => c.type);
-
-    // Keyword → ChangeType mapping
-    const keywordMappings: Array<{ keywords: string[]; changeTypes: ChangeType[]; confidence: number }> = [
-      { keywords: ['dropdown opens', 'menu opens', 'options appear'], changeTypes: ['dropdown_opened'], confidence: 0.85 },
-      { keywords: ['modal', 'dialog', 'popup', 'opens'], changeTypes: ['modal_appeared'], confidence: 0.85 },
-      { keywords: ['closes', 'dismissed', 'disappears'], changeTypes: ['modal_closed', 'dropdown_closed'], confidence: 0.8 },
-      { keywords: ['navigat', 'redirect', 'page changes'], changeTypes: ['url_changed'], confidence: 0.9 },
-      { keywords: ['success', 'saved', 'created', 'confirmed'], changeTypes: ['success_appeared', 'toast_appeared'], confidence: 0.8 },
-      { keywords: ['error', 'fail', 'invalid'], changeTypes: ['error_appeared'], confidence: 0.8 },
-    ];
-
-    for (const mapping of keywordMappings) {
-      const keywordMatch = mapping.keywords.some(kw => outcome.includes(kw));
-      if (keywordMatch) {
-        const changeMatch = mapping.changeTypes.some(ct => changeTypes.includes(ct));
-        if (changeMatch) {
-          return {
-            outcome: 'verified',
-            confidence: mapping.confidence,
-            details: `Expected "${mapping.keywords.find(kw => outcome.includes(kw))}" matched observed change`,
-            criteriaType: 'text_match',
-            elapsedMs: elapsed(),
-          };
-        }
-      }
-    }
-
-    // No keyword match — check if there was any significant change
-    if (pageChanges.hasSignificantChange) {
-      return { outcome: 'inconclusive', confidence: 0.5, details: 'Significant change detected but no keyword match', criteriaType: 'text_match', elapsedMs: elapsed() };
-    }
-
-    return { outcome: 'inconclusive', confidence: 0.3, details: 'No changes detected to match expectedOutcome', criteriaType: 'text_match', elapsedMs: elapsed() };
-  }
-
-  /**
-   * Handle the result of step verification. Decides whether to retry.
-   * Uses a transient _stepVerifyFailureCount on the hint (not persisted).
-   */
   private handleStepVerificationResult(
     hint: AgentHint & { _stepVerifyFailureCount?: number },
     result: StepVerificationResult,
   ): { shouldRetry: boolean } {
-    const tag = `[Phase3] Step ${hint.stepNumber}`;
-
-    switch (result.outcome) {
-      case 'verified':
-        console.log(`${tag} VERIFIED: ${result.details} (confidence=${result.confidence.toFixed(2)}, ${result.elapsedMs.toFixed(1)}ms)`);
-        return { shouldRetry: false };
-
-      case 'unverified': {
-        const failCount = (hint._stepVerifyFailureCount ?? 0) + 1;
-        (hint as any)._stepVerifyFailureCount = failCount;
-
-        if (failCount === 1 && result.confidence < 0.5) {
-          console.warn(`${tag} UNVERIFIED (will retry): ${result.details} (confidence=${result.confidence.toFixed(2)}, attempt=${failCount})`);
-          return { shouldRetry: true };
-        }
-
-        console.warn(`${tag} UNVERIFIED (continuing): ${result.details} (confidence=${result.confidence.toFixed(2)}, attempt=${failCount})`);
-        return { shouldRetry: false };
-      }
-
-      case 'inconclusive':
-        console.log(`${tag} INCONCLUSIVE: ${result.details} (confidence=${result.confidence.toFixed(2)}, ${result.elapsedMs.toFixed(1)}ms)`);
-        return { shouldRetry: false };
-
-      default:
-        return { shouldRetry: false };
-    }
+    return GoalChecker.handleStepVerificationResult(hint, result);
   }
 
-  /**
-   * Verify if the workflow's expected outcome has been achieved
-   * This provides basic outcome checking based on URL and page content
-   */
   private async verifyWorkflowOutcome(): Promise<{ achieved: boolean; reason: string }> {
-    if (!this.state.analyzedIntent?.expectedOutcome) {
-      return { achieved: false, reason: 'No expectedOutcome defined' };
-    }
-
-    const expectedOutcome = this.state.analyzedIntent.expectedOutcome.toLowerCase();
-    
-    // Check URL-based outcomes
-    const currentUrl = window.location.href.toLowerCase();
-    if (expectedOutcome.includes('confirmation') && currentUrl.includes('confirm')) {
-      return { achieved: true, reason: 'URL indicates confirmation page' };
-    }
-    if (expectedOutcome.includes('success') && currentUrl.includes('success')) {
-      return { achieved: true, reason: 'URL indicates success page' };
-    }
-    if (expectedOutcome.includes('thank you') && (currentUrl.includes('thankyou') || currentUrl.includes('thank-you'))) {
-      return { achieved: true, reason: 'URL indicates thank you page' };
-    }
-
-    // Check for success indicators in DOM
-    const successIndicators = ['success', 'confirmed', 'complete', 'saved', 'submitted', 'thank you'];
-    const bodyText = document.body.innerText.toLowerCase();
-    for (const indicator of successIndicators) {
-      if (expectedOutcome.includes(indicator) && bodyText.includes(indicator)) {
-        return { achieved: true, reason: `Found "${indicator}" on page` };
-      }
-    }
-
-    // Check visual confirmation if provided
-    if (this.state.analyzedIntent.visualConfirmation) {
-      const visualConfirmation = this.state.analyzedIntent.visualConfirmation.toLowerCase();
-      const visualIndicators = visualConfirmation.split(/,|\sand\s/).map(s => s.trim());
-      for (const indicator of visualIndicators) {
-        if (indicator && bodyText.includes(indicator)) {
-          return { achieved: true, reason: `Found visual confirmation: "${indicator}"` };
-        }
-      }
-    }
-
-    return { achieved: false, reason: 'Outcome not yet verified' };
+    return GoalChecker.verifyWorkflowOutcome(this.state.analyzedIntent);
   }
 
-  /**
-   * Build a human-readable progress summary for recovery context
-   * Helps the AI understand where we are in the workflow
-   */
   private buildProgressSummary(currentStep: number, totalSteps: number, completedSteps: number[]): string {
-    const percentComplete = Math.round((completedSteps.length / totalSteps) * 100);
-
-    if (currentStep === 0) {
-      return 'Just starting - this is the first step';
-    }
-    if (currentStep >= totalSteps - 1) {
-      return `Almost done (${percentComplete}%) - this is the FINAL step, try harder!`;
-    }
-    if (percentComplete >= 80) {
-      return `Near completion (${percentComplete}%) - ${completedSteps.length} of ${totalSteps} steps done`;
-    }
-    if (percentComplete >= 50) {
-      return `Halfway through (${percentComplete}%) - ${completedSteps.length} of ${totalSteps} steps done`;
-    }
-    return `In progress (${percentComplete}%) - ${completedSteps.length} of ${totalSteps} steps done`;
+    return GoalChecker.buildProgressSummary(currentStep, totalSteps, completedSteps);
   }
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /** Record how a step was resolved (for learning loop) */
+  /**
+   * Find the next executable step index using StepAnalyzer (Phase 3) when available,
+   * falling back to simple sequential progression.
+   */
+  private findNextExecutableStep(fromIndex: number): number {
+    if (this.stepAnalyzer) {
+      const result = this.stepAnalyzer.getNextExecutableStep(fromIndex, this.state.hints);
+      if (result.stepIndex !== null) {
+        // Log any steps that were skipped
+        for (const [idx, reason] of result.skipReasons) {
+          console.log(`[StepAnalyzer] Skipped step ${idx}: ${reason}`);
+        }
+        return result.stepIndex;
+      }
+      // No more executable steps — return past the end
+      return this.state.hints.length;
+    }
+
+    // Fallback: find next incomplete/unskipped hint
+    const nextIdx = this.state.hints.findIndex(
+      (h, i) => i >= fromIndex && !h.completed && !h.skipped
+    );
+    return nextIdx !== -1 ? nextIdx : this.state.hints.length;
+  }
+
+  /**
+   * Handle a step failure with adaptive logic (Phase 3).
+   * Returns whether execution should continue and what step to go to next.
+   */
+  private handleStepFailure(failedStepIndex: number): { canContinue: boolean; nextStep: number } {
+    if (this.stepAnalyzer) {
+      const result = this.stepAnalyzer.canContinueAfterFailure(failedStepIndex, this.state.hints);
+      console.log(`[StepAnalyzer] Step ${failedStepIndex} failed: ${result.reason}`);
+      return {
+        canContinue: result.canContinue,
+        nextStep: result.nextStep ?? this.state.hints.length,
+      };
+    }
+
+    // Fallback: always continue to next step
+    return { canContinue: true, nextStep: failedStepIndex + 1 };
+  }
+
+  private recordStepResolution(
+    stepIndex: number,
+    success: boolean,
+    foundBy: import('./execution-learning').StepResolutionDetail['foundBy'],
+    fastPathUsed: boolean,
+    resolutionStrategy?: string
+  ): void {
+    this.stepResolutionDetails.push({
+      stepIndex,
+      success,
+      foundBy,
+      resolutionMs: 0,
+      recoveryAttempts: this.state.hints[stepIndex]?.failureCount || 0,
+      fastPathUsed,
+      resolutionStrategy,
+    });
   }
 }
 
