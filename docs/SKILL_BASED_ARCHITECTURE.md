@@ -203,6 +203,198 @@ After each action:
 
 ---
 
+## Part 1B: Handling Complex UI Patterns
+
+Dropdowns, modals, popups, and dynamic UI are the hardest parts of web automation. The page planner treats each as a specific pattern with a deterministic executor strategy — no per-interaction LLM calls.
+
+### Dropdowns
+
+A dropdown is semantically ONE action ("select US from Country") but mechanically 2-4 DOM interactions. Today the agent sometimes treats these as separate steps and gets confused — especially with custom dropdowns (React Select, Salesforce Lightning picklists) that render options as portals in a different part of the DOM.
+
+**Planner output:** Simple — one field action.
+
+```typescript
+{ field: "Country", value: "US", strategy: "select" }
+```
+
+**Executor handles the mechanics:**
+
+```
+Native <select>:
+  1. Set value directly + dispatch change event
+  Done. (~20ms)
+
+Custom dropdown (React Select, Ant Design, Lightning, etc.):
+  1. Click trigger element to open
+  2. Wait for option list to render (watch for [role="listbox"], [role="option"])
+  3. Find option matching value (from skill's known decisionSpace)
+  4. If option not visible, scroll within dropdown list
+  5. Click option
+  6. Wait for dropdown to close
+  7. Verify trigger shows selected value
+  Done. (~200ms)
+```
+
+No LLM needed — the executor knows the mechanics for each dropdown type. The `decisionSpace` captured during recording tells it all available options.
+
+**Dependent dropdowns** (City changes when State changes): The form audit captures which fields have dynamic options. The executor fills parent fields first and waits for dependent fields to update before selecting.
+
+### Modals / Dialog Popups
+
+When a modal opens, the page context changes completely. The page planner treats a modal as a **mini-page within the page** — it gets its own scoped plan.
+
+```
+User clicks "New Contact" button
+  |
+  v
+Modal opens (detected: new [role="dialog"] or overlay element)
+  |
+  v
+Page Planner RE-FIRES, scoped to modal DOM only:
+  - DOM map generated from modal container only
+  - Produces PagePlan for modal content (form fields, buttons)
+  - Executor works within modal scope
+  |
+  v
+User fills modal form, clicks Save
+  |
+  v
+Modal closes (detected: dialog element removed)
+  |
+  v
+Page Planner RE-FIRES for the underlying page
+  - May have changed (new row in table, success message, etc.)
+```
+
+**Nested modals** (confirmation dialog inside a form modal): The planner maintains a scope stack:
+
+```typescript
+interface ExecutionScope {
+  type: 'page' | 'modal' | 'panel' | 'drawer';
+  containerSelector?: string;    // Scope DOM queries to this container
+  parentScope?: ExecutionScope;  // For nesting
+}
+
+// Scope stack during nested modal:
+// [page] -> [modal: "New Contact"] -> [dialog: "Confirm Save"]
+```
+
+When the inner dialog closes, scope pops back to the outer modal. When the outer modal closes, scope pops back to the page.
+
+**Detection triggers:**
+
+| Event | Action |
+|-------|--------|
+| `[role="dialog"]` appears | Push modal scope, re-plan |
+| `[role="dialog"]` removed | Pop scope, re-plan parent |
+| Overlay/backdrop appears | Push modal scope |
+| `.modal`, `[aria-modal="true"]` detected | Push modal scope |
+
+### Typeahead / Autocomplete Fields
+
+These are hybrids — you type text and a suggestion list appears. Neither pure text input nor pure dropdown.
+
+**Planner output:**
+
+```typescript
+{ field: "Account", value: "Acme Corp", strategy: "typeahead" }
+```
+
+**Executor strategy:**
+
+```
+1. Focus the input field
+2. Type the value (or first few characters)
+3. Wait for suggestion list to appear
+4. Find matching suggestion in the list
+5. If found: click the suggestion
+   If not found: keep typed value as-is (might be a free-text field)
+6. Verify field value matches expected
+```
+
+**Key difference from dropdown:** Typeahead might accept free text (no suggestion needed) or might REQUIRE selecting a suggestion (lookup field). The skill model learns which behavior applies after the first execution.
+
+### Toast Notifications / Snackbars
+
+Some apps show toast messages that overlay clickable elements or that indicate success/failure.
+
+**As success indicators:** The planner's `successCheck` can watch for toasts:
+
+```typescript
+successCheck: {
+  type: 'toast',
+  pattern: 'Contact created successfully',
+  toastType: 'success'
+}
+```
+
+**As blockers:** If a toast overlays a target element, the executor waits for it to dismiss:
+
+```
+1. Try to click target element
+2. If click intercepted (element behind overlay), detect toast
+3. Wait for toast to auto-dismiss (typically 3-5 seconds)
+4. Retry click
+```
+
+### Pop-up Windows / New Tabs
+
+A new tab or popup window is simply another page transition. The planner handles it like any other navigation:
+
+```
+Tab 1: Click "View Details" (opens new tab)
+  |
+  v
+Tab 2: New page loads
+  +-- Page Planner fires for Tab 2
+  +-- Executor works in Tab 2
+  +-- When done, action may switch back to Tab 1
+  |
+  v
+Tab 1: Continue workflow
+  +-- Page Planner re-fires (page may have changed)
+```
+
+The skill plan knows which phases happen in which tabs. The executor handles `chrome.tabs` API calls for switching.
+
+### Inline Editing / Expandable Sections
+
+Some UIs have content that appears without navigation — accordion sections, inline edit modes, expandable rows.
+
+**Detection:** After clicking an element, if no navigation occurs but new interactive elements appear, this is an inline expansion. The planner doesn't need to re-fire for small expansions (a few new fields). It only re-plans if the DOM change is significant (>50% new interactive elements).
+
+**For inline edit mode** (click a text field to make it editable):
+
+```typescript
+{ field: "Email", value: "john@acme.com", strategy: "inline_edit" }
+
+// Executor:
+// 1. Click the display text to enter edit mode
+// 2. Wait for input to appear
+// 3. Clear existing value
+// 4. Type new value
+// 5. Press Enter or click outside to confirm
+```
+
+### Summary: UI Pattern → Executor Strategy
+
+| UI Pattern | Re-plan? | Executor Strategy | LLM Calls |
+|------------|----------|-------------------|-----------|
+| Native `<select>` | No | Set value + change event | 0 |
+| Custom dropdown | No | Click trigger → wait → click option | 0 |
+| Typeahead/autocomplete | No | Type → wait suggestions → click match | 0 |
+| Modal opens | Yes (scoped) | Work within modal DOM | 1 (for modal plan) |
+| Nested modal | Yes (push scope) | Scope stack | 1 per modal level |
+| Modal closes | Yes (pop scope) | Return to parent scope | 0 (use cached plan) |
+| New tab/window | Yes (new tab) | Tab switch + plan new page | 1 |
+| Toast notification | No | Wait for dismiss if blocking | 0 |
+| Inline edit | No | Click to edit → type → confirm | 0 |
+| Accordion/expand | Maybe | Only if >50% new elements | 0-1 |
+
+The pattern: **LLM calls happen at scope changes (modal, page, tab), never for interaction mechanics (dropdowns, typeahead, toasts).** The executor has deterministic strategies for every interaction type.
+
+---
+
 ## Part 2: Enhanced Teaching Session
 
 ### What the Recording Already Captures Well
