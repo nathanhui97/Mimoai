@@ -12,6 +12,9 @@ import { SiteKnowledgeBase } from '../lib/site-knowledge';
 import { VariableInputForm } from './VariableInputForm';
 import { ScreenshotModal } from './ScreenshotModal';
 import { SettingsPanel } from './SettingsPanel';
+import { AuthScreen } from './AuthScreen';
+import { AuthBadge } from './AuthBadge';
+import { authService, type AuthState } from '../lib/auth-service';
 import { UserContextModal } from './UserContextModal';
 import { ThinkingPanel } from './ThinkingPanel';
 import { OpenWorkWindowButton } from './OpenWorkWindowButton';
@@ -168,6 +171,8 @@ function App() {
   // AI workflow analysis state (runs in background after recording stops)
   const [currentWorkflowAIAnalysis, setCurrentWorkflowAIAnalysis] = useState<WorkflowAnalysis | null>(null);
   const [isAnalyzingWorkflow, setIsAnalyzingWorkflow] = useState(false);
+  // Multi-recording merge candidates
+  const [mergeCandidates, setMergeCandidates] = useState<import('../lib/multi-recording-merge').MergeCandidate[]>([]);
   // Variable naming page state (shown after recording data-entry workflows)
   const [showVariableNamingPage, setShowVariableNamingPage] = useState(false);
   // AI clarifying questions state
@@ -199,6 +204,8 @@ function App() {
   // UI simplification state
   const [_showAdvancedMenu, _setShowAdvancedMenu] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAuthScreen, setShowAuthScreen] = useState(false);
+  const [authState, setAuthState] = useState<AuthState>({ user: null, session: null, isLoading: true, isAuthenticated: false });
   const [showUserContextModal, setShowUserContextModal] = useState(false);
   const [userContext, setUserContext] = useState<UserContext | null>(null);
   const [_workflowMenu, _setWorkflowMenu] = useState<string | null>(null);
@@ -273,6 +280,13 @@ function App() {
   const [showSkillTeacher, setShowSkillTeacher] = useState(false);
   const [_skillTeachingPending, _setSkillTeachingPending] = useState<{ name: string; description: string; usageContext: string } | null>(null);
   const [_teachableSkills, setTeachableSkills] = useState<TeachableSkill[]>([]);  // Used by ChatExecutor
+
+  // Initialize auth service and subscribe to state changes
+  useEffect(() => {
+    authService.initialize();
+    const unsub = authService.subscribe(setAuthState);
+    return unsub;
+  }, []);
 
   // Ping content script on mount
   useEffect(() => {
@@ -964,6 +978,26 @@ function App() {
             setIsAnalyzingWorkflow(false);
           }
 
+          // Detect merge candidates (existing workflows this recording could merge with)
+          try {
+            const { findMergeCandidates } = await import('../lib/multi-recording-merge');
+            const tempWorkflow = {
+              id: `temp-${Date.now()}`,
+              name: suggestedName,
+              steps: currentSteps,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            } as import('../types/workflow').SavedWorkflow;
+            const candidates = findMergeCandidates(tempWorkflow, savedWorkflows);
+            setMergeCandidates(candidates);
+            if (candidates.length > 0) {
+              console.log(`[App] Found ${candidates.length} merge candidate(s): ${candidates[0].workflow.name} (${Math.round(candidates[0].similarity * 100)}%)`);
+            }
+          } catch (mergeErr) {
+            console.warn('[App] Merge detection failed:', mergeErr);
+            setMergeCandidates([]);
+          }
+
           // Fetch clarifying questions for non-data-entry workflows too
           const questionsResult = await fetchClarifyingQuestions(analysis);
 
@@ -1059,7 +1093,7 @@ function App() {
    * Called when user confirms post-recording with simplified UI
    * Saves workflow with user-provided name and edited variable names
    */
-  const handlePostRecordingConfirmSave = async (name: string, editedVariableNames: Record<string, string>) => {
+  const handlePostRecordingConfirmSave = async (name: string, editedVariableNames: Record<string, string>, corrections?: import('../lib/workflow-memory/types').TeachingCorrection[], mergeTargetId?: string) => {
     console.log('[App] 🎓 Saving workflow from confirmation UI:', { name, editedVariableNames });
 
     try {
@@ -1103,6 +1137,37 @@ function App() {
 
       // Save to storage (ensures local memory is generated)
       await WorkflowStorage.saveWorkflow(workflow);
+
+      // Apply teaching corrections if any
+      if (corrections && corrections.length > 0) {
+        await WorkflowStorage.applyTeachingCorrections(workflow.id, corrections);
+        console.log(`[App] 🎓 Applied ${corrections.length} teaching corrections`);
+      }
+
+      // Multi-recording merge if user selected a target
+      if (mergeTargetId) {
+        try {
+          const { mergeRecordings, applyMergeToSkillModel } = await import('../lib/multi-recording-merge');
+          const targetWorkflow = await WorkflowStorage.loadWorkflow(mergeTargetId);
+          if (targetWorkflow) {
+            const mergeResult = mergeRecordings(targetWorkflow, [workflow]);
+            // Apply merge to target's skill model
+            if (targetWorkflow.skillModel) {
+              const updatedSkillModel = applyMergeToSkillModel(targetWorkflow.skillModel, mergeResult);
+              const updatedTarget = {
+                ...targetWorkflow,
+                skillModel: updatedSkillModel,
+                updatedAt: Date.now(),
+              };
+              await WorkflowStorage.saveWorkflow(updatedTarget, { skipMemoryGeneration: true });
+              console.log(`[App] 🔀 Merged recording into "${targetWorkflow.name}" — ${mergeResult.recordingCount} recordings, ${Object.keys(mergeResult.fieldConfidence).length} fields analyzed`);
+            }
+          }
+        } catch (mergeErr) {
+          console.warn('[App] Merge failed (workflow saved separately):', mergeErr);
+        }
+      }
+
       const savedWorkflow = await WorkflowStorage.loadWorkflow(workflow.id);
       addSavedWorkflow(savedWorkflow || workflow);
 
@@ -1113,9 +1178,11 @@ function App() {
       setPendingLearnedSkill(null);
       setCurrentWorkflowVariables(null);
       setCurrentWorkflowAIAnalysis(null);
+      setMergeCandidates([]);
       setIsDetectingVariables(false);
 
-      setLearningFeedback(`✅ Got it! I saved "${name}".`);
+      const mergeLabel = mergeTargetId ? ` (merged with existing)` : '';
+      setLearningFeedback(`✅ Got it! I saved "${name}"${mergeLabel}.`);
       setTimeout(() => setLearningFeedback(null), 3000);
 
     } catch (err) {
@@ -2447,7 +2514,12 @@ function App() {
         <div className="max-w-2xl mx-auto">
           {/* Header - Minimal */}
           <div className="flex items-center justify-between mb-6">
-            <h1 className="text-xl font-bold text-foreground">mimoai</h1>
+            <div className="flex items-center gap-3">
+              <h1 className="text-xl font-bold text-foreground">mimoai</h1>
+              {authState.isAuthenticated && (
+                <AuthBadge authState={authState} onSignOut={async () => { await authService.signOut(); }} />
+              )}
+            </div>
             <div className="flex items-center gap-2">
               <OpenWorkWindowButton variant="icon" />
               <button
@@ -2534,6 +2606,8 @@ function App() {
                 suggestedName={teachingIntent?.userDescription || generateTaskName(workflowSteps)}
                 onSave={handlePostRecordingConfirmSave}
                 onCancel={handleCancelTeaching}
+                aiAnalysis={currentWorkflowAIAnalysis}
+                mergeCandidates={mergeCandidates}
               />
             </div>
           )}
@@ -3377,6 +3451,11 @@ function App() {
           onClose={() => setShowUserContextModal(false)}
         />
 
+        {/* Auth Screen */}
+        {showAuthScreen && (
+          <AuthScreen onClose={() => setShowAuthScreen(false)} />
+        )}
+
         {/* Settings Panel */}
         {showSettings && (
           <SettingsPanel
@@ -3391,6 +3470,9 @@ function App() {
             clearWorkflowSteps={clearWorkflowSteps}
             userContext={userContext}
             onEditUserContext={() => setShowUserContextModal(true)}
+            authState={authState}
+            onSignIn={() => { setShowSettings(false); setShowAuthScreen(true); }}
+            onSignOut={async () => { await authService.signOut(); }}
             onClose={() => setShowSettings(false)}
           />
         )}

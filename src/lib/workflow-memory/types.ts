@@ -79,6 +79,12 @@ export interface WorkflowMemory {
    * Answers to AI's clarifying questions during teaching
    */
   clarifications?: WorkflowClarifications;
+
+  /**
+   * TEACHING CORRECTIONS - What did the user correct?
+   * High-confidence overrides from the teaching refinement step
+   */
+  teachingCorrections?: TeachingCorrection[];
 }
 
 // ============================================================================
@@ -775,6 +781,27 @@ export interface UserCorrection {
   /**
    * When the correction was made
    */
+  timestamp: number;
+}
+
+// ============================================================================
+// Teaching Corrections (Phase D)
+// ============================================================================
+
+/**
+ * A correction made by the user during the teaching refinement step.
+ * These are high-confidence overrides stored in WorkflowMemory.
+ */
+export interface TeachingCorrection {
+  /** What aspect was corrected */
+  type: 'field_required' | 'field_optional' | 'phase_name' | 'phase_purpose' | 'success_criteria' | 'goal' | 'field_name';
+  /** Target of the correction (field name, phase name, etc.) */
+  target: string;
+  /** The corrected value or explanation */
+  correction: string;
+  /** User corrections are always highest confidence */
+  confidence: 1.0;
+  /** When this correction was made */
   timestamp: number;
 }
 

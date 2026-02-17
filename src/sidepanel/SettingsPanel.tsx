@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { CorrectionMemory } from '../lib/correction-memory';
 import type { UserContext } from '../lib/user-context-storage';
+import type { AuthState } from '../lib/auth-service';
 import { EXTENSION_VERSION } from '../lib/version-checker';
 import type { WorkflowStep } from '../types/workflow';
 import type { CorrectionEntry } from '../types/visual';
@@ -17,6 +18,9 @@ interface SettingsPanelProps {
   clearWorkflowSteps: () => void;
   userContext?: UserContext | null;
   onEditUserContext: () => void;
+  authState: AuthState;
+  onSignIn: () => void;
+  onSignOut: () => void;
   onClose: () => void;
 }
 
@@ -32,6 +36,9 @@ export function SettingsPanel({
   clearWorkflowSteps,
   userContext,
   onEditUserContext,
+  authState,
+  onSignIn,
+  onSignOut,
   onClose,
 }: SettingsPanelProps) {
   const [showDevOptions, setShowDevOptions] = useState(false);
@@ -50,6 +57,29 @@ export function SettingsPanel({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
+        </div>
+
+        {/* Account */}
+        <div className="mb-5 p-5 bg-muted/30 rounded-2xl">
+          <h3 className="font-semibold text-foreground mb-3">Account</h3>
+          {authState.isAuthenticated && authState.user ? (
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-foreground truncate mr-3">{authState.user.email}</span>
+              <button
+                onClick={onSignOut}
+                className="px-3 py-1.5 text-xs bg-muted text-muted-foreground rounded-lg font-medium hover:bg-muted/80 transition-colors shrink-0"
+              >
+                Sign Out
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={onSignIn}
+              className="w-full px-4 py-2.5 text-sm bg-primary/10 text-primary rounded-xl font-medium hover:bg-primary/20 transition-colors"
+            >
+              Sign in to sync workflows
+            </button>
+          )}
         </div>
 
         {/* Role & Work Context */}

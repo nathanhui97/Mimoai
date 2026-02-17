@@ -410,6 +410,11 @@ export interface WorkflowStepPayload {
   // and element relationships at recording time for intelligent replay
   pageModelContext?: import('../lib/page-model/types').PageModelRecordingContext;
 
+  /** Form audit: full snapshot of all form fields captured on first interaction */
+  formAudit?: import('../content/recording/form-auditor').FormAudit;
+  /** Form completion diff: which fields were filled vs skipped at submit time */
+  formCompletionDiff?: import('../content/recording/form-auditor').FormCompletionDiff;
+
   /** Clipboard operation details (for COPY and PASTE steps) */
   clipboardDetails?: {
     /** The text that was copied/pasted */
@@ -564,6 +569,10 @@ export interface SavedWorkflow {
   // This consolidates scattered data (aiAnalysis, learnedSkill, variables, etc.)
   // into a single coherent structure the agent can consult
   memory?: import('../lib/workflow-memory').WorkflowMemory;
+
+  // Skill Model - field-level procedural knowledge for the PagePlanner
+  // Auto-generated from recording + form audit, refined after each execution
+  skillModel?: import('../lib/skill-model').SkillModel;
 }
 
 // ============================================================================

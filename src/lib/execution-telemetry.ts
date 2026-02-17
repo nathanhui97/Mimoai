@@ -73,6 +73,8 @@ export class ExecutionTelemetry {
 
   /**
    * Update workflow statistics
+   * @deprecated Use ExecutionLearning.recordExecutionComplete() instead — it writes
+   * to WorkflowMemory.experience which is the single source of truth.
    */
   static async updateWorkflowStats(workflowId: string, event: ExecutionEvent): Promise<void> {
     try {

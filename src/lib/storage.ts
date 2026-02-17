@@ -5,6 +5,7 @@
 import type { SavedWorkflow } from '../types/workflow';
 import type { ExecutionExperience } from './workflow-memory/types';
 import { generateWorkflowMemory, consolidateExistingData } from './workflow-memory';
+import { SkillExtractor } from './skill-model';
 
 const WORKFLOWS_KEY = 'ghostwriter-workflows';
 
@@ -86,6 +87,27 @@ export class WorkflowStorage {
       // NOTE: We no longer trigger background AI enhancement here
       // The unified flow in post-recording-analyzer handles AI analysis + memory in one call
       // This saves an AI call and ensures consistency
+
+      // Generate Skill Model from recording data + form audit
+      try {
+        const formAudits = WorkflowStorage.extractFormAudits(workflow);
+        const completionDiffs = WorkflowStorage.extractCompletionDiffs(workflow);
+        if (workflow.steps.length > 0) {
+          workflow = {
+            ...workflow,
+            skillModel: SkillExtractor.extract({
+              workflowId: workflow.id,
+              steps: workflow.steps,
+              memory: localMemory,
+              formAudits,
+              completionDiffs,
+            }),
+          };
+          console.log(`[Storage] Skill model generated: ${workflow.skillModel?.pages.length} pages`);
+        }
+      } catch (skillError) {
+        console.warn('[Storage] Skill model extraction failed:', skillError);
+      }
 
       return workflow;
     } catch (error) {
@@ -170,6 +192,32 @@ export class WorkflowStorage {
       console.error('Error deleting workflow:', error);
       throw new Error(`Failed to delete workflow: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  }
+
+  /**
+   * Extract FormAudit data from workflow steps (attached to INPUT steps).
+   */
+  private static extractFormAudits(workflow: SavedWorkflow): import('../content/recording/form-auditor').FormAudit[] {
+    const audits: import('../content/recording/form-auditor').FormAudit[] = [];
+    for (const step of workflow.steps) {
+      if (step.payload && 'formAudit' in step.payload && step.payload.formAudit) {
+        audits.push(step.payload.formAudit as import('../content/recording/form-auditor').FormAudit);
+      }
+    }
+    return audits;
+  }
+
+  /**
+   * Extract FormCompletionDiff data from workflow steps (attached to submit CLICK steps).
+   */
+  private static extractCompletionDiffs(workflow: SavedWorkflow): import('../content/recording/form-auditor').FormCompletionDiff[] {
+    const diffs: import('../content/recording/form-auditor').FormCompletionDiff[] = [];
+    for (const step of workflow.steps) {
+      if (step.payload && 'formCompletionDiff' in step.payload && step.payload.formCompletionDiff) {
+        diffs.push(step.payload.formCompletionDiff as import('../content/recording/form-auditor').FormCompletionDiff);
+      }
+    }
+    return diffs;
   }
 
   /**
@@ -430,6 +478,108 @@ export class WorkflowStorage {
       console.log(`[Storage] Cleared execution feedback for workflow ${workflowId}`);
     } catch (error) {
       console.error('Error clearing execution feedback:', error);
+    }
+  }
+
+  // ============================================================================
+  // Phase D: Teaching Corrections
+  // ============================================================================
+
+  /**
+   * Apply teaching corrections to a saved workflow's memory.
+   * Corrections update memory fields (inputs, phases, goal) and are stored
+   * as teachingCorrections[] for future reference.
+   */
+  static async applyTeachingCorrections(
+    workflowId: string,
+    corrections: import('./workflow-memory/types').TeachingCorrection[]
+  ): Promise<void> {
+    if (corrections.length === 0) return;
+
+    try {
+      const workflows = await this.loadWorkflows();
+      const index = workflows.findIndex(w => w.id === workflowId);
+      if (index < 0) return;
+
+      const workflow = workflows[index];
+      const memory = workflow.memory as import('./workflow-memory/types').WorkflowMemory | undefined;
+      if (!memory) {
+        console.warn('[Storage] No memory to apply corrections to');
+        return;
+      }
+
+      // Apply each correction to the memory
+      for (const correction of corrections) {
+        switch (correction.type) {
+          case 'goal':
+            memory.identity.purpose = correction.correction;
+            break;
+
+          case 'field_required': {
+            // Move field from optional to required
+            const optIdx = memory.inputs.optional.findIndex(f => f.name === correction.target);
+            if (optIdx >= 0) {
+              const field = memory.inputs.optional.splice(optIdx, 1)[0];
+              memory.inputs.required.push(field);
+            }
+            break;
+          }
+
+          case 'field_optional': {
+            // Move field from required to optional
+            const reqIdx = memory.inputs.required.findIndex(f => f.name === correction.target);
+            if (reqIdx >= 0) {
+              const field = memory.inputs.required.splice(reqIdx, 1)[0];
+              memory.inputs.optional.push(field);
+            }
+            break;
+          }
+
+          case 'field_name': {
+            // Rename a field
+            const allFields = [...memory.inputs.required, ...memory.inputs.optional];
+            const field = allFields.find(f => f.name === correction.target);
+            if (field) {
+              field.name = correction.correction;
+            }
+            break;
+          }
+
+          case 'phase_name': {
+            // Rename a phase
+            const phase = memory.understanding.phases.find(p => p.name === correction.target);
+            if (phase) {
+              phase.name = correction.correction;
+            }
+            break;
+          }
+
+          case 'phase_purpose': {
+            const phase = memory.understanding.phases.find(p => p.name === correction.target);
+            if (phase) {
+              phase.purpose = correction.correction;
+            }
+            break;
+          }
+
+          case 'success_criteria':
+            memory.success.endState = correction.correction;
+            break;
+        }
+      }
+
+      // Store corrections for future reference
+      memory.teachingCorrections = [
+        ...(memory.teachingCorrections || []),
+        ...corrections,
+      ];
+
+      workflows[index] = { ...workflow, memory, updatedAt: Date.now() };
+      await chrome.storage.local.set({ [WORKFLOWS_KEY]: workflows });
+
+      console.log(`[Storage] Applied ${corrections.length} teaching corrections to workflow ${workflowId}`);
+    } catch (error) {
+      console.error('Error applying teaching corrections:', error);
     }
   }
 }

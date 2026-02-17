@@ -44,6 +44,7 @@ import { StepPublisher } from './recording/step-publisher';
 import { StepEnricher } from './recording/step-enricher';
 import { MenuDetector, UNIVERSAL_MENU_SELECTORS } from './menu-detector';
 import { InteractionDetector } from './interaction-detector';
+import { FormAuditor } from './recording/form-auditor';
 
 export class RecordingManager {
   // Feature flag for reliable replayer enhancements
@@ -129,6 +130,10 @@ export class RecordingManager {
   private lastPasteEventTime: number = 0;
   private readonly CLIPBOARD_EVENT_DEDUP_MS = 50; // Ignore same event within 50ms
 
+  // Form audit: captures full form state on first field interaction
+  private readonly formAuditor: FormAuditor;
+  private formAuditAttached: boolean = false; // Track whether audit was attached to a step
+
   constructor() {
     // Initialize extracted modules
     this.elementFinder = new ElementFinder();
@@ -138,6 +143,7 @@ export class RecordingManager {
       currentTabTitle: this.currentTabTitle,
       currentTabIndex: this.currentTabIndex,
     }));
+    this.formAuditor = new FormAuditor();
   }
 
   /**
@@ -159,6 +165,10 @@ export class RecordingManager {
     this.copyStepsInSession.clear();
     this.lastCopyEventTime = 0;
     this.lastPasteEventTime = 0;
+
+    // Reset form auditor for new recording session
+    this.formAuditor.reset();
+    this.formAuditAttached = false;
 
     // Add visual indicator
     if (document.body) {
@@ -1849,6 +1859,21 @@ export class RecordingManager {
           //   console.warn('GhostWriter: Failed to capture PageModel context:', error);
           // }
 
+          // Form Audit: generate completion diff on submit
+          // Detect submit by intent OR element characteristics (type="submit", Save/Submit button text)
+          const isSubmitIntent = stepPayload.intent?.kind === 'SUBMIT_FORM';
+          const isSubmitElement = (target as HTMLButtonElement).type === 'submit' ||
+            target.closest('button[type="submit"], input[type="submit"]') !== null;
+          const submitText = (elementText || '').toLowerCase();
+          const isSubmitText = /\b(submit|save|create|send|confirm|apply|update|next|finish|done|complete)\b/.test(submitText);
+          if ((isSubmitIntent || isSubmitElement || isSubmitText) && this.formAuditor.getAudit()) {
+            const diff = this.formAuditor.generateCompletionDiff();
+            if (diff) {
+              stepPayload.formCompletionDiff = diff;
+              console.log(`[FormAuditor] Attached completion diff to submit step: ${diff.filledFields.length} filled, ${diff.skippedFields.length} skipped`);
+            }
+          }
+
           // Determine wait conditions based on this step and previous step
           const step: WorkflowStep = {
             type: isNavigation ? 'NAVIGATION' : 'CLICK',
@@ -1958,6 +1983,9 @@ export class RecordingManager {
           if (isNavigation) {
             this.currentUrl = newUrl;
             this.currentTabUrl = newUrl;
+            // Reset form auditor on navigation (new page = new form)
+            this.formAuditor.reset();
+            this.formAuditAttached = false;
             // Update tab title if available
             this.currentTabTitle = document.title;
           }
@@ -2041,6 +2069,9 @@ export class RecordingManager {
       if (!isStandardInput && !isContentEditable) {
         return;
       }
+
+      // Form Audit: track form field interaction
+      this.formAuditor.onFormFieldInteraction(target);
 
       // ============================================
       // CRITICAL FIX: Flush previous element's input BEFORE updating state
@@ -2185,6 +2216,9 @@ export class RecordingManager {
 
       const target = actualElement as HTMLSelectElement | HTMLInputElement;
       if (!target) return;
+
+      // Form Audit: track form field interaction
+      this.formAuditor.onFormFieldInteraction(target);
 
       // Debug logging for SELECT elements
       console.log(`[GhostWriter] 🔄 Change event on ${target.tagName}, type: ${(target as HTMLSelectElement).type}, value: ${target.value?.substring(0, 30)}`);
@@ -4179,6 +4213,14 @@ export class RecordingManager {
       // } catch (error) {
       //   console.warn('GhostWriter: Failed to capture PageModel context for INPUT:', error);
       // }
+
+      // Form Audit: attach full form snapshot to the first INPUT step that triggered it
+      const pendingAudit = this.formAuditor.getAudit();
+      if (pendingAudit && !this.formAuditAttached) {
+        stepPayload.formAudit = pendingAudit;
+        this.formAuditAttached = true;
+        console.log(`[FormAuditor] Attached form audit to INPUT step: ${pendingAudit.totalFields} fields`);
+      }
 
       // Determine wait conditions based on this step and previous step
       const step: WorkflowStep = {

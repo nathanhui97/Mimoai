@@ -193,25 +193,6 @@ export class ExecutionLearning {
     });
   }
 
-  static async updateSuccessRate(
-    workflowId: string,
-    success: boolean
-  ): Promise<void> {
-    const experience = await this.loadExperience(workflowId);
-    const timesExecuted = experience.timesExecuted + 1;
-    const successfulExecutions = experience.successfulExecutions + (success ? 1 : 0);
-    const successRate = timesExecuted > 0
-      ? successfulExecutions / timesExecuted
-      : experience.successRate;
-
-    await WorkflowStorage.updateWorkflowExperience(workflowId, {
-      timesExecuted,
-      successfulExecutions,
-      successRate,
-      lastExecuted: Date.now(),
-    });
-  }
-
   /**
    * Get step reliability data for a specific step.
    * Used by fast-path router to decide whether to attempt fast-path or skip to LLM.

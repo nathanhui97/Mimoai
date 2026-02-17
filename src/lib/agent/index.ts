@@ -26,3 +26,7 @@ export { PreFlightChecker } from './pre-flight-checker';
 // Phase 5: Knows when to ask
 export { ConfidenceAssessor } from './confidence-assessor';
 export { HelpRequestBuilder } from './help-request-builder';
+
+// Phase B: Per-page planning
+export { PagePlanner } from './page-planner';
+export { PlanExecutor } from './plan-executor';

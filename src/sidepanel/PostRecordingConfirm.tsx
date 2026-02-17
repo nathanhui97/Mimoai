@@ -6,9 +6,13 @@
  */
 
 import { useState, useMemo } from 'react';
-import type { WorkflowStep } from '../types/workflow';
+import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
+import type { WorkflowAnalysis } from '../lib/post-recording-analyzer';
+import type { WorkflowMemory, TeachingCorrection } from '../lib/workflow-memory/types';
 import { VariableDetector } from '../lib/variable-detector';
 import { isWorkflowStepPayload } from '../types/workflow';
+import { TeachingRefinement } from './TeachingRefinement';
+import type { MergeCandidate } from '../lib/multi-recording-merge';
 
 /**
  * Synthesize milestones from workflow steps for preview
@@ -108,8 +112,14 @@ function suggestTriggerPhrases(name: string): string[] {
 interface PostRecordingConfirmProps {
   workflowSteps: WorkflowStep[];
   suggestedName: string;
-  onSave: (name: string, editedVariables: Record<string, string>) => void;
+  onSave: (name: string, editedVariables: Record<string, string>, corrections?: TeachingCorrection[], mergeTargetId?: string) => void;
   onCancel: () => void;
+  /** AI analysis of the workflow (for teaching refinement) */
+  aiAnalysis?: WorkflowAnalysis | null;
+  /** Generated workflow memory (for teaching refinement) */
+  memory?: WorkflowMemory | null;
+  /** Merge candidates: existing workflows that match this recording */
+  mergeCandidates?: MergeCandidate[];
 }
 
 /**
@@ -156,10 +166,16 @@ export function PostRecordingConfirm({
   suggestedName,
   onSave,
   onCancel,
+  aiAnalysis,
+  memory,
+  mergeCandidates,
 }: PostRecordingConfirmProps) {
   const [workflowName, setWorkflowName] = useState(suggestedName);
   const [showSteps, setShowSteps] = useState(false);
   const [showSkillPreview, setShowSkillPreview] = useState(true);
+  const [showRefinement, setShowRefinement] = useState(false);
+  const [pendingCorrections, setPendingCorrections] = useState<TeachingCorrection[]>([]);
+  const [selectedMergeTarget, setSelectedMergeTarget] = useState<string | null>(null);
 
   // Detect variables from steps
   const detectedVariables = useMemo(() => {
@@ -203,8 +219,16 @@ export function PostRecordingConfirm({
     if (!workflowName.trim()) {
       return;
     }
-    onSave(workflowName.trim(), editedNames);
+    onSave(
+      workflowName.trim(),
+      editedNames,
+      pendingCorrections.length > 0 ? pendingCorrections : undefined,
+      selectedMergeTarget || undefined,
+    );
   };
+
+  const hasRefinementData = !!(aiAnalysis || memory);
+  const topMergeCandidate = mergeCandidates && mergeCandidates.length > 0 ? mergeCandidates[0] : null;
 
   return (
     <div className="space-y-4">
@@ -222,6 +246,49 @@ export function PostRecordingConfirm({
           </p>
         </div>
       </div>
+
+      {/* Merge Suggestion */}
+      {topMergeCandidate && (
+        <div className={`p-3 rounded-xl border transition-colors ${
+          selectedMergeTarget
+            ? 'bg-indigo-50 dark:bg-indigo-900/20 border-indigo-300 dark:border-indigo-700'
+            : 'bg-card border-border'
+        }`}>
+          <div className="flex items-start gap-2">
+            <svg className="w-5 h-5 text-indigo-500 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
+            </svg>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">
+                Similar to "{topMergeCandidate.workflow.name}"
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {topMergeCandidate.reason} ({Math.round(topMergeCandidate.similarity * 100)}% match)
+              </p>
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => setSelectedMergeTarget(
+                    selectedMergeTarget ? null : topMergeCandidate.workflow.id
+                  )}
+                  className={`px-3 py-1 text-xs font-medium rounded-lg transition-colors ${
+                    selectedMergeTarget
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                      : 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-900/60'
+                  }`}
+                >
+                  {selectedMergeTarget ? 'Will Merge' : 'Merge with it'}
+                </button>
+                <button
+                  onClick={() => setSelectedMergeTarget(null)}
+                  className="px-3 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  Save as new
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Workflow Name - ON TOP */}
       <div className="p-4 bg-card rounded-xl border border-border">
@@ -368,6 +435,51 @@ export function PostRecordingConfirm({
           </div>
         )}
       </div>
+
+      {/* Teaching Refinement - Review AI Understanding */}
+      {hasRefinementData && (
+        <div>
+          <button
+            onClick={() => setShowRefinement(!showRefinement)}
+            className="w-full flex items-center justify-between p-3 bg-amber-50 dark:bg-amber-900/20 rounded-xl border border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors"
+          >
+            <span className="text-sm font-medium text-amber-900 dark:text-amber-100 flex items-center gap-2">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Review What I Learned
+              {pendingCorrections.length > 0 && (
+                <span className="px-1.5 py-0.5 text-xs bg-amber-200 dark:bg-amber-800 rounded-full">
+                  {pendingCorrections.length} correction{pendingCorrections.length !== 1 ? 's' : ''}
+                </span>
+              )}
+            </span>
+            <svg
+              className={`w-4 h-4 text-amber-500 transition-transform duration-200 ${showRefinement ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          {showRefinement && (
+            <div className="mt-2 p-4 bg-card rounded-xl border border-border">
+              <TeachingRefinement
+                aiAnalysis={aiAnalysis}
+                memory={memory}
+                steps={workflowSteps}
+                onConfirm={(corrections) => {
+                  setPendingCorrections(corrections);
+                  setShowRefinement(false);
+                }}
+                onSkip={() => setShowRefinement(false)}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Steps - Collapsible */}
       <div>

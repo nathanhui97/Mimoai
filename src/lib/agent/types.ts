@@ -503,6 +503,106 @@ export interface VerificationResult {
 }
 
 // ============================================================================
+// Page Plan Types (Phase B: Per-Page Planning)
+// ============================================================================
+
+/** A complete execution plan for the current page */
+export interface PagePlan {
+  /** Page classification */
+  pageType: 'form' | 'list' | 'detail' | 'confirmation' | 'error' | 'navigation' | 'other';
+
+  /** URL when plan was generated */
+  url: string;
+
+  /** Timestamp when plan was generated */
+  generatedAt: number;
+
+  /** Mapped field actions (fill/select/check) */
+  fieldActions: PlannedFieldAction[];
+
+  /** Navigation/click actions (buttons, links) */
+  navigationActions: PlannedNavigationAction[];
+
+  /** Submit/save action */
+  submitAction?: PlannedSubmitAction;
+
+  /** What to verify after all actions */
+  successCheck?: {
+    type: 'toast' | 'url_change' | 'element_appears' | 'text_visible';
+    pattern: string;
+  };
+
+  /** Which hint indices this plan covers */
+  coveredHintIndices: number[];
+
+  /** Confidence in the plan (0-1) */
+  confidence: number;
+
+  /** Reasoning from the planner */
+  reasoning: string;
+}
+
+/** A planned field-fill action (type, select, check) */
+export interface PlannedFieldAction {
+  /** Semantic field name (e.g. "First Name", "Email") */
+  fieldName: string;
+  /** Value to enter */
+  value: string;
+  /** Element index in DOM map */
+  elementIndex: number;
+  /** Best CSS selector from DOM map */
+  selector: string;
+  /** How to interact with this field */
+  strategy: 'type' | 'select' | 'click' | 'checkbox' | 'date_picker' | 'typeahead' | 'inline_edit';
+  /** Is this field required? */
+  required: boolean;
+  /** Which hint this maps to */
+  hintIndex: number;
+  /** For select/typeahead: specific option text to select */
+  optionText?: string;
+  /** Whether to clear existing value first */
+  clearFirst?: boolean;
+}
+
+/** A planned navigation/click action */
+export interface PlannedNavigationAction {
+  /** What this action does */
+  description: string;
+  /** Element index in DOM map */
+  elementIndex: number;
+  /** Best CSS selector */
+  selector: string;
+  /** Whether this click causes page navigation */
+  expectsNavigation: boolean;
+  /** Whether this click opens a modal/dialog */
+  expectsModal: boolean;
+  /** Which hint this maps to */
+  hintIndex: number;
+}
+
+/** A planned submit/save action */
+export interface PlannedSubmitAction {
+  /** Element index in DOM map */
+  elementIndex: number;
+  /** Best CSS selector */
+  selector: string;
+  /** Ms to wait after submit for page response */
+  waitAfterMs: number;
+  /** Which hint this maps to */
+  hintIndex: number;
+}
+
+/** Result of executing a single planned action */
+export interface PlanExecutionResult {
+  success: boolean;
+  error?: string;
+  /** Which hint was executed */
+  hintIndex: number;
+  /** How long execution took (ms) */
+  durationMs: number;
+}
+
+// ============================================================================
 // Step Outcome Verification Types
 // ============================================================================
 

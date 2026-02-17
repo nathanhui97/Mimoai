@@ -31,6 +31,9 @@ import type { UserContext } from '../types/ai';
 import { ExecutionTelemetry } from './execution-telemetry';
 import { StateWaitEngine } from '../content/state-wait-engine';
 import { ExecutionLearning } from './execution-learning';
+import { ExecutionLog } from './execution-log';
+import { authService } from './auth-service';
+import { WorkflowStorage } from './storage';
 import type { WorkflowMemory } from './workflow-memory/types';
 
 // Extracted agent modules
@@ -45,6 +48,9 @@ import { StepAnalyzer } from './agent/step-analyzer';
 import { PreFlightChecker } from './agent/pre-flight-checker';
 import { ConfidenceAssessor } from './agent/confidence-assessor';
 import { HelpRequestBuilder } from './agent/help-request-builder';
+import { PagePlanner } from './agent/page-planner';
+import { PlanExecutor } from './agent/plan-executor';
+import type { PlannedFieldAction, PlannedNavigationAction, PlannedSubmitAction } from './agent/types';
 
 // ============================================================================
 // Types
@@ -524,6 +530,11 @@ export class AIAgent {
   private milestoneTracker: MilestoneTracker = new MilestoneTracker();
   private stepAnalyzer: StepAnalyzer | null = null;
 
+  // Phase B: Per-page planning
+  private pagePlanner: PagePlanner = new PagePlanner();
+  private planExecutor: PlanExecutor = new PlanExecutor();
+  private lastPlanUrl: string = ''; // Track URL for plan invalidation
+
   // Extracted modules
   private readonly candidateFinder: CandidateFinder;
   private readonly hintExtractor: HintExtractor;
@@ -659,6 +670,9 @@ export class AIAgent {
       workflowMemory,
     );
 
+    // Initialize page planner with workflow ID for plan caching
+    this.pagePlanner.setWorkflowId(workflow.id);
+
     // Log intent analysis if available
     if (this.state.analyzedIntent) {
       console.log('[AIAgent] 🧠 Workflow Intent Available:');
@@ -760,6 +774,9 @@ export class AIAgent {
     let lastError: string | undefined;
 
     console.log(`[AIAgent] 🔄 Starting ${plan.iterations.length} iterations`);
+
+    // Initialize page planner with workflow ID for plan caching
+    this.pagePlanner.setWorkflowId(workflow.id);
 
     for (let i = 0; i < plan.iterations.length; i++) {
       const iteration = plan.iterations[i];
@@ -1476,6 +1493,82 @@ export class AIAgent {
           }
         }
         
+        // ============================================================================
+        // 2.7 PAGE PLANNER: Try per-page plan before per-step LLM
+        // Generate a PagePlan once per page, then execute each hint deterministically.
+        // Falls back to normal observe→think→act when plan doesn't have an action.
+        // ============================================================================
+        if (currentHint && !SheetStateExtractor.isSpreadsheetDomain()) {
+          // Invalidate plan on URL change
+          if (observation.url !== this.lastPlanUrl) {
+            this.pagePlanner.invalidate();
+            this.lastPlanUrl = observation.url;
+          }
+
+          // Generate or use cached plan
+          const pagePlan = await this.pagePlanner.plan(
+            observation,
+            this.state.hints,
+            this.state.currentHintIndex,
+            this.state.variableValues,
+            this.state.goal,
+          );
+
+          if (pagePlan) {
+            const plannedAction = this.pagePlanner.getActionForHint(this.state.currentHintIndex);
+            if (plannedAction) {
+              console.log(`[AIAgent] 📋 PagePlan has action for hint ${this.state.currentHintIndex}, executing deterministically`);
+
+              let planResult;
+              if ('fieldName' in plannedAction) {
+                planResult = await this.planExecutor.executeField(plannedAction as PlannedFieldAction);
+              } else if ('expectsNavigation' in plannedAction) {
+                planResult = await this.planExecutor.executeNavigation(plannedAction as PlannedNavigationAction);
+              } else {
+                planResult = await this.planExecutor.executeSubmit(plannedAction as PlannedSubmitAction);
+              }
+
+              if (planResult.success) {
+                // Report success to plan cache
+                this.pagePlanner.reportSuccess().catch(() => {});
+
+                // Mark step as completed
+                this.state.hints[this.state.currentHintIndex].completed = true;
+                this.milestoneTracker.onStepCompleted(this.state.currentHintIndex, this.state.hints);
+                this.state.currentHintIndex++;
+                this.notifyProgress();
+                this.state.history.push({
+                  stepNumber: currentHint.stepNumber,
+                  action: {
+                    type: 'fieldName' in plannedAction ? ('strategy' in plannedAction ? (plannedAction as PlannedFieldAction).strategy as any : 'click') : 'click',
+                    params: { description: 'fieldName' in plannedAction ? `Fill ${(plannedAction as PlannedFieldAction).fieldName}` : (plannedAction as PlannedNavigationAction).description },
+                    reasoning: `PagePlan execution (${planResult.durationMs}ms)`,
+                    confidence: pagePlan.confidence,
+                  },
+                  observation,
+                  result: 'success',
+                  timestamp: Date.now(),
+                });
+
+                // If navigation expected, invalidate plan
+                if ('expectsNavigation' in plannedAction && (plannedAction as PlannedNavigationAction).expectsNavigation) {
+                  this.pagePlanner.invalidate();
+                  await this.sleep(500); // Wait for navigation
+                }
+
+                continue;
+              } else {
+                // Report failure to plan cache
+                this.pagePlanner.reportFailure().catch(() => {});
+
+                console.warn(`[AIAgent] 📋 PagePlan execution failed: ${planResult.error}, falling back to observe→think→act`);
+                // Fall through to normal execution
+                this.pagePlanner.invalidate(); // Don't trust this plan anymore
+              }
+            }
+          }
+        }
+
         // ============================================================================
         // 📊 SPREADSHEET INTELLIGENT APPEND ENGINE
         // When on a spreadsheet with type hints:
@@ -2260,9 +2353,31 @@ export class AIAgent {
         console.warn('Failed to record execution telemetry:', err);
       });
 
-      ExecutionTelemetry.updateWorkflowStats(this.state.workflowId, executionEvent).catch(err => {
-        console.warn('Failed to update workflow stats:', err);
+      // Append structured audit log entry
+      const workflow = await WorkflowStorage.loadWorkflow(this.state.workflowId).catch(() => null);
+      const logEntry = ExecutionLog.buildEntry({
+        workflowId: this.state.workflowId,
+        workflowName: this.state.goal || 'Unknown',
+        workflowVersion: workflow?.updatedAt || 0,
+        startedAt: this.state.startTime,
+        completedAt: Date.now(),
+        inputs: this.state.variableValues || {},
+        success,
+        stepsCompleted,
+        totalSteps: this.state.hints.length,
+        durationMs,
+        failedAtStep: failedStepIndex >= 0 ? failedStepIndex : undefined,
+        failureReason: success ? undefined : this.state.history[this.state.history.length - 1]?.error,
+        stepResults: stepResults.map(sr => ({
+          index: sr.index,
+          success: sr.success,
+          durationMs: sr.resolutionMs,
+          recoveryAttempts: sr.recoveryAttempts,
+        })),
+        siteUrl: window.location.href,
+        userId: authService.getUserId(),
       });
+      ExecutionLog.append(logEntry).catch(err => console.warn('Failed to append execution log:', err));
 
       // Close the learning loop: update WorkflowMemory.experience (the single source of truth)
       ExecutionLearning.recordExecutionComplete(
