@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { SkillExtractor } from './extractor';
 import type { WorkflowStep } from '../../types/workflow';
 import type { WorkflowMemory } from '../workflow-memory/types';
-import type { FormAudit, FormCompletionDiff } from '../../content/recording/form-auditor';
+import type { FormAudit } from '../../content/recording/form-auditor';
 
 // ============================================================================
 // Helpers
@@ -31,14 +31,6 @@ function makeClickStep(text: string, url: string = 'https://app.example.com/form
       url,
       intent: intent ? { kind: intent } : undefined,
     } as any,
-  };
-}
-
-function makeNavStep(url: string): WorkflowStep {
-  return {
-    type: 'NAVIGATION',
-    description: `Navigate to ${url}`,
-    payload: { url } as any,
   };
 }
 

@@ -77,7 +77,7 @@ export function TeachingRefinement({
       }));
     }
     if (aiAnalysis?.workflowUnderstanding?.subGoals?.length) {
-      return aiAnalysis.workflowUnderstanding.subGoals.map((g, i) => ({
+      return aiAnalysis.workflowUnderstanding.subGoals.map((g, _i) => ({
         name: g,
         purpose: g,
         stepCount: Math.ceil(steps.length / aiAnalysis.workflowUnderstanding.subGoals.length),

@@ -10,7 +10,7 @@
  * Replaces simple `currentHintIndex++` with flexible step progression.
  */
 
-import type { AgentHint, AgentObservation } from './types';
+import type { AgentHint } from './types';
 import type { WorkflowMemory, OptionalStep } from '../workflow-memory/types';
 
 // ============================================================================

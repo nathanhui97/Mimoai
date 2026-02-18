@@ -19,7 +19,7 @@ import { VisualSnapshotService } from '../content/visual-snapshot';
 import { generateDOMMap, domMapToText, invalidateDOMMapCache, type DOMMap, type DOMMapElement } from '../content/dom-map';
 import { FeatureFlags, isFeatureEnabled } from './feature-flags';
 import { Tier1Executor, type Tier1ExecutionResult, type RejectionCode } from './tier1-executor';
-import { PostActionObserver, type PageChanges, type ChangeType } from './post-action-observer';
+import { PostActionObserver, type PageChanges } from './post-action-observer';
 import { capturePageState, verifyStepSuccess, type PageState as VerifierPageState } from './success-verifier';
 import { SpreadsheetExecutor } from './spreadsheet-executor';
 import { SheetStateExtractor } from '../content/sheet-state-extractor';
@@ -967,15 +967,6 @@ export class AIAgent {
    * Generate guidance for what the user should do manually.
    * Phase 5: Delegates to HelpRequestBuilder for richer context.
    */
-  private generateHelpGuidance(hint: AgentHint): string {
-    const helpRequest = HelpRequestBuilder.build({
-      hint,
-      stepIndex: this.state.currentHintIndex,
-      totalSteps: this.state.hints.length,
-      milestoneContext: this.milestoneTracker.getMilestoneContext(),
-    });
-    return helpRequest.userAction;
-  }
   
   /**
    * Handle user's choice after manual intervention
@@ -1560,6 +1551,11 @@ export class AIAgent {
               } else {
                 // Report failure to plan cache
                 this.pagePlanner.reportFailure().catch(() => {});
+
+                // If this is a strategy mismatch, the cached plan is fundamentally wrong — purge it
+                if (planResult.error?.includes('Strategy mismatch')) {
+                  this.pagePlanner.purgeCachedPlan().catch(() => {});
+                }
 
                 console.warn(`[AIAgent] 📋 PagePlan execution failed: ${planResult.error}, falling back to observe→think→act`);
                 // Fall through to normal execution
@@ -5236,16 +5232,6 @@ export class AIAgent {
     return this.hintExtractor.extractHints(workflow, variableValues);
   }
 
-  /**
-   * Check if the current hint's expected outcome is already satisfied
-   * Delegates to HintExtractor module
-   */
-  private checkIfOutcomeAlreadySatisfied(
-    hint: AgentHint,
-    observation: AgentObservation
-  ): string | null {
-    return this.hintExtractor.checkIfOutcomeAlreadySatisfied(hint, observation);
-  }
 
   /**
    * Get current state (for debugging/UI)
@@ -5451,16 +5437,6 @@ export class AIAgent {
    *
    * Pure DOM / URL check — no extra LLM calls or screenshots.
    */
-  private checkGoalProgress(): { goalAchieved: boolean; reason: string; confidence: number } {
-    return GoalChecker.checkGoalProgress(this.state);
-  }
-
-  /**
-   * Mark all remaining incomplete hints as skipped with a given reason.
-   */
-  private skipRemainingHints(reason: string): void {
-    GoalChecker.skipRemainingHints(this.state, reason);
-  }
 
   /**
    * Shared helper used at multiple points in the execution loop.

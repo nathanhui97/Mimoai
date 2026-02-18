@@ -190,6 +190,30 @@ export class PagePlanner {
   }
 
   /**
+   * Purge the persistent cached plan for the current URL.
+   * Called when a fundamental error (e.g., strategy mismatch) is detected,
+   * meaning the cached plan is fundamentally wrong and should not be reused.
+   */
+  async purgeCachedPlan(): Promise<void> {
+    if (!this.workflowId || !this.planUrl) return;
+
+    try {
+      const urlPattern = this.toUrlPattern(this.planUrl);
+      const key = `${this.workflowId}:${urlPattern}`;
+      const result = await chrome.storage.local.get(PLAN_CACHE_KEY);
+      const cache = (result[PLAN_CACHE_KEY] || {}) as Record<string, CachedPlan>;
+
+      if (cache[key]) {
+        delete cache[key];
+        await chrome.storage.local.set({ [PLAN_CACHE_KEY]: cache });
+        console.log(`[PagePlanner] 🗑️ Purged cached plan for ${urlPattern} (strategy mismatch detected)`);
+      }
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  /**
    * Get the current plan (if any).
    */
   getPlan(): PagePlan | null {
@@ -240,7 +264,7 @@ export class PagePlanner {
 
     try {
       const result = await chrome.storage.local.get(PLAN_CACHE_KEY);
-      const cache: Record<string, CachedPlan> = result[PLAN_CACHE_KEY] || {};
+      const cache = (result[PLAN_CACHE_KEY] || {}) as Record<string, CachedPlan>;
       const key = `${this.workflowId}:${urlPattern}`;
       const entry = cache[key];
 
@@ -262,7 +286,7 @@ export class PagePlanner {
 
     try {
       const result = await chrome.storage.local.get(PLAN_CACHE_KEY);
-      const cache: Record<string, CachedPlan> = result[PLAN_CACHE_KEY] || {};
+      const cache = (result[PLAN_CACHE_KEY] || {}) as Record<string, CachedPlan>;
       const key = `${this.workflowId}:${urlPattern}`;
 
       const existing = cache[key];
@@ -345,7 +369,7 @@ export class PagePlanner {
       }),
       navigationActions: cachedPlan.navigationActions.map(action => {
         const matchingHint = currentHints.find(h =>
-          h.description.includes(action.text || action.description)
+          h.description.includes(action.description)
         );
         return {
           ...action,
@@ -447,7 +471,7 @@ export class PagePlanner {
   private parsePlanResponse(
     raw: any,
     url: string,
-    hints: Array<AgentHint & { originalIndex: number }>,
+    _hints: Array<AgentHint & { originalIndex: number }>,
   ): PagePlan {
     const fieldActions: PlannedFieldAction[] = (raw.fieldActions || []).map((a: any) => ({
       fieldName: a.fieldName || '',

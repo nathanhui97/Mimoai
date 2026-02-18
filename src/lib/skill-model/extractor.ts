@@ -11,7 +11,7 @@
  */
 
 import type { SkillModel, PageSkill, FieldKnowledge, ActionKnowledge, FieldSelector } from './types';
-import type { WorkflowMemory, InputField } from '../workflow-memory/types';
+import type { WorkflowMemory } from '../workflow-memory/types';
 import type { FormAudit, FormCompletionDiff, FormFieldSnapshot } from '../../content/recording/form-auditor';
 import type { WorkflowStep, WorkflowStepPayload } from '../../types/workflow';
 import { isWorkflowStepPayload } from '../../types/workflow';
@@ -43,7 +43,7 @@ export class SkillExtractor {
       // Find form audit for this page
       const audit = formAudits?.find(a => a.url === url);
       // Find completion diff for this page
-      const diff = completionDiffs?.find(d => {
+      const diff = completionDiffs?.find(_d => {
         // Match diff to audit by looking at the same form
         return audit !== undefined;
       });
@@ -186,7 +186,7 @@ export class SkillExtractor {
           text: payload.elementText || '',
           selector: payload.selector,
           role: payload.elementRole,
-          causesNavigation: step.type === 'NAVIGATION' || !!payload.intent?.kind?.includes('NAVIGATE'),
+          causesNavigation: !!payload.intent?.kind?.includes('NAVIGATE'),
           causesModal: false, // Hard to know from recording data alone
           waitAfterMs: isSubmit ? 1000 : 200,
           stepIndex: index,
@@ -287,7 +287,7 @@ export class SkillExtractor {
     return {
       fieldName: auditField.label || auditField.name || 'Unknown',
       variableName: memoryInput?.variableName,
-      fieldType: auditField.type,
+      fieldType: auditField.type === 'hidden' || auditField.type === 'file' ? 'other' : auditField.type,
       required,
       requiredConfidence,
       requiredSource,
@@ -307,7 +307,7 @@ export class SkillExtractor {
       stepIndices: matchingStep ? [matchingStep.index] : [],
       fillRate: diffFilled ? 1.0 : (diffSkipped ? 0.0 : 0.5),
       wasEverSkipped: !!diffSkipped,
-      skipReason: diffSkipped?.inferredReason,
+      skipReason: diffSkipped?.inferredReason === 'unknown' ? undefined : diffSkipped?.inferredReason,
     };
   }
 
@@ -379,7 +379,7 @@ export class SkillExtractor {
   }
 
   private static inferStrategyFromPayload(payload: WorkflowStepPayload): FieldKnowledge['strategy'] {
-    if (payload.interactionType?.dropdownType) return 'select';
+    if (payload.interactionType?.dropdown) return 'select';
     if (payload.inputDetails?.type === 'checkbox') return 'checkbox';
     if (payload.inputDetails?.type === 'radio') return 'click';
     if (payload.inputDetails?.type === 'date') return 'date_picker';
@@ -424,7 +424,7 @@ export class SkillExtractor {
     return url.replace(/\/\d+/g, '/*').replace(/=[^&]+/g, '=*');
   }
 
-  private static findPhaseForUrl(url: string, memory?: WorkflowMemory): number | undefined {
+  private static findPhaseForUrl(_url: string, memory?: WorkflowMemory): number | undefined {
     if (!memory?.understanding?.phases) return undefined;
 
     // This is a rough heuristic — phases map to step indices, not URLs directly

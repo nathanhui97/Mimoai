@@ -21,7 +21,7 @@ const chromeStorageAdapter = {
   async getItem(key: string): Promise<string | null> {
     try {
       const result = await chrome.storage.local.get(key);
-      return result[key] ?? null;
+      return (result[key] as string | undefined) ?? null;
     } catch {
       return null;
     }
@@ -58,7 +58,7 @@ export function getSupabaseClient(): SupabaseClient {
           storage: chromeStorageAdapter,
           autoRefreshToken: true,
           persistSession: true,
-          detectSessionFromURL: false, // No OAuth redirect in extensions
+          detectSessionInUrl: false, // No OAuth redirect in extensions
         },
       },
     );

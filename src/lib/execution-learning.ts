@@ -1,5 +1,5 @@
 import type { ExecutionExperience, TroubleSpot, ProvenStrategy, StepReliabilityRecord } from './workflow-memory/types';
-import type { ExecutionEvent, StepResult } from './execution-telemetry';
+import type { ExecutionEvent } from './execution-telemetry';
 import { WorkflowStorage } from './storage';
 
 const DEFAULT_EXPERIENCE: ExecutionExperience = {

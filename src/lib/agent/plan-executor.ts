@@ -35,7 +35,22 @@ export class PlanExecutor {
         };
       }
 
-      switch (action.strategy) {
+      // Auto-detect actual element type and reject mismatched strategies.
+      // When the cached plan has the wrong strategy (e.g., 'checkbox' for a <select>),
+      // the value is likely wrong too (e.g., 'true' instead of an option name).
+      // Return failure so the Hybrid executor handles it correctly.
+      const effectiveStrategy = this.resolveStrategy(element, action.strategy);
+      if (effectiveStrategy !== action.strategy) {
+        console.log(`[PlanExecutor] ⚠️ Strategy mismatch: plan says '${action.strategy}' but element is <${element.tagName.toLowerCase()}> (needs '${effectiveStrategy}'). Deferring to Hybrid executor.`);
+        return {
+          success: false,
+          error: `Strategy mismatch: plan='${action.strategy}', element needs '${effectiveStrategy}'`,
+          hintIndex: action.hintIndex,
+          durationMs: Date.now() - start,
+        };
+      }
+
+      switch (effectiveStrategy) {
         case 'type':
           await this.executeType(element, action.value, action.clearFirst);
           break;
@@ -69,7 +84,7 @@ export class PlanExecutor {
           await this.executeType(element, action.value, action.clearFirst);
       }
 
-      console.log(`[PlanExecutor] Field "${action.fieldName}" = "${action.value}" (${action.strategy}, ${Date.now() - start}ms)`);
+      console.log(`[PlanExecutor] Field "${action.fieldName}" = "${action.value}" (${effectiveStrategy}, ${Date.now() - start}ms)`);
 
       return {
         success: true,
@@ -173,6 +188,36 @@ export class PlanExecutor {
         durationMs: Date.now() - start,
       };
     }
+  }
+
+  // ── Private: Strategy Resolution ──────────────────────────────
+
+  /**
+   * Resolve the actual strategy based on the real element type.
+   * Cached plans may have wrong strategies (e.g., 'checkbox' for a <select>).
+   */
+  private resolveStrategy(element: Element, plannedStrategy: string): string {
+    const tagName = element.tagName.toLowerCase();
+    const inputType = (element as HTMLInputElement).type?.toLowerCase();
+
+    // <select> elements must use 'select' strategy
+    if (tagName === 'select') return 'select';
+
+    // Radio inputs must use 'radio' (click the right one), not 'checkbox' or 'type'
+    if (tagName === 'input' && inputType === 'radio') return 'radio';
+
+    // Checkbox inputs must use 'checkbox'
+    if (tagName === 'input' && inputType === 'checkbox') return 'checkbox';
+
+    // Text-like inputs should use 'type' unless planned as something more specific
+    if (tagName === 'input' && ['text', 'email', 'tel', 'number', 'url', 'search', 'password'].includes(inputType)) {
+      if (plannedStrategy === 'checkbox' || plannedStrategy === 'radio') return 'type';
+    }
+
+    // Textarea always types
+    if (tagName === 'textarea') return 'type';
+
+    return plannedStrategy;
   }
 
   // ── Private: Element Finding ───────────────────────────────────

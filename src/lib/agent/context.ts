@@ -7,13 +7,11 @@
  * a back-reference to the full AIAgent class.
  */
 
-import type { AgentState, AgentHint, AgentObservation, AgentAction, ExecutionContext } from './types';
-import type { WorkflowMemory } from '../workflow-memory/types';
+import type { AgentState, AgentAction, ExecutionStateContext } from './types';
 import type { StepResolutionDetail } from '../execution-learning';
 import type { StuckDetector } from '../stuck-detector';
 import type { CandidateFinder } from './candidate-finder';
 import type { HintExtractor } from './hint-extractor';
-import type { DOMMap } from '../../content/dom-map';
 
 /**
  * Read-write access to the agent's runtime state.
@@ -24,7 +22,7 @@ export interface AgentContext {
   state: AgentState;
 
   /** Execution context for LLM (tracks what was tried before calling LLM) */
-  executionContext: ExecutionContext;
+  executionContext: ExecutionStateContext;
 
   /** Step resolution tracking for learning loop */
   stepResolutionDetails: StepResolutionDetail[];

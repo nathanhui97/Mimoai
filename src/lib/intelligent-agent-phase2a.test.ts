@@ -9,7 +9,7 @@
  * 5. Feature flag controls all behavior
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { FeatureFlags, isFeatureEnabled } from './feature-flags';
 
 // ============================================================================
@@ -444,7 +444,7 @@ describe('Phase 2A: Flexible LLM Responses', () => {
     function buildCandidatePromptSection(
       candidateCount: number,
       allowFlexible: boolean,
-      hintIndex: number
+      _hintIndex: number
     ): string {
       if (candidateCount > 0) {
         if (allowFlexible) {

@@ -6,7 +6,7 @@
  */
 
 import { useState, useMemo } from 'react';
-import type { WorkflowStep, SavedWorkflow } from '../types/workflow';
+import type { WorkflowStep } from '../types/workflow';
 import type { WorkflowAnalysis } from '../lib/post-recording-analyzer';
 import type { WorkflowMemory, TeachingCorrection } from '../lib/workflow-memory/types';
 import { VariableDetector } from '../lib/variable-detector';

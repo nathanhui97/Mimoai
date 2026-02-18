@@ -13,7 +13,7 @@
  */
 
 import type { SavedWorkflow, WorkflowStep } from '../types/workflow';
-import type { SkillModel, PageSkill, FieldKnowledge } from './skill-model/types';
+import type { SkillModel, FieldKnowledge } from './skill-model/types';
 
 // ============================================================================
 // Types

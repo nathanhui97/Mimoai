@@ -8,6 +8,9 @@ import type { TeachingCorrection, WorkflowMemory } from './workflow-memory/types
 
 const WORKFLOWS_KEY = 'ghostwriter-workflows';
 
+// Typed mock helpers (chrome API types conflict with vi.mocked)
+const mockChromeGet = vi.mocked(chrome.storage.local.get) as any;
+
 function makeMemory(overrides?: Partial<WorkflowMemory>): WorkflowMemory {
   return {
     version: '1.0',
@@ -102,7 +105,7 @@ function makeWorkflowWithMemory(id: string, memory: WorkflowMemory) {
 
 describe('WorkflowStorage.applyTeachingCorrections', () => {
   beforeEach(() => {
-    vi.mocked(chrome.storage.local.get).mockReset();
+    mockChromeGet.mockReset();
     vi.mocked(chrome.storage.local.set).mockReset();
     vi.mocked(chrome.storage.local.set).mockResolvedValue();
   });
@@ -116,7 +119,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -131,7 +134,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
     expect(chrome.storage.local.set).toHaveBeenCalled();
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const savedWorkflows = savedData[WORKFLOWS_KEY];
     expect(savedWorkflows[0].memory.identity.purpose).toBe('Add a new contact to Salesforce');
   });
@@ -140,7 +143,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -154,7 +157,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     // Email should no longer be in required
@@ -167,7 +170,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -181,7 +184,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     // Phone should now be in required
@@ -194,7 +197,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -208,7 +211,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     // Name should be renamed
@@ -220,7 +223,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -234,7 +237,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     const phase2 = updatedMemory.understanding.phases[1];
@@ -245,7 +248,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -259,7 +262,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     expect(updatedMemory.success.endState).toBe('Contact detail page loads with success toast');
@@ -269,7 +272,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -292,7 +295,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     expect(updatedMemory.teachingCorrections).toHaveLength(2);
@@ -312,7 +315,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     });
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -326,14 +329,14 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', newCorrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const updatedMemory = savedData[WORKFLOWS_KEY][0].memory;
 
     expect(updatedMemory.teachingCorrections).toHaveLength(2);
   });
 
   it('does nothing if workflow not found', async () => {
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [],
     });
 
@@ -358,7 +361,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
       // No memory
     };
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -377,7 +380,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
     const memory = makeMemory();
     const workflow = makeWorkflowWithMemory('w1', memory);
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({
+    mockChromeGet.mockResolvedValue({
       [WORKFLOWS_KEY]: [workflow],
     });
 
@@ -390,7 +393,7 @@ describe('WorkflowStorage.applyTeachingCorrections', () => {
 
     await WorkflowStorage.applyTeachingCorrections('w1', corrections);
 
-    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0];
+    const savedData = vi.mocked(chrome.storage.local.set).mock.calls[0][0] as Record<string, any>;
     const m = savedData[WORKFLOWS_KEY][0].memory;
 
     expect(m.identity.purpose).toBe('Updated goal');

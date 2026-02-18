@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { PagePlanner } from './page-planner';
 import type { AgentObservation, AgentHint } from './types';
 
+// Typed mock helpers (chrome API types conflict with vi.mocked)
+const mockChromeGet = vi.mocked(chrome.storage.local.get) as any;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -41,7 +44,7 @@ describe('PagePlanner', () => {
   beforeEach(() => {
     planner = new PagePlanner();
     // Reset chrome storage mock
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({});
+    mockChromeGet.mockResolvedValue({});
     vi.mocked(chrome.storage.local.set).mockResolvedValue();
     // Mock fetch to prevent real HTTP calls (tests that hit callPlanner would hang)
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -124,7 +127,7 @@ describe('PagePlanner', () => {
       };
 
       const cacheKey = 'wf-1:https://app.example.com/contacts/new';
-      vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      mockChromeGet.mockResolvedValue({
         'ghostwriter-plan-cache': {
           [cacheKey]: {
             plan: cachedPlan,
@@ -142,7 +145,7 @@ describe('PagePlanner', () => {
       const obs = makeObservation();
       const hints = [makeHint(0, { description: 'Type name' })];
 
-      const plan = await planner.plan(obs, hints, 0);
+      await planner.plan(obs, hints, 0);
       // Plan should be loaded from cache (or null if remapping fails)
       // The key test is that chrome.storage.local.get was called
       expect(chrome.storage.local.get).toHaveBeenCalledWith('ghostwriter-plan-cache');
@@ -152,7 +155,7 @@ describe('PagePlanner', () => {
       planner.setWorkflowId('wf-2');
 
       const cacheKey = 'wf-2:https://app.example.com/contacts/new';
-      vi.mocked(chrome.storage.local.get).mockResolvedValue({
+      mockChromeGet.mockResolvedValue({
         'ghostwriter-plan-cache': {
           [cacheKey]: {
             plan: { fieldActions: [], navigationActions: [], coveredHintIndices: [] },
@@ -207,7 +210,7 @@ describe('PagePlanner URL normalization', () => {
     const planner = new PagePlanner();
     planner.setWorkflowId('wf-url');
 
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({});
+    mockChromeGet.mockResolvedValue({});
 
     const obs = makeObservation({
       url: 'https://app.example.com/contacts/123?tab=details#section',
@@ -233,7 +236,7 @@ describe('PagePlanner hint filtering', () => {
 
   it('skips completed hints', async () => {
     const planner = new PagePlanner();
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({});
+    mockChromeGet.mockResolvedValue({});
 
     const obs = makeObservation();
     const hints = [
@@ -250,7 +253,7 @@ describe('PagePlanner hint filtering', () => {
 
   it('stops collecting hints after a navigation hint', async () => {
     const planner = new PagePlanner();
-    vi.mocked(chrome.storage.local.get).mockResolvedValue({});
+    mockChromeGet.mockResolvedValue({});
 
     const obs = makeObservation();
     const hints = [

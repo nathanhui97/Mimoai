@@ -58,60 +58,19 @@ export class PreFlightChecker {
 
   /**
    * Check if the hint's expected outcome (from naturalLanguage) is already satisfied.
-   * This is the systematized version of `checkIfOutcomeAlreadySatisfied()`.
+   *
+   * DISABLED: Text-based keyword matching against DOM text is fundamentally unreliable.
+   * Keywords like "test", "name", "box" appear across all fields in the DOM, so an
+   * expected outcome like "The text 'test' is visible in the first name box" would
+   * match even for unrelated steps (last name, radio buttons, etc.), causing false skips.
+   *
+   * Only checkFieldValue() (actual field value comparison) and checkNavigation()
+   * (URL comparison) are reliable pre-flight checks.
    */
   private static checkExpectedOutcome(
-    hint: AgentHint,
-    observation: AgentObservation,
+    _hint: AgentHint,
+    _observation: AgentObservation,
   ): PreFlightResult {
-    const expectedOutcome = hint.naturalLanguage?.expectedOutcome;
-    if (!expectedOutcome) return { canSkip: false, confidence: 0 };
-
-    const domText = observation.domMapText.toLowerCase();
-    const expected = expectedOutcome.toLowerCase();
-
-    // Check for URL-based outcomes
-    if (expected.includes('navigate') || expected.includes('url')) {
-      const urlKeywords = extractKeywords(expected);
-      const urlLower = observation.url.toLowerCase();
-      if (urlKeywords.some(kw => urlLower.includes(kw))) {
-        return {
-          canSkip: true,
-          reason: `URL already matches expected outcome: "${expectedOutcome}"`,
-          confidence: 0.85,
-          checkType: 'expected_outcome',
-        };
-      }
-    }
-
-    // Check for text-appears outcomes
-    if (expected.includes('appears') || expected.includes('visible') || expected.includes('shows')) {
-      const keywords = extractKeywords(expected);
-      const matchCount = keywords.filter(kw => domText.includes(kw)).length;
-      if (keywords.length > 0 && matchCount >= Math.ceil(keywords.length * 0.6)) {
-        return {
-          canSkip: true,
-          reason: `Expected content already visible: "${expectedOutcome}"`,
-          confidence: 0.8,
-          checkType: 'expected_outcome',
-        };
-      }
-    }
-
-    // Check for "selected" or "filled" outcomes
-    if (expected.includes('selected') || expected.includes('filled') || expected.includes('set to')) {
-      const keywords = extractKeywords(expected);
-      const matchCount = keywords.filter(kw => domText.includes(kw)).length;
-      if (keywords.length > 0 && matchCount >= Math.ceil(keywords.length * 0.5)) {
-        return {
-          canSkip: true,
-          reason: `Expected state already achieved: "${expectedOutcome}"`,
-          confidence: 0.75,
-          checkType: 'expected_outcome',
-        };
-      }
-    }
-
     return { canSkip: false, confidence: 0 };
   }
 
@@ -127,20 +86,26 @@ export class PreFlightChecker {
     }
 
     const targetValue = hint.value.trim().toLowerCase();
-    const targetName = (hint.targetText || hint.targetPlaceholder || hint.description || '').toLowerCase();
+    const targetName = normalizeFieldName(
+      (hint.targetText || hint.targetPlaceholder || hint.description || '')
+    );
+
+    if (!targetName) return { canSkip: false, confidence: 0 };
 
     for (const field of observation.formFields) {
       if (!field.value) continue;
 
       const fieldValue = field.value.trim().toLowerCase();
-      const fieldName = field.name.toLowerCase();
+      const fieldName = normalizeFieldName(field.name);
 
-      // Match by name similarity
-      const nameMatch = targetName && (
-        fieldName.includes(targetName) ||
-        targetName.includes(fieldName) ||
-        levenshteinSimilarity(fieldName, targetName) > 0.6
-      );
+      if (!fieldName) continue;
+
+      // Strict name matching: exact match after normalization, or very high
+      // similarity (>0.9) to only catch trivial differences like trailing colons.
+      // Previous threshold of 0.6 caused "First name" to match "Last name".
+      const nameMatch =
+        fieldName === targetName ||
+        levenshteinSimilarity(fieldName, targetName) > 0.9;
 
       if (nameMatch && fieldValue === targetValue) {
         return {
@@ -188,25 +153,13 @@ export class PreFlightChecker {
 // Helpers
 // ============================================================================
 
-/** Extract meaningful keywords from a description, filtering stop words. */
-function extractKeywords(text: string): string[] {
-  const stopWords = new Set([
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
-    'on', 'with', 'at', 'by', 'from', 'as', 'into', 'through', 'during',
-    'before', 'after', 'above', 'below', 'between', 'and', 'but', 'or',
-    'not', 'no', 'nor', 'so', 'if', 'then', 'than', 'that', 'this',
-    'it', 'its', 'my', 'your', 'his', 'her', 'their', 'our',
-    'appears', 'visible', 'shows', 'displayed', 'navigate', 'navigates',
-    'selected', 'filled', 'set', 'already', 'page', 'field', 'url',
-  ]);
-
-  return text
+/** Normalize a field name for comparison: lowercase, strip punctuation, collapse whitespace. */
+function normalizeFieldName(name: string): string {
+  return name
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, '')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !stopWords.has(w));
+    .replace(/[^a-z0-9\s]/g, '')  // strip colons, punctuation
+    .replace(/\s+/g, ' ')          // collapse whitespace
+    .trim();
 }
 
 /** Simple Levenshtein similarity (0-1 range). */
